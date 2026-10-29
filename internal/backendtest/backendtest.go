@@ -1,6 +1,6 @@
 // Package backendtest is the conformance suite every session.Backend implementation of the module runs
-// in its tests: put, get, pop, revoke, per-value TTLs, revocation markers, atomic Pop and revocation
-// racing a Put. Use it from tests only.
+// in its tests: put, get, pop, compare and swap, revoke, per-value TTLs, revocation markers, atomic Pop
+// and CompareAndSwap, and revocation racing a Put. Use it from tests only.
 package backendtest
 
 import (
@@ -16,7 +16,8 @@ import (
 
 const raceRounds = 50
 
-// Run exercises every session.Backend contract (put/get/pop/revoke, TTL, atomic pop under -race, revoke marker vs put).
+// Run exercises every session.Backend contract (put/get/pop/compare-and-swap/revoke, TTL, atomic pop and swap
+// under -race, revoke marker vs put).
 // newBackend returns a fresh, empty backend for one subtest and the function that moves that backend's
 // clock forward (miniredis: FastForward; the memory backend: its test clock).
 func Run(t *testing.T, newBackend func(t *testing.T) (session.Backend, func(duration time.Duration))) {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/dependency"
+	"github.com/govengers/auth/internal/failure"
 	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/session"
 )
@@ -57,13 +58,14 @@ type Provider struct {
 	endSessionEndpoint    string // "" when discovery has none
 	loginKey              string // session key of the login state
 	identityTokenKey      string // session key of the raw ID token (id_token_hint at logout)
+	reporter              failure.Reporter
 }
 
 // providerMetadata are the discovery fields go-oidc does not expose.
 type providerMetadata struct {
-	JWKSURI                  string   `json:"jwks_uri"`
-	EndSessionEndpoint       string   `json:"end_session_endpoint"`
-	TokenEndpointAuthMethods []string `json:"token_endpoint_auth_methods_supported"`
+	JWKSURI                            string   `json:"jwks_uri"`
+	EndSessionEndpoint                 string   `json:"end_session_endpoint"`
+	TokenEndpointAuthenticationMethods []string `json:"token_endpoint_auth_methods_supported"`
 }
 
 // New validates options and runs discovery (network I/O with ctx; fails fast). It reads
@@ -89,6 +91,7 @@ func New(ctx context.Context, options *Options) (*Provider, error) {
 		endSessionEndpoint:  metadata.EndSessionEndpoint,
 		loginKey:            resolved.Name + ".login",
 		identityTokenKey:    resolved.Name + ".id_token",
+		reporter:            failure.Reporter{Provider: resolved.Name, Observer: resolved.Observer, ErrorURL: resolved.ErrorURL},
 	}, nil
 }
 
@@ -150,7 +153,7 @@ func insecureEndpoint(endpoint oauth2.Endpoint, metadata providerMetadata) strin
 
 func newOAuth2Configuration(options Options, endpoint oauth2.Endpoint, metadata providerMetadata) *oauth2.Config {
 	// a fixed style instead of oauth2's auto-detection, which repeats every failed exchange in the other style
-	endpoint.AuthStyle = authStyle(metadata.TokenEndpointAuthMethods)
+	endpoint.AuthStyle = authenticationStyle(metadata.TokenEndpointAuthenticationMethods)
 	return &oauth2.Config{
 		ClientID:     options.ClientID,
 		ClientSecret: options.ClientSecret,
@@ -160,9 +163,9 @@ func newOAuth2Configuration(options Options, endpoint oauth2.Endpoint, metadata 
 	}
 }
 
-// authStyle picks HTTP Basic (the OpenID Connect default when the metadata lists nothing) unless the
-// token endpoint only supports client_secret_post.
-func authStyle(methods []string) oauth2.AuthStyle {
+// authenticationStyle picks HTTP Basic (the OpenID Connect default when the metadata lists nothing)
+// unless the token endpoint only supports client_secret_post.
+func authenticationStyle(methods []string) oauth2.AuthStyle {
 	if !slices.Contains(methods, "client_secret_basic") && slices.Contains(methods, "client_secret_post") {
 		return oauth2.AuthStyleInParams
 	}

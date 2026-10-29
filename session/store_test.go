@@ -26,31 +26,31 @@ func TestNewStoreValidation(t *testing.T) {
 		return options
 	}
 	testCases := []struct {
-		name    string
-		options *StoreOptions
-		wantErr string
+		name      string
+		options   *StoreOptions
+		wantError string
 	}{
-		{name: "nil options", options: nil, wantErr: "Backend is required"},
-		{name: "no backend", options: valid(func(options *StoreOptions) { options.Backend = nil }), wantErr: "Backend is required"},
-		{name: "no key", options: valid(func(options *StoreOptions) { options.EncryptionKey = nil }), wantErr: "EncryptionKey has 0 bytes"},
-		{name: "short key", options: valid(func(options *StoreOptions) { options.EncryptionKey = options.EncryptionKey[:31] }), wantErr: "EncryptionKey has 31 bytes"},
-		{name: "long key", options: valid(func(options *StoreOptions) { options.EncryptionKey = append(options.EncryptionKey, 'x') }), wantErr: "EncryptionKey has 33 bytes"},
-		{name: "max age below a second", options: valid(func(options *StoreOptions) { options.MaxAge = 500 * time.Millisecond }), wantErr: "below one second"},
-		{name: "negative max age", options: valid(func(options *StoreOptions) { options.MaxAge = -time.Hour }), wantErr: "below one second"},
-		{name: "unknown same site", options: valid(func(options *StoreOptions) { options.SameSite = 9 }), wantErr: "SameSite 9 is unknown"},
+		{name: "nil options", options: nil, wantError: "Backend is required"},
+		{name: "no backend", options: valid(func(options *StoreOptions) { options.Backend = nil }), wantError: "Backend is required"},
+		{name: "no key", options: valid(func(options *StoreOptions) { options.EncryptionKey = nil }), wantError: "EncryptionKey has 0 bytes"},
+		{name: "short key", options: valid(func(options *StoreOptions) { options.EncryptionKey = options.EncryptionKey[:31] }), wantError: "EncryptionKey has 31 bytes"},
+		{name: "long key", options: valid(func(options *StoreOptions) { options.EncryptionKey = append(options.EncryptionKey, 'x') }), wantError: "EncryptionKey has 33 bytes"},
+		{name: "maximum age below a second", options: valid(func(options *StoreOptions) { options.MaximumAge = 500 * time.Millisecond }), wantError: "below one second"},
+		{name: "negative maximum age", options: valid(func(options *StoreOptions) { options.MaximumAge = -time.Hour }), wantError: "below one second"},
+		{name: "unknown same site", options: valid(func(options *StoreOptions) { options.SameSite = 9 }), wantError: "SameSite 9 is unknown"},
 		{name: "same site none on an insecure cookie", options: valid(func(options *StoreOptions) {
 			options.SameSite = http.SameSiteNoneMode
 			options.InsecureCookie = true
-		}), wantErr: "SameSite None requires a Secure cookie"},
-		{name: "relative cookie path", options: valid(func(options *StoreOptions) { options.CookiePath = "app" }), wantErr: "CookiePath must start with"},
-		{name: "cookie path with semicolon", options: valid(func(options *StoreOptions) { options.CookiePath = "/a;b" }), wantErr: "in Cookie.Path"},
-		{name: "cookie name with space", options: valid(func(options *StoreOptions) { options.CookieName = "bad name" }), wantErr: "invalid Cookie.Name"},
-		{name: "invalid cookie domain", options: valid(func(options *StoreOptions) { options.CookieDomain = "bad domain!" }), wantErr: "invalid Cookie.Domain"},
+		}), wantError: "SameSite None requires a Secure cookie"},
+		{name: "relative cookie path", options: valid(func(options *StoreOptions) { options.CookiePath = "app" }), wantError: "CookiePath must start with"},
+		{name: "cookie path with semicolon", options: valid(func(options *StoreOptions) { options.CookiePath = "/a;b" }), wantError: "in Cookie.Path"},
+		{name: "cookie name with space", options: valid(func(options *StoreOptions) { options.CookieName = "bad name" }), wantError: "invalid Cookie.Name"},
+		{name: "invalid cookie domain", options: valid(func(options *StoreOptions) { options.CookieDomain = "bad domain!" }), wantError: "invalid Cookie.Domain"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			store, err := NewStore(testCase.options)
-			require.ErrorContains(t, err, testCase.wantErr)
+			require.ErrorContains(t, err, testCase.wantError)
 			require.Nil(t, store)
 		})
 	}
@@ -69,7 +69,7 @@ func TestNewStoreDefaultsOnACopy(t *testing.T) {
 	require.Equal(t, "auth_session", store.options.CookieName)
 	require.Equal(t, "/", store.options.CookiePath)
 	require.Equal(t, http.SameSiteLaxMode, store.options.SameSite)
-	require.Equal(t, 24*time.Hour, store.MaxAge())
+	require.Equal(t, 24*time.Hour, store.MaximumAge())
 
 	current, request := startSession(t, store)
 	require.NoError(t, current.Put(t.Context(), "app.key", []byte("value"), time.Hour))
@@ -94,7 +94,7 @@ func TestStartSetsTheCookie(t *testing.T) {
 		},
 		{
 			name:    "configured",
-			options: StoreOptions{CookieName: "app", CookieDomain: "example.com", CookiePath: "/app", SameSite: http.SameSiteStrictMode, InsecureCookie: true, MaxAge: time.Hour},
+			options: StoreOptions{CookieName: "app", CookieDomain: "example.com", CookiePath: "/app", SameSite: http.SameSiteStrictMode, InsecureCookie: true, MaximumAge: time.Hour},
 			want:    "app=<value>; Path=/app; Domain=example.com; Max-Age=3600; HttpOnly; SameSite=Strict",
 		},
 		{
@@ -219,18 +219,18 @@ func TestOpen(t *testing.T) {
 	store := newTestStore(t, newTestClock())
 	validValue := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	testCases := []struct {
-		name    string
-		cookie  string // Cookie request header
-		wantErr bool
+		name      string
+		cookie    string // Cookie request header
+		wantError bool
 	}{
 		{name: "valid cookie", cookie: "auth_session=" + validValue},
-		{name: "no cookie", wantErr: true},
-		{name: "other cookie name", cookie: "other=" + validValue, wantErr: true},
-		{name: "empty value", cookie: "auth_session=", wantErr: true},
-		{name: "not base64url", cookie: "auth_session=" + strings.Repeat("*", 43), wantErr: true},
-		{name: "padded", cookie: "auth_session=" + validValue + "=", wantErr: true},
-		{name: "too short", cookie: "auth_session=" + validValue[:42], wantErr: true},
-		{name: "too long", cookie: "auth_session=" + validValue + "AAAA", wantErr: true},
+		{name: "no cookie", wantError: true},
+		{name: "other cookie name", cookie: "other=" + validValue, wantError: true},
+		{name: "empty value", cookie: "auth_session=", wantError: true},
+		{name: "not base64url", cookie: "auth_session=" + strings.Repeat("*", 43), wantError: true},
+		{name: "padded", cookie: "auth_session=" + validValue + "=", wantError: true},
+		{name: "too short", cookie: "auth_session=" + validValue[:42], wantError: true},
+		{name: "too long", cookie: "auth_session=" + validValue + "AAAA", wantError: true},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -241,7 +241,7 @@ func TestOpen(t *testing.T) {
 
 			current, err := store.Open(request)
 
-			if testCase.wantErr {
+			if testCase.wantError {
 				require.ErrorIs(t, err, auth.ErrUnauthenticated)
 				return
 			}

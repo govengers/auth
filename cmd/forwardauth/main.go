@@ -76,7 +76,7 @@ type Configuration struct {
 	SessionCookieDomain           string
 	SessionInsecureCookie         bool
 	SessionSameSite               string
-	SessionMaxAgeSeconds          int
+	SessionMaximumAgeSeconds      int
 	SessionRefreshIntervalSeconds int
 	SessionRedisEnabled           bool
 	SessionRedisAddress           string
@@ -282,7 +282,7 @@ func newSessions(ctx context.Context, configuration *Configuration, dependencies
 		CookieDomain:   configuration.SessionCookieDomain,
 		SameSite:       sameSite,
 		InsecureCookie: configuration.SessionInsecureCookie,
-		MaxAge:         seconds(configuration.SessionMaxAgeSeconds),
+		MaximumAge:     seconds(configuration.SessionMaximumAgeSeconds),
 	})
 	if err != nil {
 		return nil, errors.Join(err, created.closeRedis())
@@ -523,7 +523,7 @@ func sessionValues(configuration *Configuration) []config.Value {
 		config.String("SESSION_COOKIE_DOMAIN").Default("").Into(&configuration.SessionCookieDomain),
 		config.Bool("SESSION_INSECURE_COOKIE").Default(false).Into(&configuration.SessionInsecureCookie),
 		config.String("SESSION_SAME_SITE").NotEmpty().Default("lax").Into(&configuration.SessionSameSite),
-		config.Int("SESSION_MAX_AGE_SECONDS").Default(86400).Into(&configuration.SessionMaxAgeSeconds),
+		config.Int("SESSION_MAXIMUM_AGE_SECONDS").Default(86400).Into(&configuration.SessionMaximumAgeSeconds),
 		config.Int("SESSION_REFRESH_INTERVAL_SECONDS").Default(60).Into(&configuration.SessionRefreshIntervalSeconds),
 		config.Bool("SESSION_REDIS_ENABLED").Default(false).Into(&configuration.SessionRedisEnabled),
 		config.String("SESSION_REDIS_ADDRESS").Default("").Into(&configuration.SessionRedisAddress),
@@ -636,7 +636,7 @@ func validateSession(configuration *Configuration) error {
 		problems = append(problems, errors.New("SESSION_SAME_SITE=none requires a secure cookie: unset SESSION_INSECURE_COOKIE"))
 	}
 	problems = append(problems,
-		minimumProblem("SESSION_MAX_AGE_SECONDS", configuration.SessionMaxAgeSeconds, 1),
+		minimumProblem("SESSION_MAXIMUM_AGE_SECONDS", configuration.SessionMaximumAgeSeconds, 1),
 		minimumProblem("SESSION_REFRESH_INTERVAL_SECONDS", configuration.SessionRefreshIntervalSeconds, 1),
 		minimumProblem("SESSION_REDIS_DATABASE", configuration.SessionRedisDatabase, 0),
 	)

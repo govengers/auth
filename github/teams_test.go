@@ -11,25 +11,25 @@ import (
 
 func TestParseTeam(t *testing.T) {
 	testCases := []struct {
-		raw     string
-		want    string
-		wantErr bool
+		raw       string
+		want      string
+		wantError bool
 	}{
 		{raw: "acme/developers", want: "acme/developers"},
 		{raw: "Acme/Dev-Ops_2", want: "acme/dev-ops_2"},
-		{raw: "acme", wantErr: true},
-		{raw: "acme/", wantErr: true},
-		{raw: "/developers", wantErr: true},
-		{raw: "acme/developers/x", wantErr: true},
-		{raw: "acme /developers", wantErr: true},
-		{raw: "acme/devel\nopers", wantErr: true},
-		{raw: "acme/devel\x00opers", wantErr: true},
-		{raw: "", wantErr: true},
+		{raw: "acme", wantError: true},
+		{raw: "acme/", wantError: true},
+		{raw: "/developers", wantError: true},
+		{raw: "acme/developers/x", wantError: true},
+		{raw: "acme /developers", wantError: true},
+		{raw: "acme/devel\nopers", wantError: true},
+		{raw: "acme/devel\x00opers", wantError: true},
+		{raw: "", wantError: true},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.raw, func(t *testing.T) {
 			got, err := parseTeam(testCase.raw)
-			if testCase.wantErr {
+			if testCase.wantError {
 				require.Error(t, err)
 				return
 			}

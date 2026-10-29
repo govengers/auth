@@ -191,6 +191,54 @@ func TestFrontChannelLogout(t *testing.T) {
 	}
 }
 
+func TestLogoutRefusesACrossSiteRequestButNotTheIdPsFrontChannelCall(t *testing.T) {
+	crossSite := http.Header{"Sec-Fetch-Site": {"cross-site"}}
+	testCases := []struct {
+		name       string
+		target     string
+		header     http.Header
+		wantStatus int
+	}{
+		{name: "RP-initiated", target: "/logout", header: crossSite, wantStatus: http.StatusForbidden},
+		{name: "RP-initiated, iframe detection disabled", target: "/logout", header: http.Header{"Sec-Fetch-Site": {"cross-site"}, "Sec-Fetch-Dest": {"iframe"}}, wantStatus: http.StatusForbidden},
+		{name: "front-channel route", target: "/frontchannel-logout?iss={issuer}&sid=idp-session-1", header: crossSite, wantStatus: http.StatusOK},
+		{name: "front-channel on /logout", target: "/logout?iss={issuer}&sid=idp-session-1", header: crossSite, wantStatus: http.StatusOK},
+		{name: "same-origin", target: "/logout", header: http.Header{"Sec-Fetch-Site": {"same-origin"}}, wantStatus: http.StatusFound},
+		{name: "same-site", target: "/logout", header: http.Header{"Sec-Fetch-Site": {"same-site"}}, wantStatus: http.StatusFound},
+		{name: "user-initiated", target: "/logout", header: http.Header{"Sec-Fetch-Site": {"none"}}, wantStatus: http.StatusFound},
+		{name: "no header", target: "/logout", wantStatus: http.StatusFound},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			issuer := startIssuer(t, nil)
+			ended := &logouts{}
+			application := newApplication(t, issuer, func(options *oidc.Options) {
+				options.OnLogout = ended.hook
+				options.DisableIframeLogoutDetection = testCase.header.Get("Sec-Fetch-Dest") != ""
+			})
+			person := newBrowser(t)
+			require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
+			target := prefix + strings.ReplaceAll(testCase.target, "{issuer}", issuer.IssuerURL())
+
+			response := person.get(application.handler, target, testCase.header)
+
+			require.Equal(t, testCase.wantStatus, response.Code, response.Body.String())
+			if testCase.wantStatus != http.StatusForbidden {
+				require.Equal(t, http.StatusUnauthorized, person.me(application))
+				return
+			}
+			require.JSONEq(t, `{"code":"forbidden","message":"access denied"}`, response.Body.String())
+			require.Empty(t, response.Result().Cookies())
+			require.Equal(t, http.StatusOK, person.me(application), "the session is untouched")
+			require.Empty(t, ended.subjects())
+			outcome := application.outcomes.last(t)
+			require.Equal(t, auth.ActionLogout, outcome.Action)
+			require.Equal(t, auth.ResultDenied, outcome.Result)
+			require.ErrorIs(t, outcome.Err, auth.ErrForbidden)
+		})
+	}
+}
+
 func TestLogoutAnswers500WhenTheSessionCannotBeEnded(t *testing.T) {
 	testCases := []struct {
 		name       string

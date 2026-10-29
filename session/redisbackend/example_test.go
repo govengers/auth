@@ -39,7 +39,7 @@ func ExampleNew() {
 		fmt.Println(err)
 		return
 	}
-	fmt.Println("session lifetime:", store.MaxAge())
+	fmt.Println("session lifetime:", store.MaximumAge())
 
 	// The backend itself stores opaque values per (session ID, key) and refuses Puts after Revoke.
 	ctx := context.Background()

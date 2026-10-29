@@ -223,6 +223,30 @@ func TestLogout(t *testing.T) {
 	require.Nil(t, fixture.outcomes.last(t).Identity)
 }
 
+func TestLogoutRefusesACrossSiteRequest(t *testing.T) {
+	var loggedOut []*auth.Identity
+	fixture := newFixture(t, Options{OnLogout: func(_ context.Context, identity *auth.Identity) { loggedOut = append(loggedOut, identity) }})
+	fixture.createUser(t, "ada", "")
+	browser := fixture.newClient(t)
+	require.Equal(t, http.StatusOK, browser.login("ada").Code)
+	fixture.outcomes.take()
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/auth/password/logout", http.NoBody)
+	request.Header.Set("Sec-Fetch-Site", "cross-site")
+
+	recorder := browser.send(request)
+
+	require.Equal(t, http.StatusForbidden, recorder.Code)
+	require.Equal(t, "forbidden", decodeBody[auth.ErrorResponse](t, recorder).Code)
+	require.Empty(t, recorder.Header().Values("Set-Cookie"))
+	_, err := fixture.sessionIdentity(t, browser)
+	require.NoError(t, err, "the session is untouched")
+	require.Empty(t, loggedOut)
+	outcome := fixture.outcomes.last(t)
+	require.Equal(t, auth.ActionLogout, outcome.Action)
+	require.Equal(t, auth.ResultDenied, outcome.Result)
+	require.ErrorIs(t, outcome.Err, auth.ErrForbidden)
+}
+
 func TestRegistration(t *testing.T) {
 	testCases := []struct {
 		name       string

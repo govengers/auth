@@ -15,7 +15,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
-	"github.com/govengers/auth/internal/dependency"
+	"github.com/govengers/auth/internal/tokenendpoint"
 	"github.com/govengers/auth/session"
 )
 
@@ -93,33 +93,13 @@ func (a *apiTransport) RoundTrip(request *http.Request) (*http.Response, error) 
 // code (an error answer below 500) is a refusal (login_failed); a GitHub outage is a plain error.
 func (p *Provider) exchange(ctx context.Context, code, verifier string) (*oauth2.Token, error) {
 	token, err := p.oauth.Exchange(context.WithValue(ctx, oauth2.HTTPClient, p.options.HTTPClient), code, oauth2.VerifierOption(verifier))
-	var answer *oauth2.RetrieveError
-	if errors.As(err, &answer) && answer.Response != nil {
-		return nil, exchangeFailure(answer)
-	}
-	if err != nil {
-		return nil, dependency.Error("github: exchange code", err)
+	switch {
+	case tokenendpoint.Refused(err):
+		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Code: "login_failed", Reason: "token exchange", Err: tokenendpoint.Error("github: exchange code", err)}
+	case err != nil:
+		return nil, tokenendpoint.Error("github: exchange code", err)
 	}
 	return token, nil
-}
-
-// exchangeFailure describes GitHub's error answer by its status and OAuth error code only: the
-// description, URI and body are GitHub's free text and stay out of errors and outcomes (LOG-009).
-func exchangeFailure(answer *oauth2.RetrieveError) error {
-	message := "github: exchange code: GitHub answered " + strconv.Itoa(answer.Response.StatusCode)
-	if isOAuthErrorCode(answer.ErrorCode) {
-		message += " " + answer.ErrorCode
-	}
-	if answer.Response.StatusCode >= http.StatusInternalServerError {
-		return errors.New(message)
-	}
-	return &auth.Error{Kind: auth.ErrUnauthenticated, Code: "login_failed", Reason: "token exchange", Err: errors.New(message)}
-}
-
-// isOAuthErrorCode reports whether code looks like an OAuth error code (a-z and "_", at most 64 bytes),
-// like every code GitHub and RFC 6749 define.
-func isOAuthErrorCode(code string) bool {
-	return code != "" && len(code) <= 64 && !strings.ContainsFunc(code, func(r rune) bool { return (r < 'a' || r > 'z') && r != '_' })
 }
 
 // fetchUser reads the authenticated user.

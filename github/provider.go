@@ -13,6 +13,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/failure"
 	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/session"
 )
@@ -52,9 +53,10 @@ type Options struct {
 // Provider is the GitHub OAuth provider. AuthorizeURL, TokenURL and APIURL must use https, except on
 // loopback hosts (localhost, 127.0.0.0/8, ::1). It is safe for concurrent use.
 type Provider struct {
-	options Options // resolved copy: defaults applied, slices cloned, team lists lower-cased
-	oauth   *oauth2.Config
-	api     *url.URL // parsed APIURL: the only scheme and host the session's token is sent to
+	options  Options // resolved copy: defaults applied, slices cloned, team lists lower-cased
+	oauth    *oauth2.Config
+	api      *url.URL // parsed APIURL: the only scheme and host the session's token is sent to
+	reporter failure.Reporter
 }
 
 // New validates options and returns a Provider working on a copy of them: the caller's struct and
@@ -71,7 +73,8 @@ func New(options *Options) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("github: APIURL: %w", err)
 	}
-	return &Provider{options: resolved, oauth: oauthConfig(resolved), api: api}, nil
+	reporter := failure.Reporter{Provider: providerName, Observer: resolved.Observer, ErrorURL: resolved.ErrorURL}
+	return &Provider{options: resolved, oauth: oauthConfig(resolved), api: api, reporter: reporter}, nil
 }
 
 // Name returns "github", the Identity.Provider of every identity this provider creates.

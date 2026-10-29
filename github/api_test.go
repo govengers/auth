@@ -186,22 +186,22 @@ func TestExchangeKeepsGitHubTextOutOfErrors(t *testing.T) {
 		{
 			name: "error answer with description", status: http.StatusOK, contentType: "application/json",
 			body:       `{"error":"bad_verification_code","error_description":"` + marker + `","error_uri":"https://docs.example.com/` + marker + `"}`,
-			wantStatus: http.StatusUnauthorized, wantText: `GitHub answered 200 bad_verification_code`,
+			wantStatus: http.StatusUnauthorized, wantText: "token endpoint answered HTTP 200 bad_verification_code",
 		},
 		{
 			name: "malformed error code", status: http.StatusBadRequest, contentType: "application/json",
 			body:       `{"error":"` + marker + `"}`,
-			wantStatus: http.StatusUnauthorized, wantText: "GitHub answered 400",
+			wantStatus: http.StatusUnauthorized, wantText: "token endpoint answered HTTP 400",
 		},
 		{
 			name: "refusal with a non-JSON body", status: http.StatusUnauthorized, contentType: "text/html",
 			body:       "<p>" + marker + "</p>",
-			wantStatus: http.StatusUnauthorized, wantText: "GitHub answered 401",
+			wantStatus: http.StatusUnauthorized, wantText: "token endpoint answered HTTP 401",
 		},
 		{
 			name: "outage with a body", status: http.StatusBadGateway, contentType: "text/html",
 			body:       "<p>" + marker + "</p>",
-			wantStatus: http.StatusInternalServerError, wantText: "GitHub answered 502",
+			wantStatus: http.StatusInternalServerError, wantText: "token endpoint answered HTTP 502",
 		},
 	}
 	for _, testCase := range testCases {

@@ -6,6 +6,7 @@ import (
 	"net/url"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/fetchmetadata"
 	"github.com/govengers/auth/internal/redirect"
 )
 
@@ -14,22 +15,27 @@ const loggedOutPage = "<!doctype html><html><head><title>Logged out</title></hea
 // handleLogout is RP-initiated logout: end the session, then send the browser to the IdP's
 // end_session_endpoint with the ID token as hint, or to PostLogoutURL. A call that looks like the IdP's
 // front-channel iframe (iss or sid present, or Sec-Fetch-Dest: iframe unless disabled) is handled as
-// front-channel logout, for IdPs that accept only one logout URI per client.
+// front-channel logout, for IdPs that accept only one logout URI per client. Any other cross-site request
+// (logout CSRF) is refused before the session is touched.
 func (p *Provider) handleLogout(writer http.ResponseWriter, request *http.Request) {
 	if p.isFrontChannelLogout(request) {
 		p.handleFrontChannelLogout(writer, request)
+		return
+	}
+	if err := fetchmetadata.RefuseCrossSite(request); err != nil {
+		p.reporter.Refuse(request.Context(), writer, auth.Outcome{Action: auth.ActionLogout, Err: err})
 		return
 	}
 	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the hint or OnLogout
 	identity := p.sessionIdentity(ctx, request)
 	rawIdentityToken := p.ownIdentityToken(ctx, request, identity)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
-		p.refuse(writer, request, auth.Outcome{Action: auth.ActionLogout, Err: err, Identity: identity})
+		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: err, Identity: identity})
 		return
 	}
 	p.runOnLogout(ctx, identity)
 	redirect.To(writer, p.logoutLocation(rawIdentityToken))
-	p.report(ctx, auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity})
+	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity})
 }
 
 // handleFrontChannelLogout is OpenID Connect Front-Channel Logout 1.0: the IdP loads it in an iframe.
@@ -48,7 +54,7 @@ func (p *Provider) handleFrontChannelLogout(writer http.ResponseWriter, request 
 	}
 	if identity != nil && !p.owns(identity) {
 		writeLoggedOutPage(writer) // another provider's session: not ours to end
-		p.report(ctx, auth.Outcome{Action: auth.ActionFrontChannelLogout, Result: auth.ResultSuccess})
+		p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionFrontChannelLogout, Result: auth.ResultSuccess})
 		return
 	}
 	// without a readable identity this only expires the cookie (and drops what is left server-side)
@@ -58,7 +64,7 @@ func (p *Provider) handleFrontChannelLogout(writer http.ResponseWriter, request 
 	}
 	p.runOnLogout(ctx, identity)
 	writeLoggedOutPage(writer)
-	p.report(ctx, auth.Outcome{Action: auth.ActionFrontChannelLogout, Result: auth.ResultSuccess, Identity: identity})
+	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionFrontChannelLogout, Result: auth.ResultSuccess, Identity: identity})
 }
 
 func (p *Provider) isFrontChannelLogout(request *http.Request) bool {
@@ -106,7 +112,7 @@ func frontChannelInvalid(reason string) error {
 func (p *Provider) refuseFrontChannel(writer http.ResponseWriter, request *http.Request, err error) {
 	status, response := auth.ResponseFor(err)
 	http.Error(writer, response.Message, status)
-	p.reportFailure(request.Context(), auth.Outcome{Action: auth.ActionFrontChannelLogout, Err: err})
+	p.reporter.ReportFailure(request.Context(), auth.Outcome{Action: auth.ActionFrontChannelLogout, Err: err})
 }
 
 // sessionIdentity returns the identity of the request's session, or nil. A session that cannot be read

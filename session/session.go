@@ -71,7 +71,7 @@ func (s Session) Pop(ctx context.Context, key string) ([]byte, bool, error) {
 
 // SaveIdentity stores identity under key "identity". The first save of a session sets authenticatedAt to
 // the time Start issued it; later saves (refresh, TOTP enable, impersonation) keep it. refreshedAt=now.
-// TTL = authenticatedAt + MaxAge - now. Only a session returned by Start may have a first save: on a
+// TTL = authenticatedAt + MaximumAge - now. Only a session returned by Start may have a first save: on a
 // session opened from a cookie without an identity (never authenticated, expired, revoked) it refuses with
 // ErrUnauthenticated, so neither a planted cookie, a save racing the expiry nor a retained Start handle
 // gets a fresh lifetime.
@@ -86,7 +86,7 @@ func (s Session) SaveIdentity(ctx context.Context, identity *auth.Identity) erro
 	return s.saveEnvelope(ctx, identityEnvelope{Identity: identity, AuthenticatedAt: authenticatedAt, RefreshedAt: s.store.now()})
 }
 
-// Identity returns the stored identity; none, expired (now > authenticatedAt + MaxAge) or revoked: *auth.Error ErrUnauthenticated.
+// Identity returns the stored identity; none, expired (now > authenticatedAt + MaximumAge) or revoked: *auth.Error ErrUnauthenticated.
 func (s Session) Identity(ctx context.Context) (*auth.Identity, error) {
 	envelope, err := s.envelope(ctx)
 	if err != nil {
@@ -174,5 +174,5 @@ func (s Session) encodeEnvelope(envelope identityEnvelope) ([]byte, time.Duratio
 }
 
 func (s Session) expiresAt(envelope identityEnvelope) time.Time {
-	return envelope.AuthenticatedAt.Add(s.store.options.MaxAge)
+	return envelope.AuthenticatedAt.Add(s.store.options.MaximumAge)
 }
