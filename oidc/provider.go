@@ -61,12 +61,14 @@ type Provider struct {
 
 // providerMetadata are the discovery fields go-oidc does not expose.
 type providerMetadata struct {
+	JWKSURI                  string   `json:"jwks_uri"`
 	EndSessionEndpoint       string   `json:"end_session_endpoint"`
 	TokenEndpointAuthMethods []string `json:"token_endpoint_auth_methods_supported"`
 }
 
 // New validates options and runs discovery (network I/O with ctx; fails fast). It reads
-// end_session_endpoint and the token endpoint's client authentication from the provider metadata. The
+// end_session_endpoint and the token endpoint's client authentication from the provider metadata and
+// refuses discovered endpoints that are not https (or http on a loopback host), like the Issuer. The
 // JWKS is fetched later, on the first callback, with HTTPClient. New does not modify options, and
 // changing them afterwards has no effect.
 func New(ctx context.Context, options *Options) (*Provider, error) {
@@ -122,10 +124,28 @@ func discover(ctx context.Context, options Options) (*gooidc.Provider, providerM
 	if err := discovered.Claims(&metadata); err != nil {
 		return nil, providerMetadata{}, dependency.Error("read provider metadata", err)
 	}
-	if metadata.EndSessionEndpoint != "" && !redirect.IsAbsoluteHTTPURL(metadata.EndSessionEndpoint) {
-		return nil, providerMetadata{}, errors.New("discovered end_session_endpoint is not an absolute http(s) URL")
+	if name := insecureEndpoint(discovered.Endpoint(), metadata); name != "" {
+		return nil, providerMetadata{}, fmt.Errorf("discovered %s must be an https URL, or http on a loopback host", name)
 	}
 	return discovered, metadata, nil
+}
+
+// insecureEndpoint names the first discovered endpoint that breaks the issuer's rule (https, or http on a
+// loopback host; design D16), or returns "". The document comes from the issuer, but an IdP behind a TLS
+// proxy it does not know about advertises http endpoints: the token endpoint would get the client secret
+// and the code in clear text, the end-session endpoint the ID token, and the JWKS decides which tokens verify.
+func insecureEndpoint(endpoint oauth2.Endpoint, metadata providerMetadata) string {
+	switch {
+	case !redirect.IsSecureURL(endpoint.AuthURL):
+		return "authorization_endpoint"
+	case !redirect.IsSecureURL(endpoint.TokenURL):
+		return "token_endpoint"
+	case !redirect.IsSecureURL(metadata.JWKSURI):
+		return "jwks_uri"
+	case metadata.EndSessionEndpoint != "" && !redirect.IsSecureURL(metadata.EndSessionEndpoint):
+		return "end_session_endpoint"
+	}
+	return ""
 }
 
 func newOAuth2Config(options Options, endpoint oauth2.Endpoint, metadata providerMetadata) *oauth2.Config {
