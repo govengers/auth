@@ -31,6 +31,8 @@ import (
 	"github.com/govengers/auth/internal/forwardauth"
 	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/jwt"
+	"github.com/govengers/auth/oidc"
+	"github.com/govengers/auth/oidc/keycloak"
 	"github.com/govengers/auth/prometheusadapter"
 	"github.com/govengers/auth/session"
 	"github.com/govengers/auth/session/redisbackend"
@@ -323,11 +325,72 @@ type selectedProvider struct {
 }
 
 // newProvider builds the provider PROVIDER names; its routes live under PATH_PREFIX.
-func newProvider(_ context.Context, configuration *Configuration, store *session.Store, observer auth.Observer) (selectedProvider, error) {
+func newProvider(ctx context.Context, configuration *Configuration, store *session.Store, observer auth.Observer) (selectedProvider, error) {
 	if configuration.Provider == providerGitHub {
 		return newGitHubProvider(configuration, store, observer)
 	}
-	return selectedProvider{}, errors.New("forwardauth: the oidc provider is wired once its package exists")
+	return newOIDCProvider(ctx, configuration, store, observer)
+}
+
+// newOIDCProvider runs the issuer's discovery, so an unreachable issuer fails the boot. With
+// KEYCLOAK_ENABLED, the Keycloak Admin API enriches (and may refuse) every login.
+func newOIDCProvider(ctx context.Context, configuration *Configuration, store *session.Store, observer auth.Observer) (selectedProvider, error) {
+	onLogin, err := newKeycloakHook(configuration)
+	if err != nil {
+		return selectedProvider{}, err
+	}
+	provider, err := oidc.New(ctx, &oidc.Options{
+		Name:                         configuration.OIDCName,
+		Issuer:                       configuration.OIDCIssuer,
+		ClientID:                     configuration.OIDCClientID,
+		ClientSecret:                 configuration.OIDCClientSecret,
+		Scopes:                       configuration.OIDCScopes,
+		ExternalURL:                  configuration.ExternalURL,
+		PathPrefix:                   configuration.PathPrefix + "/oidc/" + configuration.OIDCName,
+		PostLogoutURL:                configuration.OIDCPostLogoutURL,
+		ClaimMapper:                  claimMapper(configuration.OIDCClaimMapper),
+		AllowedEmailDomains:          configuration.OIDCAllowedEmailDomains,
+		DisableIframeLogoutDetection: configuration.OIDCDisableIframeLogoutDetection,
+		Sessions:                     store,
+		OnLogin:                      onLogin,
+		Observer:                     observer,
+	})
+	if err != nil {
+		return selectedProvider{}, err
+	}
+	return selectedProvider{routes: provider.Routes(), loginURL: provider.LoginURL()}, nil
+}
+
+func claimMapper(name string) oidc.ClaimMapper {
+	if name == claimMapperGoogle {
+		return oidc.GoogleClaimMapper
+	}
+	return oidc.DefaultClaimMapper
+}
+
+// newKeycloakHook returns nil when KEYCLOAK_ENABLED is false: logins then keep the token's roles and groups.
+func newKeycloakHook(configuration *Configuration) (auth.Hook, error) {
+	if !configuration.KeycloakEnabled {
+		return nil, nil // Keycloak disabled is not an error
+	}
+	client, err := keycloak.New(&keycloak.Options{
+		URL:                 configuration.KeycloakURL,
+		Realm:               configuration.KeycloakRealm,
+		AuthenticationRealm: configuration.KeycloakAuthenticationRealm,
+		GrantType:           keycloak.GrantType(configuration.KeycloakGrantType),
+		ClientID:            configuration.KeycloakClientID,
+		ClientSecret:        configuration.KeycloakClientSecret,
+		Username:            configuration.KeycloakUsername,
+		Password:            configuration.KeycloakPassword,
+		ClientRolesClientID: configuration.KeycloakClientRolesClientID,
+		RequiredRealmRoles:  configuration.KeycloakRequiredRealmRoles,
+		RequiredClientRoles: configuration.KeycloakRequiredClientRoles,
+		RequiredGroups:      configuration.KeycloakRequiredGroups,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return client.Enrich, nil
 }
 
 // newGitHubProvider builds the GitHub provider; it also refreshes the teams of a session every

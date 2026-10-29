@@ -8,11 +8,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// oidcEnvironment is a complete OIDC configuration except the issuer it talks to.
+// oidcEnvironment is a complete OIDC configuration against issuer, except EXTERNAL_URL, which start sets.
 func oidcEnvironment(issuer string) map[string]string {
 	return map[string]string{
 		"PROVIDER":                "oidc",
-		"EXTERNAL_URL":            "http://127.0.0.1:8080",
 		"SESSION_ENCRYPTION_KEY":  testEncryptionKey,
 		"SESSION_INSECURE_COOKIE": "true",
 		"SHUTDOWN_DELAY_SECONDS":  "0",
@@ -44,14 +43,14 @@ func TestBootFailsListingEveryMissingOrInvalidVariable(t *testing.T) {
 		{
 			name: "permissions for a key that does not exist",
 			environment: merged(oidcEnvironment("http://127.0.0.1:1"), map[string]string{
-				"API_KEYS": "ci:ci-secret-0123456789", "API_KEY_PERMISSIONS": "deploy=builds:write",
+				"EXTERNAL_URL": "http://127.0.0.1:8080", "API_KEYS": "ci:ci-secret-0123456789", "API_KEY_PERMISSIONS": "deploy=builds:write",
 			}),
 			problems: []string{`API_KEY_PERMISSIONS names \"deploy\", which is no key in API_KEYS`},
 		},
 		{
 			name: "unparsable permission",
 			environment: merged(oidcEnvironment("http://127.0.0.1:1"), map[string]string{
-				"API_KEYS": "ci:ci-secret-0123456789", "API_KEY_PERMISSIONS": "ci=Builds:write",
+				"EXTERNAL_URL": "http://127.0.0.1:8080", "API_KEYS": "ci:ci-secret-0123456789", "API_KEY_PERMISSIONS": "ci=Builds:write",
 			}),
 			problems: []string{`API_KEY_PERMISSIONS entry for \"ci\"`},
 		},
