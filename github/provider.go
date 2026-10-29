@@ -31,7 +31,7 @@ const (
 // Options configure a Provider.
 type Options struct {
 	ClientID, ClientSecret string          // required: the GitHub OAuth app
-	Scopes                 []string        // default ["read:org"]
+	Scopes                 []string        // default ["read:org"]; must include read:org or a scope that also lists the user's teams (write:org, admin:org, user, repo)
 	AuthorizeURL           string          // default "https://github.com/login/oauth/authorize"
 	TokenURL               string          // default "https://github.com/login/oauth/access_token"
 	APIURL                 string          // default "https://api.github.com"; GHE e.g. https://ghe.example.com/api/v3
@@ -98,7 +98,19 @@ func resolveOptions(options Options) (Options, error) {
 	if err != nil {
 		return Options{}, err
 	}
+	if !slices.ContainsFunc(options.Scopes, listsTeams) {
+		return Options{}, errors.New("the team lookup needs Scopes to include read:org, write:org, admin:org, user or repo")
+	}
 	return withParsedTeams(options)
+}
+
+// listsTeams reports whether scope lets GET /user/teams answer.
+func listsTeams(scope string) bool {
+	switch scope {
+	case "read:org", "write:org", "admin:org", "user", "repo":
+		return true
+	}
+	return false
 }
 
 func withDefaults(options Options) Options {

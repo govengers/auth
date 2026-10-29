@@ -59,6 +59,7 @@ func TestNewRefusesInvalidOptions(t *testing.T) {
 		{name: "protocol-relative error URL", change: func(options *Options) { options.ErrorURL = "//evil.example.com/error" }},
 		{name: "post logout URL with fragment", change: func(options *Options) { options.PostLogoutURL = "/goodbye#now" }},
 		{name: "error URL with fragment", change: func(options *Options) { options.ErrorURL = "https://app.example.com/#/error" }},
+		{name: "scopes that cannot list teams", change: func(options *Options) { options.Scopes = []string{"user:email"} }},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -145,6 +146,17 @@ func TestNewUsesCustomPathPrefixAndScopes(t *testing.T) {
 	require.Equal(t, "https://app.example.com/login/github/login", provider.LoginURL())
 	require.Equal(t, "https://app.example.com/login/github/callback", provider.oauth.RedirectURL)
 	require.Equal(t, []string{"read:org", "user:email"}, provider.oauth.Scopes)
+}
+
+func TestNewAcceptsEveryScopeThatListsTeams(t *testing.T) {
+	for _, scope := range []string{"read:org", "write:org", "admin:org", "user", "repo"} {
+		options := validOptions(t)
+		options.Scopes = []string{"user:email", scope}
+
+		_, err := New(options)
+
+		require.NoError(t, err, scope)
+	}
 }
 
 func TestNewLeavesCallerOptionsUntouched(t *testing.T) {
