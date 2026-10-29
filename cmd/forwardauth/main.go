@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"slices"
@@ -603,8 +604,10 @@ func validateConfiguration(configuration *Configuration) error {
 
 func validateServer(configuration *Configuration) error {
 	var problems []error
-	if _, err := redirect.ExternalURL(configuration.ExternalURL); err != nil {
+	if externalURL, err := redirect.ExternalURL(configuration.ExternalURL); err != nil {
 		problems = append(problems, fmt.Errorf("EXTERNAL_URL: %w", err))
+	} else if !isOrigin(externalURL) {
+		problems = append(problems, errors.New("EXTERNAL_URL must be an origin (scheme and host) without a path: the routes live at PATH_PREFIX from the root"))
 	}
 	if err := forwardauth.ValidatePathPrefix(configuration.PathPrefix); err != nil {
 		problems = append(problems, fmt.Errorf("PATH_PREFIX %w", err))
@@ -619,6 +622,14 @@ func validateServer(configuration *Configuration) error {
 		problems = append(problems, fmt.Errorf("PORT and METRICS_PORT must differ, both are %d", configuration.Port))
 	}
 	return errors.Join(problems...)
+}
+
+// isOrigin reports whether externalURL (a redirect.ExternalURL result) has no path. The binary mounts its
+// routes at PATH_PREFIX from the root and returns to EXTERNAL_URL + X-Forwarded-Uri, which already
+// carries any path of the application.
+func isOrigin(externalURL string) bool {
+	parsed, err := url.Parse(externalURL)
+	return err == nil && parsed.Path == ""
 }
 
 func validateSession(configuration *Configuration) error {

@@ -46,6 +46,11 @@ func TestValidateConfigurationAcceptsCompleteSetups(t *testing.T) {
 	}{
 		{name: "oidc", configuration: validOIDCConfiguration},
 		{name: "github", configuration: validGitHubConfiguration},
+		{name: "external URL with a trailing slash", configuration: func() *Configuration {
+			configuration := validOIDCConfiguration()
+			configuration.ExternalURL = "https://app.example.com/"
+			return configuration
+		}},
 		{name: "oidc with keycloak (client credentials), redis, jwt and api keys", configuration: func() *Configuration {
 			configuration := validOIDCConfiguration()
 			configuration.KeycloakEnabled = true
@@ -83,6 +88,8 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		{name: "unknown provider", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.Provider = "password" }, problems: []string{"PROVIDER"}},
 		{name: "relative external URL", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.ExternalURL = "app.example.com" }, problems: []string{"EXTERNAL_URL"}},
 		{name: "external URL with a query", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.ExternalURL = "https://app.example.com/?a=b" }, problems: []string{"EXTERNAL_URL"}},
+		{name: "external URL with a path", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.ExternalURL = "https://app.example.com/app/" }, problems: []string{"EXTERNAL_URL must be an origin (scheme and host) without a path"}},
+		{name: "external URL with an empty path segment", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.ExternalURL = "https://app.example.com//" }, problems: []string{"EXTERNAL_URL must be an origin"}},
 		{name: "path prefix without leading slash", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.PathPrefix = "auth" }, problems: []string{"PATH_PREFIX"}},
 		{name: "path prefix with trailing slash", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.PathPrefix = "/auth/" }, problems: []string{"PATH_PREFIX"}},
 		{name: "path prefix with a gin parameter", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.PathPrefix = "/auth/:tenant" }, problems: []string{"PATH_PREFIX"}},
