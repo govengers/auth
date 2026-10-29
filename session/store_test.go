@@ -172,7 +172,9 @@ func TestStartWithAnUnknownCookieWritesNothing(t *testing.T) {
 // An attacker chaining login starts (each one revokes the previous login state) must not evict live
 // sessions with markers: a marker lives no longer than the state it replaced and is never evicted, so the
 // attacker's own Put fails once the backend is full.
-func TestRevokedLoginStatesEvictNoSession(t *testing.T) {
+// A chain of login starts, each revoking the previous one's 10-minute state, fills a full memory backend
+// with markers: it must neither block new sessions nor evict a real session expiring later.
+func TestAFloodOfLoginStartsBlocksNoSession(t *testing.T) {
 	clock := newTestClock()
 	backend, err := NewMemoryBackend(&MemoryBackendOptions{MaximumSessions: 3})
 	require.NoError(t, err)
@@ -182,16 +184,16 @@ func TestRevokedLoginStatesEvictNoSession(t *testing.T) {
 	clock.advance(time.Hour)
 
 	request := newRequest(t)
-	var putError error
-	for range 3 {
+	for range 10 {
 		recorder := httptest.NewRecorder()
 		state, err := store.Start(t.Context(), recorder, request)
 		require.NoError(t, err)
-		putError = state.Put(t.Context(), "login.state", []byte("state"), 10*time.Minute)
+		require.NoError(t, state.Put(t.Context(), "login.state", []byte("state"), 10*time.Minute))
 		request = requestWithCookies(t, recorder)
 	}
 
-	require.Error(t, putError, "the backend is full of the attacker's markers")
+	state, _ := startSession(t, store)
+	require.NoError(t, state.Put(t.Context(), "login.state", []byte("state"), 10*time.Minute), "a real login start gets a session")
 	requireAuthenticated(t, store, victim)
 }
 
@@ -266,7 +268,7 @@ func TestEnd(t *testing.T) {
 	requireExpiredCookie(t, recorder)
 	require.Equal(t, []error{nil}, recording.revokeErrors, "revoked with a context the client cannot cancel")
 	require.Len(t, recording.revokeDeadlines, 1)
-	require.WithinDuration(t, time.Now().Add(revokeTimeout), recording.revokeDeadlines[0], revokeTimeout, "but with its own timeout")
+	require.WithinDuration(t, time.Now().Add(10*time.Second), recording.revokeDeadlines[0], time.Second, "but with its own 10 s timeout")
 	_, found, err := current.Get(t.Context(), "app.key")
 	require.NoError(t, err)
 	require.False(t, found)

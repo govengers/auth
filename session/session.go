@@ -16,6 +16,8 @@ const identityKey = "identity"
 // Values are AES-256-GCM sealed with a random 12-byte nonce and additional data "<sessionID>\x00<key>";
 // a value that does not decrypt (moved, tampered, other key) counts as absent. A Session is safe for
 // concurrent use; the zero value is not usable.
+// The name repeats the package on purpose (NAM-003): it is the package's domain noun, like time.Time, and
+// session.Handle would hide what it is a handle on.
 type Session struct {
 	store     *Store
 	id        string
@@ -27,7 +29,7 @@ type identityEnvelope struct {
 	Identity        *auth.Identity `json:"identity"`
 	AuthenticatedAt time.Time      `json:"authenticatedAt"`
 	RefreshedAt     time.Time      `json:"refreshedAt"`
-	sealed          []byte         // the stored value it was read from (never encoded): what swapEnvelope compares
+	sealed          []byte         // the stored value it was read from or swapped in (never encoded): what swapEnvelope compares
 }
 
 // Put seals value and stores it under key for ttl (positive). A revoked session refuses with ErrUnauthenticated.
@@ -143,21 +145,23 @@ func (s Session) saveEnvelope(ctx context.Context, envelope identityEnvelope) er
 }
 
 // swapEnvelope saves envelope, keeping the stored lifetime, only while the stored value is still the one
-// envelope was read from; false when the session was saved, revoked or expired meanwhile.
-func (s Session) swapEnvelope(ctx context.Context, envelope identityEnvelope) (bool, error) {
+// envelope was read from, and returns it as stored now (the base of a later swap); false when the session
+// was saved, revoked or expired meanwhile.
+func (s Session) swapEnvelope(ctx context.Context, envelope identityEnvelope) (identityEnvelope, bool, error) {
 	encoded, _, err := s.encodeEnvelope(envelope)
 	if err != nil {
-		return false, err
+		return identityEnvelope{}, false, err
 	}
 	sealed, err := seal(s.store.options.EncryptionKey, s.id, identityKey, encoded)
 	if err != nil {
-		return false, fmt.Errorf("swap session identity: %w", err)
+		return identityEnvelope{}, false, fmt.Errorf("swap session identity: %w", err)
 	}
 	swapped, err := s.store.options.Backend.CompareAndSwap(ctx, s.id, identityKey, envelope.sealed, sealed)
 	if err != nil {
-		return false, fmt.Errorf("swap session identity: %w", err)
+		return identityEnvelope{}, false, fmt.Errorf("swap session identity: %w", err)
 	}
-	return swapped, nil
+	envelope.sealed = sealed
+	return envelope, swapped, nil
 }
 
 // encodeEnvelope returns envelope's JSON and the time left of its absolute lifetime; refused once that is over.

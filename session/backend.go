@@ -13,8 +13,9 @@ var ErrSessionRevoked = errors.New("session revoked")
 // Backend stores the server-side half of sessions: one opaque, already encrypted value per (sessionID, key).
 // sessionID is a non-secret identifier derived from the cookie (SHA-256), never the cookie value.
 // Every operation is atomic per key; Put is serialized against Revoke of the same sessionID, so after
-// Revoke returned no Put for that sessionID succeeds until the marker expires. A marker never outlives the
-// values it replaced, and a sessionID without values gets none: revoking unknown IDs stores nothing.
+// Revoke returned no Put for that sessionID succeeds until the marker expires or a full backend evicts it
+// (MemoryBackend; Redis under its own eviction policy). A marker never outlives the values it replaced,
+// and a sessionID without values gets none: revoking unknown IDs stores nothing.
 // Values expire after their own ttl, which is always positive. Applications may implement it (e.g. on Postgres); share one backend
 // between replicas. Implementations must be safe for concurrent use.
 type Backend interface {

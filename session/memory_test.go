@@ -78,6 +78,16 @@ func TestMemoryBackendEviction(t *testing.T) {
 			wantKept:    []string{"revoked"},
 		},
 		{
+			name: "evicts a revocation marker expiring soonest",
+			fill: func(t *testing.T, backend *MemoryBackend, _ *testClock) {
+				require.NoError(t, backend.Put(t.Context(), "late", "key", []byte("value"), 2*time.Hour))
+				require.NoError(t, backend.Put(t.Context(), "revoked", "key", []byte("value"), time.Hour))
+				require.NoError(t, backend.Revoke(t.Context(), "revoked", 24*time.Hour))
+			},
+			wantEvicted: "revoked",
+			wantKept:    []string{"late"},
+		},
+		{
 			name: "drops expired sessions before evicting live ones",
 			fill: func(t *testing.T, backend *MemoryBackend, clock *testClock) {
 				require.NoError(t, backend.Put(t.Context(), "expired", "key", []byte("value"), time.Minute))
@@ -105,21 +115,6 @@ func TestMemoryBackendEviction(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestMemoryBackendNeverEvictsALiveMarker(t *testing.T) {
-	clock := newTestClock()
-	backend, err := NewMemoryBackend(&MemoryBackendOptions{MaximumSessions: 1})
-	require.NoError(t, err)
-	backend.now = clock.now
-	require.NoError(t, backend.Put(t.Context(), "old", "key", []byte("value"), time.Hour))
-	require.NoError(t, backend.Revoke(t.Context(), "old", 24*time.Hour))
-
-	require.ErrorContains(t, backend.Put(t.Context(), "other", "key", []byte("value"), time.Hour), "the one expiring soonest is revoked")
-	require.ErrorIs(t, backend.Put(t.Context(), "old", "key", []byte("value"), time.Hour), ErrSessionRevoked)
-
-	clock.advance(time.Hour)
-	require.NoError(t, backend.Put(t.Context(), "other", "key", []byte("value"), time.Hour), "the marker lived as long as the revoked value")
 }
 
 func TestMemoryBackendRevokeTakesNoSlot(t *testing.T) {

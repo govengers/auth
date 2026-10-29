@@ -91,8 +91,8 @@ func ExternalURL(raw string) (string, error) {
 // repeat the value.
 func AbsoluteTarget(raw, externalURL string) (string, error) {
 	if !strings.Contains(raw, "#") {
-		if path, ok := SafeReturnPath(raw); ok {
-			return externalURL + path, nil
+		if returnPath, ok := SafeReturnPath(raw); ok {
+			return externalURL + returnPath, nil
 		}
 		if IsAbsoluteHTTPURL(raw) {
 			return raw, nil
@@ -156,12 +156,12 @@ func isForbiddenInReturnPath(character rune) bool {
 // pathWithQuery keeps the path exactly as sent: decoding and re-escaping it turns "/%2F " into "//%20",
 // which a browser reads as another host.
 func pathWithQuery(raw, rawQuery string) string {
-	path := raw
+	withoutQuery := raw
 	if end := strings.IndexAny(raw, "?#"); end >= 0 {
-		path = raw[:end]
+		withoutQuery = raw[:end]
 	}
 	if rawQuery == "" {
-		return path
+		return withoutQuery
 	}
-	return path + "?" + rawQuery
+	return withoutQuery + "?" + rawQuery
 }

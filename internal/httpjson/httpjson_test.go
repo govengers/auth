@@ -55,6 +55,35 @@ func TestDecode(t *testing.T) {
 	}
 }
 
+// Decode errors become the cause of a refusal and reach the outcome and the wide event, so they must not
+// repeat request text (LOG-009): an unknown field's name may be an email address or a secret.
+func TestDecodeErrorsRepeatNoRequestText(t *testing.T) {
+	const canary = "alice@example.test"
+	testCases := []struct {
+		name      string
+		body      string
+		wantError string
+	}{
+		{name: "unknown field", body: `{"` + canary + `":true}`, wantError: "does not decode"},
+		{name: "unknown nested field", body: `{"identifier":"ada"}{"` + canary + `":true}`, wantError: "exactly one value"},
+		{name: "wrong type", body: `{"identifier":{"` + canary + `":1}}`, wantError: "does not decode"},
+		{name: "syntax error", body: `{"identifier":` + canary + `}`, wantError: "does not decode"},
+		{name: "too large", body: `{"` + canary + strings.Repeat("a", 64<<10) + `":true}`, wantError: "exceeds 65536 bytes"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader(testCase.body))
+			request.Header.Set("Content-Type", "application/json")
+
+			err := Decode(httptest.NewRecorder(), request, &loginInput{})
+
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), "alice")
+			require.ErrorContains(t, err, testCase.wantError)
+		})
+	}
+}
+
 func TestDecodeAcceptsBodyAtTheLimit(t *testing.T) {
 	padding := strings.Repeat("a", 64<<10-len(`{"identifier":""}`))
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/login", strings.NewReader(`{"identifier":"`+padding+`"}`))

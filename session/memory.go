@@ -14,13 +14,18 @@ const defaultMaximumSessions = 100000
 
 // MemoryBackendOptions configures NewMemoryBackend.
 type MemoryBackendOptions struct {
-	// MaximumSessions defaults to 100000. When full, expired entries are dropped, then the session expiring
-	// soonest is evicted; when that is a live revocation marker, the Put fails instead (a marker is never evicted).
+	// MaximumSessions defaults to 100000. When full, expired entries are dropped, then the entry expiring
+	// soonest is evicted, a live revocation marker included.
 	MaximumSessions int
 }
 
 // MemoryBackend implements Backend with a map and one mutex; expiry is lazy (no goroutine). It is
 // correct for exactly one replica and safe for concurrent use.
+// A full backend evicts revocation markers like sessions, so a flood of login starts cannot block every new
+// session; the cost is that an evicted marker no longer refuses a Put for its revoked session. Nothing can
+// give that session an identity again (SaveIdentity needs a live one or a Start handle, the Guard refreshes
+// by CompareAndSwap), but a provider or application value may land in it. Meant for one replica at
+// non-production scale; use Redis in production.
 // ponytail: O(n) eviction scan when full; shard or use Redis if that ever shows in profiles.
 type MemoryBackend struct {
 	options  MemoryBackendOptions
@@ -64,9 +69,7 @@ func (b *MemoryBackend) Put(_ context.Context, sessionID, key string, value []by
 		return ErrSessionRevoked
 	}
 	if !found {
-		if err := b.makeRoom(now); err != nil {
-			return err
-		}
+		b.makeRoom(now)
 		entry = &memorySession{values: map[string]memoryValue{}}
 		b.sessions[sessionID] = entry
 	}
@@ -152,25 +155,19 @@ func (b *MemoryBackend) remove(sessionID, key string, now time.Time) {
 	}
 }
 
-// makeRoom frees a slot for a new session when the backend is full: it drops expired sessions and, when
-// that frees nothing, evicts the session expiring soonest. It fails when that is a live revocation marker,
-// so a revoked session never accepts a Put again before its marker expires. b.mutex must be held.
-func (b *MemoryBackend) makeRoom(now time.Time) error {
+// makeRoom frees a slot for a new session when the backend is full: it drops expired entries and, when
+// that frees nothing, evicts the entry expiring soonest, a revocation marker included. b.mutex must be held.
+func (b *MemoryBackend) makeRoom(now time.Time) {
 	if len(b.sessions) < b.options.MaximumSessions {
-		return nil
+		return
 	}
 	maps.DeleteFunc(b.sessions, func(_ string, entry *memorySession) bool {
 		return !entry.expiresAt().After(now)
 	})
 	if len(b.sessions) < b.options.MaximumSessions {
-		return nil
+		return
 	}
-	soonestID := b.soonestExpiring()
-	if b.sessions[soonestID].revoked(now) {
-		return fmt.Errorf("memory session backend: all %d sessions are live and the one expiring soonest is revoked", b.options.MaximumSessions)
-	}
-	delete(b.sessions, soonestID)
-	return nil
+	delete(b.sessions, b.soonestExpiring())
 }
 
 func (b *MemoryBackend) soonestExpiring() string {
