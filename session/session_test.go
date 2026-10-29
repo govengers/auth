@@ -255,3 +255,94 @@ func putEnvelope(t *testing.T, current Session, envelope identityEnvelope) {
 	require.NoError(t, err)
 	require.NoError(t, current.Put(t.Context(), identityKey, encoded, time.Hour))
 }
+
+func TestSwapIdentity(t *testing.T) {
+	clock := newTestClock()
+	store := newTestStore(t, clock)
+	ctx := t.Context()
+	authenticatedAt := clock.now()
+	request := login(t, store, testIdentity())
+	current, err := store.Open(request)
+	require.NoError(t, err)
+	previous, err := current.Identity(ctx)
+	require.NoError(t, err)
+	updated := testIdentity()
+	updated.Teams = []string{"acme/admins"}
+	clock.advance(time.Hour)
+
+	swapped, err := current.SwapIdentity(ctx, previous, updated)
+
+	require.NoError(t, err)
+	require.True(t, swapped)
+	envelope, err := current.envelope(ctx)
+	require.NoError(t, err)
+	require.Equal(t, updated, envelope.Identity)
+	require.Equal(t, authenticatedAt, envelope.AuthenticatedAt, "the lifetime is kept")
+	require.Equal(t, clock.now(), envelope.RefreshedAt)
+
+	swapped, err = current.SwapIdentity(ctx, previous, testIdentity())
+	require.NoError(t, err)
+	require.False(t, swapped, "the session holds another identity than previous")
+	stored, err := current.Identity(ctx)
+	require.NoError(t, err)
+	require.Equal(t, updated, stored)
+
+	withEmptySlices := updated.Clone()
+	withEmptySlices.OIDCRoles = []string{}
+	swapped, err = current.SwapIdentity(ctx, withEmptySlices, testIdentity())
+	require.NoError(t, err)
+	require.True(t, swapped, "previous is compared in its stored form")
+}
+
+// A save made between SwapIdentity's read and its swap wins.
+func TestSwapIdentityLosesToASaveAfterItsRead(t *testing.T) {
+	store := newTestStore(t, newTestClock())
+	ctx := t.Context()
+	request := login(t, store, testIdentity())
+	saved := testIdentity()
+	saved.Active = false
+	store.options.Backend = &beforeSwapBackend{Backend: store.options.Backend, beforeSwap: func() {
+		concurrent, err := store.Open(request)
+		require.NoError(t, err)
+		require.NoError(t, concurrent.SaveIdentity(ctx, saved))
+	}}
+	current, err := store.Open(request)
+	require.NoError(t, err)
+
+	swapped, err := current.SwapIdentity(ctx, testIdentity(), testIdentity())
+
+	require.NoError(t, err)
+	require.False(t, swapped)
+	stored, err := current.Identity(ctx)
+	require.NoError(t, err)
+	require.Equal(t, saved, stored)
+}
+
+func TestSwapIdentityRefusals(t *testing.T) {
+	clock := newTestClock()
+	store := newTestStore(t, clock)
+	ctx := t.Context()
+	request := login(t, store, testIdentity())
+	current, err := store.Open(request)
+	require.NoError(t, err)
+	unencodable := testIdentity()
+	unencodable.Data = map[string]any{"channel": make(chan int)}
+
+	_, err = current.SwapIdentity(ctx, testIdentity(), nil)
+	require.ErrorContains(t, err, "identity is nil")
+	_, err = current.SwapIdentity(ctx, unencodable, testIdentity())
+	require.ErrorContains(t, err, "compare session identity")
+	_, err = current.SwapIdentity(ctx, testIdentity(), unencodable)
+	require.ErrorContains(t, err, "encode session identity")
+
+	clock.advance(24*time.Hour + time.Second)
+	_, err = current.SwapIdentity(ctx, testIdentity(), testIdentity())
+	require.ErrorIs(t, err, auth.ErrUnauthenticated, "expired")
+
+	revoked := login(t, store, testIdentity())
+	require.NoError(t, store.End(ctx, httptest.NewRecorder(), revoked))
+	ended, err := store.Open(revoked)
+	require.NoError(t, err)
+	_, err = ended.SwapIdentity(ctx, testIdentity(), testIdentity())
+	require.ErrorIs(t, err, auth.ErrUnauthenticated, "revoked")
+}

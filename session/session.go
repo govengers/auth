@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -95,6 +96,38 @@ func (s Session) Identity(ctx context.Context) (*auth.Identity, error) {
 		return nil, err
 	}
 	return envelope.Identity, nil
+}
+
+// SwapIdentity saves identity in place of previous (an identity Identity returned) only while the session
+// still holds an identity equal to it (same JSON); swapped is false when another request saved a different
+// one meanwhile or changed the session between the read and the swap. It keeps authenticatedAt and the
+// expiry, refreshedAt=now. A session without a live identity refuses with ErrUnauthenticated, like Identity.
+func (s Session) SwapIdentity(ctx context.Context, previous, identity *auth.Identity) (bool, error) {
+	if identity == nil {
+		return false, errors.New("swap session identity: identity is nil")
+	}
+	stored, err := s.envelope(ctx)
+	if err != nil {
+		return false, err
+	}
+	same, err := sameIdentity(stored.Identity, previous)
+	if err != nil || !same {
+		return false, err
+	}
+	stored.Identity, stored.RefreshedAt = identity, s.store.now()
+	_, swapped, err := s.swapEnvelope(ctx, stored)
+	return swapped, err
+}
+
+// sameIdentity compares previous with the stored identity in its stored form (JSON), so nil and empty fields
+// count as equal.
+func sameIdentity(stored, previous *auth.Identity) (bool, error) {
+	previousJSON, err := json.Marshal(previous)
+	if err != nil {
+		return false, fmt.Errorf("compare session identity: %w", err)
+	}
+	storedJSON, _ := json.Marshal(stored) // decoded from JSON with the same validation, so it encodes again
+	return bytes.Equal(storedJSON, previousJSON), nil
 }
 
 func (s Session) open(key string, sealed []byte, found bool) ([]byte, bool) {
