@@ -668,6 +668,22 @@ func TestSessionBackendFailures(t *testing.T) {
 	}
 }
 
+func TestEndingAPendingLoginReportsAFailedRevocation(t *testing.T) {
+	options := totpOptions()
+	options.TOTP.MaximumAttempts = 1
+	fixture := newFixture(t, options)
+	fixture.createTOTPUser(t, "ada")
+	browser := fixture.pendingClient(t, "ada")
+	fixture.failSessions(t, "Revoke")
+
+	recorder := browser.post(verifyPath, map[string]any{"code": "000000"})
+
+	requireRefusal(t, recorder, http.StatusInternalServerError, "internal")
+	outcome := fixture.outcomes.last(t)
+	require.Equal(t, auth.ResultError, outcome.Result)
+	require.ErrorIs(t, outcome.Err, errStorageDown)
+}
+
 func loggedInClient(t *testing.T, fixture *fixture) *client {
 	t.Helper()
 	browser := fixture.newClient(t)

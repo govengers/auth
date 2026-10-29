@@ -105,11 +105,13 @@ func (p *Provider) resumeVerification(writer http.ResponseWriter, request *http.
 	return user, nil
 }
 
-// endPendingLogin ends the request's session and returns the refusal to answer with; a failed revocation
-// becomes its cause.
+// endPendingLogin ends the request's session and returns the refusal to answer with; a failed revocation is
+// returned instead, so it is reported as the failure it is.
 func (p *Provider) endPendingLogin(writer http.ResponseWriter, request *http.Request, code, reason string) error {
-	endError := p.options.Sessions.End(request.Context(), writer, request)
-	return &auth.Error{Kind: auth.ErrUnauthenticated, Code: code, Reason: reason, Err: endError}
+	if err := p.options.Sessions.End(request.Context(), writer, request); err != nil {
+		return err
+	}
+	return &auth.Error{Kind: auth.ErrUnauthenticated, Code: code, Reason: reason}
 }
 
 // totpStatus answers whether the user of the full session has TOTP enabled.
