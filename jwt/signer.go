@@ -164,7 +164,7 @@ func jwkWithKeyID(rawKey any, keyID string) (jwk.Key, error) {
 
 // Sign mints an RS512 token for identity: header kid and typ JWT; claims iss, aud, iat, nbf (now - 30 s),
 // exp (now + Lifetime), a random jti, the identity's fields and every other key of its Claims (see the
-// package claim table). It does not modify identity.
+// package claim table). An invalid permission is an error. It does not modify identity.
 func (s *Signer) Sign(identity *auth.Identity) (string, error) {
 	if identity == nil {
 		return "", errors.New("sign JWT: identity is nil")
@@ -173,7 +173,10 @@ func (s *Signer) Sign(identity *auth.Identity) (string, error) {
 	if err != nil {
 		return "", dependencyError("sign JWT: generate token ID", err)
 	}
-	claims := identityClaims(identity)
+	claims, err := identityClaims(identity)
+	if err != nil {
+		return "", fmt.Errorf("sign JWT for subject %s: %w", identity.Subject, err)
+	}
 	maps.Copy(claims, s.registeredClaims(tokenID))
 	token := jwxjwt.New()
 	for name, value := range claims {

@@ -189,6 +189,7 @@ func TestVerifyReturnsEveryIdentityField(t *testing.T) {
 		OIDCClientRoles: []string{"client-role"},
 		Groups:          []string{"/engineering"},
 		Teams:           []string{"org/team"},
+		Permissions:     []auth.Permission{{Resource: "builds", Access: auth.AccessWrite}, {Resource: auth.AllResources, Access: auth.AccessRead}},
 		Attributes:      map[string][]string{"department": {"r&d"}},
 		Claims:          map[string]any{"locale": "de", "nonce": "n-1", "sid": "s-1"},
 		Data:            map[string]any{"app": "value"},
@@ -216,14 +217,44 @@ func TestVerifyReturnsEveryIdentityField(t *testing.T) {
 		OIDCClientRoles: []string{"client-role"},
 		Groups:          []string{"/engineering"},
 		Teams:           []string{"org/team"},
+		Permissions:     []auth.Permission{{Resource: "builds", Access: auth.AccessWrite}, {Resource: auth.AllResources, Access: auth.AccessRead}},
 		Claims: map[string]any{
 			"iss": testIssuer, "aud": []any{"backend"}, "jti": tokenID,
 			"iat": float64(signedAt.Unix()), "nbf": float64(signedAt.Add(-30 * time.Second).Unix()), "exp": float64(signedAt.Add(5 * time.Minute).Unix()),
 			"sub": "subject-1", "provider": "keycloak", "user_id": userID.String(), "preferred_username": "ada", "name": "Ada Lovelace",
 			"email": "ada@example.com", "picture": "https://example.com/ada.png", "roles": []any{auth.RoleAdmin}, "realm_roles": []any{"realm-role"},
-			"client_roles": []any{"client-role"}, "groups": []any{"/engineering"}, "teams": []any{"org/team"}, "locale": "de",
+			"client_roles": []any{"client-role"}, "groups": []any{"/engineering"}, "teams": []any{"org/team"},
+			"permissions": []any{"builds:write", "*:read"}, "locale": "de",
 		},
 	}, verified)
+}
+
+func TestVerifyDoesNotTakePermissionsFromForgedClaims(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	signer := newTestSigner(t, clock.now)
+	verifier := newTestVerifier(t, testVerifierOptions(newKeySetServer(t, signer.JWKSHandler()).server.URL), clock)
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Claims: map[string]any{"permissions": []any{"*:write"}, "roles": []any{auth.RoleAdmin}}})
+	require.NoError(t, err)
+
+	identity, err := verifier.Verify(t.Context(), token)
+
+	require.NoError(t, err)
+	require.Empty(t, identity.Permissions)
+	require.Empty(t, identity.Roles)
+	require.NotContains(t, identity.Claims, "permissions")
+	require.False(t, identity.Permits("builds", auth.AccessRead))
+}
+
+func TestVerifyDropsInvalidPermissionEntries(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	signer := newTestSigner(t, clock.now)
+	verifier := newTestVerifier(t, testVerifierOptions(newKeySetServer(t, signer.JWKSHandler()).server.URL), clock)
+	token := signWith(t, signer, jwa.RS512(), withClaim(validClaims(signedAt), "permissions", []any{"builds:write", 7, "BUILDS:write", "*:admin", "deployments:read"}))
+
+	identity, err := verifier.Verify(t.Context(), token)
+
+	require.NoError(t, err)
+	require.Equal(t, []auth.Permission{{Resource: "builds", Access: auth.AccessWrite}, {Resource: "deployments", Access: auth.AccessRead}}, identity.Permissions)
 }
 
 func TestVerifyRejectsInvalidTokens(t *testing.T) {

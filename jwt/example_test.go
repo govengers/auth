@@ -62,10 +62,10 @@ func ExampleVerifier() {
 	}
 	api := verifier.Middleware()(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		identity := auth.IdentityFrom(request.Context())
-		fmt.Fprintln(writer, identity.Provider, identity.Username, identity.Teams)
+		fmt.Fprintln(writer, identity.Provider, identity.Username, identity.Permissions, identity.Permits("builds", auth.AccessRead))
 	}))
 
-	token, err := signer.Sign(&auth.Identity{Provider: "github", Subject: "583231", Username: "octocat", Teams: []string{"org/team"}})
+	token, err := signer.Sign(&auth.Identity{Provider: "apikey", Subject: "ci", Username: "ci", Permissions: []auth.Permission{{Resource: "builds", Access: auth.AccessWrite}}})
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -76,5 +76,5 @@ func ExampleVerifier() {
 	api.ServeHTTP(recorder, request)
 
 	fmt.Print(recorder.Code, " ", recorder.Body.String())
-	// Output: 200 github octocat [org/team]
+	// Output: 200 apikey ci [builds:write] true
 }

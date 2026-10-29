@@ -217,6 +217,15 @@ func TestSignRefusesANilIdentity(t *testing.T) {
 	require.Empty(t, token)
 }
 
+func TestSignRefusesAnInvalidPermission(t *testing.T) {
+	signer := newTestSigner(t, fixedClock(signedAt))
+
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Permissions: []auth.Permission{{Resource: "builds", Access: "admin"}}})
+
+	require.ErrorContains(t, err, "sign JWT for subject 42: permissions claim")
+	require.Empty(t, token)
+}
+
 func TestSignRefusesClaimsThatDoNotEncode(t *testing.T) {
 	signer := newTestSigner(t, fixedClock(signedAt))
 
