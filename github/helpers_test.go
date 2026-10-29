@@ -31,6 +31,7 @@ type switchableBackend struct {
 	*session.MemoryBackend
 	failGet    atomic.Bool
 	failPut    atomic.Bool
+	failPutKey string // Put of this key fails; set before the request, read by the handler's goroutine
 	failRevoke atomic.Bool
 }
 
@@ -45,7 +46,7 @@ func (b *switchableBackend) Get(ctx context.Context, sessionID, key string) ([]b
 }
 
 func (b *switchableBackend) Put(ctx context.Context, sessionID, key string, value []byte, ttl time.Duration) error {
-	if b.failPut.Load() {
+	if b.failPut.Load() || key == b.failPutKey {
 		return errBackendDown
 	}
 	return b.MemoryBackend.Put(ctx, sessionID, key, value, ttl)

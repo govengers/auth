@@ -145,7 +145,10 @@ func (p *Provider) startSession(ctx context.Context, writer http.ResponseWriter,
 	if err := current.Put(ctx, tokenKey, encoded, p.options.Sessions.MaximumAge()); err != nil {
 		return fmt.Errorf("github: store token: %w", err)
 	}
-	return current.SaveIdentity(ctx, completed.identity)
+	if err := current.SaveIdentity(ctx, completed.identity); err != nil {
+		return fmt.Errorf("github: save identity: %w", err)
+	}
+	return nil
 }
 
 // logout ends the session, revokes the GitHub token (a failure only degrades the outcome), runs
@@ -213,11 +216,11 @@ func (p *Provider) refreshTeams(writer http.ResponseWriter, request *http.Reques
 func (p *Provider) refreshSession(ctx context.Context, writer http.ResponseWriter, request *http.Request) (*auth.Identity, error) {
 	current, err := p.options.Sessions.Open(request)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("github: refresh teams: %w", err)
 	}
 	stored, err := current.Identity(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("github: refresh teams: %w", err)
 	}
 	if stored.Real().Provider != providerName {
 		return stored, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "not a GitHub session"}
@@ -234,7 +237,7 @@ func (p *Provider) refreshSession(ctx context.Context, writer http.ResponseWrite
 	}
 	updated := impersonation.WithReal(stored, refreshed)
 	if err := current.SaveIdentity(ctx, updated); err != nil {
-		return stored, err
+		return stored, fmt.Errorf("github: save refreshed identity: %w", err)
 	}
 	return updated, nil
 }
