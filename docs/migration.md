@@ -21,11 +21,13 @@ There are no compatibility shims, and the old modules are not touched. Sections 
 | Session lifetime | 24 h (basicauth, oidc), 7 days (github binary) | `MaxAge`, default 24 h, absolute from the first login, never extended |
 | Middleware | per provider, often global (`Engine.Use`), `PathRules`, `PublicPaths` | one `session.Guard`: `RequireAPI()` (401 JSON) or `RequireUI()` (302 to login) mounted on the route groups you want protected. Provider routes are never behind the Guard |
 | Identity | `basicauth.User`, `oidc.SessionData`, `jwt.User`, GitHub session user, gin keys | `auth.Identity` in the request context: `auth.IdentityFrom(ctx)`; gin: `auth.IdentityFrom(c.Request.Context())` |
-| Authorization | `Handle.IsAdmin`, ad-hoc role checks | `authorization.Check`s; gin: `ginadapter.Require(check)` |
+| Authorization | `Handle.IsAdmin`, ad-hoc role checks, access levels in API key data | `authorization.Check`s; gin: `ginadapter.Require(check)`; resource permissions `<resource>:<access>` (`auth.Permission`, `authorization.HasPermission`, `ginadapter.RequireMethodPermission`, JWT `permissions` claim); no permission means no access |
 | Errors | `{"error","message"}` and other shapes, translated messages | `{"code","message"}`, fixed messages, stable codes; `errors.Is` against `auth.ErrUnauthenticated`, `ErrForbidden`, `ErrInvalidRequest`, `ErrConflict` |
 | Hooks | `PostLoginHook(c, *SessionData) error`, `PostLogoutHook(c)`, `UserTransformer` | `OnLogin auth.Hook` (return a changed copy, or an `*auth.Error` to refuse), `OnLogout auth.LogoutHook`; `UserTransformer` becomes a middleware after the Guard |
 | Logging | the libraries logged themselves (zerolog) | libraries never log; pass an `auth.Observer` (`ginadapter.Observe`, `prometheusadapter`) |
-| Redirect providers | GitHub logout `POST` | OIDC and GitHub logout is `GET`; the return path (`return_to`) accepts same-origin relative paths only |
+| Redirect providers | GitHub logout `POST`; free-form paths and redirect targets | OIDC and GitHub logout is `GET`; the return path (`return_to`) accepts same-origin relative paths only; `ErrorURL` and `PostLogoutURL` take a path or an absolute `http(s)` URL without fragment and are made absolute with `ExternalURL` |
+| Path prefixes | free-form base paths (`AuthenticationBaseUrl`, `AuthBaseContextPath`, `LoginPath`, ...) | `PathPrefix` of password, OIDC and GitHub: `/`-separated segments of `A-Z a-z 0-9 . _ ~ -`, no trailing `/`, no `.` or `..` segment |
+| API keys | unnamed secrets (github) | `apikey`: named keys, secrets of 16 bytes or more, names and secrets unique, optional roles and permissions; keys you issue go through a `Resolver` |
 | Go | - | 1.26 |
 
 Untouched on purpose: no rate limiting, no retries, TOTP replay inside one period is not prevented.
@@ -35,9 +37,9 @@ Untouched on purpose: no rate limiting, no retries, TOTP replay inside one perio
 ### Behaviour changes
 
 - **Guard instead of global middleware.** `RegisterRoutes()` called `Engine.Use(RequireAuth())`, so everything was protected unless a path rule said otherwise. Now only groups behind `ginadapter.Middleware(guard.RequireAPI())` are protected.
-- **Password policy.** Old defaults: minimum 8 characters with upper case, lower case and a digit. New default: minimum 12, no composition rules, maximum 128 bytes (was 72). Keep the old policy with `Policy{MinimumLength: 8, RequireUppercase: true, RequireLowercase: true, RequireDigit: true}`. The policy applies at registration.
-- **Hashes.** The Argon2id format is unchanged (`$argon2id$v=19$m=..,t=..,p=..$salt$hash`); existing hashes verify. `LegacyVerifier: password.VerifyBcrypt` still upgrades foreign hashes on login, now with a compare-and-swap write.
-- **TOTP.** Routes move from `/tfa/*` to `/totp/*`. `MaxVerifyAttempts: 0` meant unlimited; `MaximumAttempts` must be greater than 0 (default 5). `TFA.Required` no longer answers 403 `tfa_setup_required` on every route: login answers 202 `{"challenge":"totp_setup"}` and the user enrolls through `/totp/setup` and `/totp/enable` before a full session exists. `AccountLabel` is gone (username, else email, else ID). The backup-code scheme is ported from go-basicauth.
+- **Password policy.** Old defaults: minimum 8 characters with upper case, lower case and a digit. New default: minimum 12 characters (counted as runes, not bytes), no composition rules, maximum 128 bytes (was 72). Keep the old policy with `Policy{MinimumLength: 8, RequireUppercase: true, RequireLowercase: true, RequireDigit: true}`. The policy applies at registration.
+- **Hashes.** The Argon2id format is unchanged (`$argon2id$v=19$m=..,t=..,p=..$salt$hash`); existing hashes verify. `LegacyVerifier: password.VerifyBcrypt` still upgrades foreign hashes, now only at login (not in the password checks of the TOTP routes) and with a compare-and-swap write. A stored hash that neither `Verify` nor the `LegacyVerifier` can read answers 401 `invalid_credentials`, like a wrong password. `HashParameters` must be at least 32 MiB, 1 iteration, salt and key 16 bytes.
+- **TOTP.** Routes move from `/tfa/*` to `/totp/*` and exist only with `TOTP.Enabled` (otherwise 404). `MaxVerifyAttempts: 0` meant unlimited; `MaximumAttempts: 0` now means the default 5, a negative value is an error, there is no unlimited mode. `Digits` is 6 or 8. `TFA.Required` no longer answers 403 `tfa_setup_required` on every route: login (and registration) answers 202 `{"challenge":"totp_setup"}` and the user enrolls through `/totp/setup` and `/totp/enable` before a full session exists. `AccountLabel` is gone (username, else email, else ID). The backup-code scheme is ported from go-basicauth.
 - **Freshness.** The old handler re-read the user on every request. The Guard calls `Provider.Refresh` at most once per `RefreshInterval` (default 1 minute): a deleted user gets 401, a changed username or email is picked up. Pass the provider in `GuardOptions.Refreshers`.
 - **Responses.** Login success is the `IdentityResponse` (`{"provider","subject","userId","username","email","active","roles",...}`) instead of `{"message","data":UserResponse}`; `id` is now `userId` (and `subject`); `createdAt`, `updatedAt`, `isTechnicalUser` and `totpEnabled` are gone (`GET /auth/password/totp` returns `{"enabled"}`). TOTP challenge is 202 `{"challenge":"totp"}` (was `{"data":{"tfaRequired":true}}`). Logout is 204. Error body is `{"code","message"}`; `tfa_*` codes became `totp_*`, `unauthorized` became `unauthenticated`, `invalid_request` is unchanged. Client codes are in the README.
 - **`/me`.** The provider no longer serves it. Mount `auth.IdentityHandler()` behind the Guard at a path you choose.
@@ -55,7 +57,7 @@ Untouched on purpose: no rate limiting, no retries, TOTP replay inside one perio
 | `GetUserFromContext(c)`, gin key `"user"` | `auth.IdentityFrom(ctx)` |
 | `UserKey`, `UserTransformer` | app middleware after the Guard; provisioning in `OnLogin` |
 | `BasicAuthSettings.EnableUsernameLogin` / `EnableEmailLogin` | `DisableUsernameLogin` / `DisableEmailLogin` (inverted) |
-| `EnableTFA`, `TFA` | `TOTP.Enabled`, `TOTP` (`MaxVerifyAttempts` is `MaximumAttempts`, `SkewWindows` is `Skew`, `PendingSessionTTL` is `PendingTTL`, `AccountLabel` removed, `Issuer` required) |
+| `EnableTFA`, `TFA` | `TOTP.Enabled` (also routes the TOTP endpoints), `TOTP` (`MaxVerifyAttempts` is `MaximumAttempts`, 0 no longer unlimited; `SkewWindows` is `Skew`, `PendingSessionTTL` is `PendingTTL`, `AccountLabel` removed, `Issuer` required, `Digits` 6 or 8) |
 | `TFA.Required` (403 `tfa_setup_required`) | `TOTP.Required` (202 `{"challenge":"totp_setup"}` at login) |
 | `EnableRegistration` | `EnableRegistration` (still off by default) |
 | `SessionName`, `SessionExpiration` | `StoreOptions.CookieName`, `MaxAge` |
@@ -108,7 +110,7 @@ protected.GET("/me", gin.WrapH(auth.IdentityHandler()))
 
 6. Replace `GetUserFromContext(c)` with `auth.IdentityFrom(c.Request.Context())`, or add the app-user middleware from the README when you used `UserTransformer`.
 7. Frontend: new login path and response, `tfa` to `totp`, new error shape and codes, `userId` instead of `id`.
-8. `PathPrefix: "/auth"` keeps `/auth/login`, `/auth/logout` and `/auth/register`; the TOTP routes still change.
+8. `PathPrefix: "/auth"` keeps `/auth/login`, `/auth/logout` and `/auth/register`; the TOTP routes still change. An `AuthenticationBaseUrl` with a trailing `/` or other characters than `A-Z a-z 0-9 . _ ~ -` per segment must be changed.
 9. Deploy; users log in again.
 
 ## 2. oidc-fwd-auth library (v0.9.x) to `oidc`
@@ -117,14 +119,17 @@ protected.GET("/me", gin.WrapH(auth.IdentityHandler()))
 
 - **PKCE (S256) and nonce** are always on; state, nonce and verifier are bound to the server-side login session (single use, 10 minutes), which is what makes several replicas work.
 - **Redirect URI is derived**: `ExternalURL + PathPrefix + "/callback"`, with `PathPrefix` defaulting to `/auth/oidc/<name>`. Register the new URI at the IdP. For a single provider you can keep the old URL with `PathPrefix: "/auth/oidc"`. The end-session endpoint is discovered (`LogoutUri` is gone); `PostLogoutURL` replaces `PostLogoutRedirectUri`.
-- **Several IdPs**: one `oidc.New` per IdP with distinct `Name`s on one `session.Store`. `MultiHandler`, `AddProvider` and the login selector are gone; link to `provider.LoginURL()`.
+- **Several IdPs**: one `oidc.New` per IdP with distinct `Name`s (`[a-z0-9-]{1,32}`; `password`, `github`, `apikey`, `session` and `jwt` are reserved) on one `session.Store`. `MultiHandler`, `AddProvider` and the login selector are gone; link to `provider.LoginURL()`.
+- **Callback failures**: the IdP rejecting the code is 401 `login_failed`, an IdP that cannot be reached is 500; an ID token without `sub` is refused. The new `ErrorURL` (a path or an absolute URL, no fragment) turns every callback failure into a redirect to `ErrorURL?code=<code>` (`code=internal` for a 500). `PostLogoutURL` may now be a path too; it is made absolute with `ExternalURL`.
+- **Client authentication** at the token endpoint is fixed from discovery: HTTP Basic, unless the IdP lists only `client_secret_post`. oauth2's auto-detection (which resends a failed exchange with the other style) is not used.
+- **Logout** sends the stored ID token as `id_token_hint`. Without one (the local session had already expired, or the IdP has no `end_session_endpoint`) it redirects straight to `PostLogoutURL` and the IdP session stays.
 - **Identity, not `SessionData`.** `IDToken` and `AccessTokenClaims` are not exposed; the raw ID token stays server-side (used as `id_token_hint` at logout). Claims are in `Identity.Claims`.
 - **Roles and groups** come from the access token (`realm_access.roles`, `resource_access.<ClientID>.roles`) and ID token (`groups`) as before; with Keycloak enrichment they are replaced by the Admin API's answer.
 - **Keycloak** moved to `oidc/keycloak` (gocloak, resty and golang-jwt are gone). The default grant flips from `password` to `client_credentials`; the password grant breaks as soon as the admin user gets an OTP credential. A missing required role or group refuses the login with 403 and a generic body (`AuthorizationDeniedError` detail is no longer sent).
 - **Google**: `AllowedEmailDomains` requires `email_verified` and a matching domain; the old mode admitted any Google account.
 - **Userinfo**: `/userinfo` is replaced by `auth.IdentityHandler()` behind the Guard (public view, no raw claims).
 - **Refresh**: the OIDC provider has no refresher (as before); the session lives until `MaxAge` or logout. Front-channel logout needs `SameSite: http.SameSiteNoneMode` and HTTPS.
-- **jwt**: RS512 only, jwx v3, no `jku` header, no generated key, default lifetime 5 minutes (was 30), no verifier cache or goroutine; `NewVerifier` fetches the JWKS once and fails fast. `Verify` returns an `auth.Identity`.
+- **jwt**: RS512 only, jwx v3, no `jku` header, no generated key, default lifetime 5 minutes (was 30), no verifier cache or goroutine; `NewVerifier` fetches the JWKS once and fails fast. `Verify` requires `exp`, checks `nbf` and `iat` with 30 s skew and returns an `auth.Identity`; `RefreshInterval` is at least 1 minute (`LocalJwks`, `Cached`, `CacheSize`, `TTL` are gone). Claims: `sub`, `provider`, `user_id`, `preferred_username`, `name`, `email`, `picture`, `roles`, `realm_roles`, `client_roles`, `groups`, `teams`, `permissions`, plus the other ID token claims; an ID token claim with one of these names is never copied (an IdP `roles` claim does not become application roles).
 
 ### Symbol map
 
@@ -193,15 +198,17 @@ api.Use(ginadapter.Middleware(guard.RequireAPI()))
 ### Behaviour changes
 
 - **Teams are mandatory.** `AllowedTeams` needs at least one `org/team-slug`. The old binary README says an empty `ALLOWED_GITHUB_TEAMS` admitted every GitHub user; there is no such mode any more.
-- **Teams are filtered.** `Identity.Teams` holds only teams in `AllowedTeams`, `AdminTeams` and `RelevantTeams` (lower-case). The caller's slices are never modified. Admin team members get `auth.RoleAdmin` in `Roles`.
-- **No profile cache, no `UserProfile`.** The 40-field profile, `Team`, `Organization`, `Plan` and `GetTeamSlugs` are gone; the identity has `Username` (login), `Name`, `Email` (may be empty), `Picture`. For anything else call GitHub with `provider.HTTPClient(ctx, session)`, which sends the user's token. The token stays in the server-side session.
+- **Teams are filtered.** `Identity.Teams` holds only teams in `AllowedTeams`, `AdminTeams` and `RelevantTeams` (lower-case, sorted, unique). The caller's slices are never modified. Admin team members get `auth.RoleAdmin` in `Roles`; as before, they also need an allowed team. Configured teams must be `org/team-slug` (one `/`, no white space).
+- **No profile cache, no `UserProfile`.** The 40-field profile, `Team`, `Organization`, `Plan` and `GetTeamSlugs` are gone; the identity has `Username` (login), `Name`, `Email` (may be empty), `Picture`. For anything else call GitHub with `provider.HTTPClient(ctx, current)`, which sends the user's token to the `APIURL` host only (a redirect to another host, e.g. an archive download or `uploads.github.com`, goes without it). The token stays in the server-side session.
 - **Freshness.** Teams are refetched by the Guard's refresher every `RefreshInterval` (1 minute, the old cache TTL) and by `POST {prefix}/refresh-teams`. A user who left every allowed team loses the session.
 - **Routes** move under `PathPrefix` (default `/auth/github`): `GET /login`, `GET /callback`, `GET /logout` (was `POST`), `POST /refresh-teams`. `PathPrefix: "/auth"` keeps `/auth/login`, `/auth/callback` and `/auth/refresh-teams`, so the OAuth app's callback URL stays valid. The userinfo route is replaced by `auth.IdentityHandler()`. The Origin check of the old POST logout is gone with the POST.
-- **Login redirect** uses `ExternalURL` (absolute), as `BaseURL` did.
-- **URLs** must be `https`, except loopback hosts.
+- **Login redirect** uses `ExternalURL` (absolute), as `BaseURL` did. `PostLogoutURL` and `ErrorURL` are made absolute too and refuse a fragment: a hash-route error page such as `/#/error` must become a real path. `ErrorURL` now also receives server-side failures as `?code=internal`.
+- **Code exchange**: GitHub refusing the code is 401 `login_failed`; a GitHub 5xx or outage is 500.
+- **URLs** must be `https` with a host name, except loopback hosts (`localhost`, `127.0.0.0/8`, `::1`).
 - **Cookie** defaults: name `auth_session`, host-only (was `session_id` on `localhost`), lifetime 24 h (was 7 days, `SessionMaxAge`).
 - **JWT**: `sub` is the numeric GitHub user ID, the login is `preferred_username`, `uid` is removed, `teams` is the filtered list; see section 2 for the other JWT changes.
-- **API keys** moved to `apikey` and now have names, at least 16 bytes, and optional roles.
+- **API keys** moved to `apikey`: named, at least 16 bytes, names and secrets unique, no surrounding whitespace, optional `Roles` and `Permissions`. A key no longer bypasses admin checks. The `Resolver` returns an `*auth.Identity`; return an error matching `auth.ErrUnauthenticated` for unknown keys, any other error answers 500.
+- **Access levels become permissions.** build-api kept `read_only`/`read_write` in `ResolvedAPIKey.Data` and refused non-GET requests of read-only keys in its own middleware. Now the resolver returns `Permissions`: `read_only` is `[*:read]`, `read_write` is `[*:write]`; gate routes with `ginadapter.RequireMethodPermission(resource)` (GET, HEAD, OPTIONS need read, everything else write) or `ginadapter.Require(authorization.HasPermission(resource, access))`. Browser sessions carry no permissions: grant them in `OnLogin` (e.g. `*:write` for allowed-team members) or compose `authorization.Any(authorization.HasRole(...), authorization.HasPermission(...))`.
 
 ### Symbol map
 
@@ -211,7 +218,8 @@ api.Use(ginadapter.Middleware(guard.RequireAPI()))
 | `Config.RedirectURI`, `AuthURL`, `TokenURL`, `DeviceAuthURL`, `GitHubAPIBaseURL`, `BaseURL` | derived, `AuthorizeURL`, `TokenURL`, removed, `APIURL`, `ExternalURL` |
 | `LoginPath`, `CallbackPath`, `UserInfoPath`, `LogoutPath`, `RefreshTeamsPath` | `PathPrefix` (`/auth/github`); userinfo is `auth.IdentityHandler()`; logout is `GET` |
 | `AllowedTeams`, `AdminTeams`, `RelevantTeams` | same (never mutated; `Teams` filtered to these) |
-| `AllowedAPIKeys`, `APIKeyResolver`, `ResolvedAPIKey{Login, Teams, Data}` | `apikey.Options{Keys: []apikey.Key{Name, Secret, Roles}, Resolver}` returning `*auth.Identity{Subject/Username, Teams, Data}` |
+| `AllowedAPIKeys`, `APIKeyResolver`, `ResolvedAPIKey{Login, Teams, Data}` | `apikey.Options{Keys: []apikey.Key{Name, Secret, Roles, Permissions}, Resolver}` returning `*auth.Identity{Subject/Username, Teams, Permissions, Data}` |
+| access level in `ResolvedAPIKey.Data` (`read_only`, `read_write`) + an app middleware refusing non-GET | `Identity.Permissions` `[*:read]` / `[*:write]` + `ginadapter.RequireMethodPermission(resource)` |
 | `GetApiKeyAuthMiddleware(keys)` | `apikey.New(...).Middleware()` |
 | `SessionSecretKey`, `SessionEncryptionKey`, `CookieName`, `CookieDomain` (default localhost), `SessionMaxAge *int`, `CookieInsecure` | removed, `StoreOptions.EncryptionKey`, `CookieName`, `CookieDomain` (default host-only), `MaxAge`, `InsecureCookie` |
 | `Handle.IsAuthenticated(c)`, `IsAdmin(c)`, `GetRelevantTeams(c)` | `authorization.IsAuthenticated()`, `authorization.IsAdmin()`, `auth.IdentityFrom(ctx).Teams` |
@@ -247,27 +255,29 @@ guard := must(session.NewGuard(&session.GuardOptions{
 }))
 ginadapter.RegisterRoutes(router, provider.Routes())
 app := router.Group("/app", ginadapter.Middleware(guard.RequireUI()))
+app.GET("/", dashboard) // auth.IdentityFrom(c.Request.Context()).Teams
 ```
 
 4. Replace `GetSessionStore().GetSession(c)` and `sess.UserInformation.Profile.Login` with `auth.IdentityFrom(c.Request.Context()).Username`.
-5. Replace `AllowedAPIKeys` with `apikey` keys (named, 16 bytes or longer) and mount `keys.Middleware()` before the Guard. A key no longer bypasses admin checks; give it `Roles: []string{auth.RoleAdmin}` if it must.
+5. Replace `AllowedAPIKeys` with `apikey` keys (named, 16 bytes or longer) and mount `keys.Middleware()` before the Guard. A key no longer bypasses admin checks; give it `Roles: []string{auth.RoleAdmin}` if it must, or `Permissions` and gate the routes with them. A resolver that stored access levels returns `Permissions` (`*:read`, `*:write`).
 6. Change the GitHub OAuth app's callback URL to `https://example.com/auth/github/callback`, or set `PathPrefix: "/auth"` to keep it. `Scopes` default to `read:org`, which the team lookup needs; `Identity.Email` is the profile's email and may be empty.
 7. Deploy; users log in again.
 
 ## 4. The forward-auth binaries to `forwardauth`
 
-Both images become `ghcr.io/govengers/forwardauth:<version>`, started with `PROVIDER=oidc` or `PROVIDER=github`. Password login is not offered, and one instance runs one provider (the Google multi-provider mode is gone: Google is `OIDC_ISSUER=https://accounts.google.com`, `OIDC_CLAIM_MAPPER=google`, `OIDC_ALLOWED_EMAIL_DOMAINS`).
+Both images become `ghcr.io/govengers/forwardauth:<version>` (distroless `static-debian13`, non-root, amd64 and arm64; tags `:1.0.0`, `:1.0`, `:1`, `:latest`, and `:main` from the main branch), started with `PROVIDER=oidc` or `PROVIDER=github`. Password login is not offered, and one instance runs one provider (the Google multi-provider mode is gone: Google is `OIDC_ISSUER=https://accounts.google.com`, `OIDC_CLAIM_MAPPER=google`, `OIDC_ALLOWED_EMAIL_DOMAINS`).
 
 ### Behaviour changes
 
 - **Routing.** The check endpoints are `{PATH_PREFIX}/ui` and `{PATH_PREFIX}/api` (default `/auth/ui`, `/auth/api`). Login, callback and logout are served on `{PATH_PREFIX}/oidc/<OIDC_NAME>/...` or `{PATH_PREFIX}/github/...` and must be routed to the service by their own Traefik router (`Host(...) && PathPrefix(...)` without the forwardAuth middleware). The old github image dispatched them from the check endpoint by `X-Forwarded-Uri`; that dispatch is gone.
 - **oidc-fwd-auth users**: check addresses stay `/auth/ui` and `/auth/api`; the callback becomes `/auth/oidc/<OIDC_NAME>/callback` (default `/auth/oidc/oidc/callback`), JWKS moves from `/auth/JWKS` to `/auth/jwks`. **JWT is no longer always on:** set `JWT_ENABLED=true`.
 - **github-fwd-auth users**: `/ui-auth` and `/api-auth` become `/auth/ui` and `/auth/api`, `/health` becomes `/auth/health` (probes), `/JWKS` becomes `/auth/jwks`, the OAuth callback becomes `/auth/github/callback`. Add the `/auth` router. **`GITHUB_ALLOWED_TEAMS` is required** (an empty `ALLOWED_GITHUB_TEAMS` used to admit every GitHub user).
-- **JWT** (backends). Lifetime 5 minutes (was 30), minted per request, `JWT_LIFETIME_SECONDS` to change it. `JWT_ISSUER` defaults to `EXTERNAL_URL` (oidc-fwd-auth defaulted to `oidc-fwd-auth`): update the backends' expected issuer or set `JWT_ISSUER` to the old value. `JWT_PRIVATE_KEY` is required when JWT is enabled; there is no generated key, so every replica and every restart signs with the same key. OIDC claims are kept (all ID token claims plus `provider`, `realm_roles`, `client_roles`, `groups`), but `iss sub aud exp nbf iat jti nonce at_hash c_hash auth_time sid azp` are never copied from the ID token. GitHub: `sub` is the numeric ID, `preferred_username` the login, `uid` is gone, `teams` holds only allowed, admin and relevant teams, `roles` contains `admin` for admin teams. The `kid` is the RFC 7638 thumbprint and the JWKS has no `jku`; the full claim set is in the README.
-- **API keys** (`API_KEYS`): entries are `name:secret` (split at the first `:`), the secret is at least 16 bytes and must not contain `,`. The JWT `sub` is the key name. Keys carry no roles.
+- **JWT** (backends). Lifetime 5 minutes (was 30), minted per request, `JWT_LIFETIME_SECONDS` to change it. `JWT_ISSUER` defaults to `EXTERNAL_URL` (oidc-fwd-auth defaulted to `oidc-fwd-auth`): update the backends' expected issuer or set `JWT_ISSUER` to the old value. `JWT_PRIVATE_KEY` is required when JWT is enabled; there is no generated key, so every replica and every restart signs with the same key. OIDC claims are kept (all ID token claims plus `provider`, `user_id`, `realm_roles`, `client_roles`, `groups`, `permissions`), but `iss sub aud exp nbf iat jti nonce at_hash c_hash auth_time sid azp` and every claim name the identity owns (`roles`, `groups`, `preferred_username`, ...) are never copied from the ID token. Backends verifying with `jwt.Verifier` need `exp` (always set by the proxy). GitHub: `sub` is the numeric ID, `preferred_username` the login, `uid` is gone, `teams` holds only allowed, admin and relevant teams, `roles` contains `admin` for admin teams. The `kid` is the RFC 7638 thumbprint and the JWKS has no `jku`; the full claim set is in the README.
+- **API keys** (`API_KEYS`): entries are `name:secret` (split at the first `:`); names and secrets are unique, the secret is at least 16 bytes and must not contain `,`. The JWT `sub` is the key name. Keys carry no roles, so they no longer pass admin checks. They carry the permissions given in `API_KEY_PERMISSIONS` (`name=perm+perm`, comma-separated, e.g. `ci=builds:write+deployments:read`) as the JWT `permissions` claim; a key without an entry has none. **The old keys had unrestricted access: `<name>=*:write` reproduces that** for backends that check permissions.
+- **Traefik hardening**: set `trustForwardHeader: false` and `maxResponseBodySize` on both forwardAuth middlewares and `aliasHeadersStrategy: delete` on the entrypoints (README, "Traefik settings that matter"). With `authResponseHeaders: [Authorization]` Traefik deletes a client-sent `Authorization` before the app sees it, also when JWT is off.
 - **Cookies and sessions**: see "Changes for every library". Several replicas need `SESSION_REDIS_ENABLED=true`; without Redis run exactly one replica.
-- **Readiness and metrics**: new `{PATH_PREFIX}/ready` (503 during shutdown or when Redis is down) and a metrics listener on `METRICS_PORT` (9090). Logs are wide events on stdout, sampled by `WIDE_EVENT_SAMPLE_RATE`; `LOG_LEVEL` is gone.
-- **Configuration errors** stop the process at startup, listing every missing or invalid variable.
+- **Readiness and metrics**: new `{PATH_PREFIX}/ready` (503 `{"code":"unavailable"}` during shutdown or when Redis is down) and a metrics listener on `METRICS_PORT` (9090, must differ from `PORT`). Shutdown answers readiness 503 for `SHUTDOWN_DELAY_SECONDS` (default 5) before draining, so `docker stop` takes about 5 s. Logs are wide events on stdout, sampled by `WIDE_EVENT_SAMPLE_RATE`; `LOG_LEVEL` is gone. Unknown paths answer 404 JSON `{"code":"not_found"}`.
+- **Configuration errors** stop the process at startup, listing every missing or invalid variable: also an unparsable `SESSION_ENCRYPTION_KEY`, `PORT` equal to `METRICS_PORT`, `KEYCLOAK_ENABLED` without `PROVIDER=oidc`, an `API_KEYS` entry without `:` (reported by position, never echoed) and a bad `API_KEY_PERMISSIONS` entry.
 
 ### Environment variables
 
@@ -303,7 +313,8 @@ Both images become `ghcr.io/govengers/forwardauth:<version>`, started with `PROV
 | - | `JWT_ALGORITHM` | removed (RS512) |
 | `JWT_PRIVATE_KEY` (empty = generated) | `JWT_PRIVATE_KEY` | `JWT_PRIVATE_KEY` (required when enabled) |
 | `JWT_ISSUER` (default oidc-fwd-auth) | `JWT_ISSUER` | `JWT_ISSUER` (default `EXTERNAL_URL`) + `JWT_AUDIENCE`, `JWT_LIFETIME_SECONDS`, `JWT_HEADER` |
-| - | `API_KEYS` (secrets) | `API_KEYS` (`name:secret` entries) |
+| - | `API_KEYS` (secrets) | `API_KEYS` (`name:secret` entries; carry no roles) |
+| - | (static keys had unrestricted access) | `API_KEY_PERMISSIONS` (`name=perm+perm`); `name=*:write` reproduces the old unrestricted key for backends that check permissions |
 | - | `github-fwd-auth.env` dotenv | `.env` in the working directory (development only) |
 
 Notes: the old github image already took a base64 32-byte `SESSION_ENCRYPTION_KEY`, so it works unchanged; for an old 32-character oidc key `printf %s "$OLD" | base64` keeps the value, but generating a fresh key costs nothing because every session ends anyway. `OIDC_NAME` allows `[a-z0-9-]{1,32}`.
@@ -316,7 +327,7 @@ Notes: the old github image already took a base64 32-byte `SESSION_ENCRYPTION_KE
 4. Keycloak: `KEYCLOAK_SERVER_URL` to `KEYCLOAK_URL`; `KEYCLOAK_AUTH_METHOD` to `KEYCLOAK_GRANT_TYPE`. If you relied on the old `password` default, either set `KEYCLOAK_GRANT_TYPE=password` or move to a service-account client with the `realm-management` roles `view-users`, `query-users`, `view-clients`, `query-clients`, `query-groups`.
 5. Google: drop `GOOGLE_*` and the login selector; run one instance per IdP.
 6. IdP: add `https://<host>/auth/oidc/<OIDC_NAME>/callback` as redirect URI (and `.../frontchannel-logout` and the post-logout URL if used).
-7. Traefik: keep the `/auth` router and the `/auth/ui` and `/auth/api` middlewares; point backends' JWKS URL at `/auth/jwks`.
+7. Traefik: keep the `/auth` router and the `/auth/ui` and `/auth/api` middlewares, apply the hardening above; point backends' JWKS URL at `/auth/jwks`.
 8. Roll out; users log in again.
 
 ### Recipe: github-fwd-auth image
@@ -324,9 +335,9 @@ Notes: the old github image already took a base64 32-byte `SESSION_ENCRYPTION_KE
 1. Set `PROVIDER=github`, `EXTERNAL_URL` (the old `BASE_URL`), `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` (the old `OAUTH_*`), `GITHUB_SCOPES` (default `read:org`, needed for the team lookup), **`GITHUB_ALLOWED_TEAMS`**, `GITHUB_ADMIN_TEAMS`, and `GITHUB_RELEVANT_TEAMS` for every other team a backend reads from the JWT. Delete `OAUTH_REDIRECT_URI`, `OAUTH_PROVIDER_*`, `SESSION_SECRET_KEY`, `JWT_ALGORITHM`, `LOG_LEVEL`.
 2. Sessions: keep or regenerate `SESSION_ENCRYPTION_KEY`; `COOKIE_DOMAIN` becomes `SESSION_COOKIE_DOMAIN` (leave empty for a host-only cookie), `COOKIE_INSECURE` becomes `SESSION_INSECURE_COOKIE`, `SESSION_MAX_AGE` becomes `SESSION_MAX_AGE_SECONDS` (default is now 86400; set `604800` to keep a week). For several replicas enable Redis.
 3. JWT: `CREATE_JWT` becomes `JWT_ENABLED`; set `JWT_PRIVATE_KEY` and `JWT_ISSUER` (now defaults to `EXTERNAL_URL`). Backends read the login from `preferred_username` and the numeric ID from `sub`.
-4. `API_KEYS`: rewrite as `name:secret` with secrets of 16 bytes or more.
+4. `API_KEYS`: rewrite as `name:secret` with unique secrets of 16 bytes or more; add `API_KEY_PERMISSIONS` (`name=*:write` for the old unrestricted access, or narrower permissions) for backends that check permissions.
 5. GitHub OAuth app: set the callback URL to `https://<host>/auth/github/callback`.
-6. Traefik: add the router `Host(...) && PathPrefix(`/auth`)` to the forwardauth service (no forwardAuth middleware on it); change the middleware addresses to `http://<service>:8080/auth/ui` and `/auth/api`; backends fetch `/auth/jwks`. Probes use `/auth/health` and `/auth/ready`. Logout links point to `GET /auth/github/logout`.
+6. Traefik: add the router `Host(...) && PathPrefix(`/auth`)` to the forwardauth service (no forwardAuth middleware on it); change the middleware addresses to `http://<service>:8080/auth/ui` and `/auth/api` and apply the hardening above; backends fetch `/auth/jwks`. Probes use `/auth/health` and `/auth/ready`. Logout links point to `GET /auth/github/logout`.
 7. Roll out; users log in again.
 
 ### Backends verifying the JWT
