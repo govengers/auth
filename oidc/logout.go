@@ -2,12 +2,14 @@ package oidc
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/fetchmetadata"
 	"github.com/govengers/auth/internal/redirect"
+	"github.com/govengers/auth/session"
 )
 
 const loggedOutPage = "<!doctype html><html><head><title>Logged out</title></head><body></body></html>"
@@ -27,15 +29,15 @@ func (p *Provider) handleLogout(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the hint or OnLogout
-	identity := p.sessionIdentity(ctx, request)
-	rawIdentityToken := p.ownIdentityToken(ctx, request, identity)
+	current, identity, identityError := p.sessionIdentity(ctx, request)
+	rawIdentityToken, tokenError := p.ownIdentityToken(ctx, current, identity)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
 		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: err, Identity: identity})
 		return
 	}
 	p.runOnLogout(ctx, identity)
 	redirect.To(writer, p.logoutLocation(rawIdentityToken))
-	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity})
+	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity, Err: errors.Join(identityError, tokenError)})
 }
 
 // handleFrontChannelLogout is OpenID Connect Front-Channel Logout 1.0: the IdP loads it in an iframe.
@@ -47,7 +49,7 @@ func (p *Provider) handleFrontChannelLogout(writer http.ResponseWriter, request 
 	writer.Header().Set("Cache-Control", "no-store, must-revalidate")
 	writer.Header().Set("Pragma", "no-cache")
 	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the sid check or OnLogout
-	identity := p.sessionIdentity(ctx, request)
+	_, identity, readError := p.sessionIdentity(ctx, request)
 	if err := p.checkFrontChannelRequest(request.URL.Query(), identity); err != nil {
 		p.refuseFrontChannel(writer, request, err)
 		return
@@ -64,7 +66,7 @@ func (p *Provider) handleFrontChannelLogout(writer http.ResponseWriter, request 
 	}
 	p.runOnLogout(ctx, identity)
 	writeLoggedOutPage(writer)
-	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionFrontChannelLogout, Result: auth.ResultSuccess, Identity: identity})
+	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionFrontChannelLogout, Result: auth.ResultSuccess, Identity: identity, Err: readError})
 }
 
 func (p *Provider) isFrontChannelLogout(request *http.Request) bool {
@@ -115,36 +117,35 @@ func (p *Provider) refuseFrontChannel(writer http.ResponseWriter, request *http.
 	p.reporter.ReportFailure(request.Context(), auth.Outcome{Action: auth.ActionFrontChannelLogout, Err: err})
 }
 
-// sessionIdentity returns the identity of the request's session, or nil. A session that cannot be read
-// (none, expired, backend failure) is ended all the same: logout must not depend on reading it.
-func (p *Provider) sessionIdentity(ctx context.Context, request *http.Request) *auth.Identity {
+// sessionIdentity returns the request's session and its identity, nil when there is none (no cookie,
+// expired, revoked). A backend failure leaves the identity nil too and is returned to degrade the
+// outcome: logout ends the session all the same, only without OnLogout.
+func (p *Provider) sessionIdentity(ctx context.Context, request *http.Request) (session.Session, *auth.Identity, error) {
 	current, err := p.options.Sessions.Open(request)
 	if err != nil {
-		return nil
+		return session.Session{}, nil, unlessAbsent(err)
 	}
 	identity, err := current.Identity(ctx)
-	if err != nil {
-		return nil
-	}
-	return identity
+	return current, identity, unlessAbsent(err)
 }
 
 // ownIdentityToken returns the raw ID token stored at login when identity logged in through this
-// provider, else "": another IdP's token is no valid hint here.
-func (p *Provider) ownIdentityToken(ctx context.Context, request *http.Request, identity *auth.Identity) string {
+// provider, else "": another IdP's token is no valid hint here. A backend failure returns "" and the
+// error: the logout still works, only without id_token_hint, so the IdP session stays.
+func (p *Provider) ownIdentityToken(ctx context.Context, current session.Session, identity *auth.Identity) (string, error) {
 	if identity == nil || !p.owns(identity) {
-		return ""
+		return "", nil
 	}
-	current, err := p.options.Sessions.Open(request)
-	if err != nil {
-		return ""
-	}
-	// without the token the logout still works, only without id_token_hint
 	rawIdentityToken, _, err := current.Get(ctx, p.identityTokenKey)
-	if err != nil {
-		return ""
+	return string(rawIdentityToken), err
+}
+
+// unlessAbsent returns err unless it only says that there is nothing (ErrUnauthenticated).
+func unlessAbsent(err error) error {
+	if errors.Is(err, auth.ErrUnauthenticated) {
+		return nil
 	}
-	return string(rawIdentityToken)
+	return err
 }
 
 // owns reports whether the real identity (the impersonator while impersonating) logged in here.

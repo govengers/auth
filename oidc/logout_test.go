@@ -3,6 +3,7 @@ package oidc_test
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -101,6 +102,7 @@ func TestLogoutWithoutHintGoesToThePostLogoutURL(t *testing.T) {
 			require.Equal(t, testCase.wantLocation, response.Header().Get("Location"))
 			require.Equal(t, testCase.wantLogouts, ended.subjects())
 			require.Equal(t, http.StatusUnauthorized, person.me(application))
+			require.NoError(t, application.outcomes.last(t).Err, "no session is nothing to report")
 		})
 	}
 }
@@ -300,18 +302,62 @@ func TestLogoutIgnoresAClientDisconnect(t *testing.T) {
 	}
 }
 
+func TestLogoutDegradesWhenTheSessionCannotBeRead(t *testing.T) {
+	issuer := startIssuer(t, nil)
+	frontChannel := prefix + "/frontchannel-logout?iss=" + url.QueryEscape(issuer.IssuerURL()) + "&sid=idp-session-1"
+	testCases := []struct {
+		name        string
+		target      string
+		failingKey  string
+		wantStatus  int
+		wantAction  auth.Action
+		wantLogouts []string
+	}{
+		{name: "RP-initiated, identity", target: prefix + "/logout", failingKey: "identity", wantStatus: http.StatusFound, wantAction: auth.ActionLogout, wantLogouts: []string{}},
+		{name: "RP-initiated, ID token", target: prefix + "/logout", failingKey: providerName + ".id_token", wantStatus: http.StatusFound, wantAction: auth.ActionLogout, wantLogouts: []string{"user-1"}},
+		{name: "front-channel, identity", target: frontChannel, failingKey: "identity", wantStatus: http.StatusOK, wantAction: auth.ActionFrontChannelLogout, wantLogouts: []string{}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			backend := &failingBackend{}
+			ended := &logouts{}
+			application := newApplicationOn(t, newStoreOn(t, backend), issuer, func(options *oidc.Options) { options.OnLogout = ended.hook })
+			person := newBrowser(t)
+			require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
+			signedIn := maps.Clone(person.cookies)
+			backend.failKey(testCase.failingKey)
+
+			response := person.get(application.handler, testCase.target, nil)
+
+			require.Equal(t, testCase.wantStatus, response.Code)
+			require.False(t, queryOf(t, response.Header().Get("Location")).Has("id_token_hint"))
+			require.Equal(t, testCase.wantLogouts, ended.subjects())
+			outcome := application.outcomes.last(t)
+			require.Equal(t, testCase.wantAction, outcome.Action)
+			require.Equal(t, auth.ResultSuccess, outcome.Result)
+			require.ErrorIs(t, outcome.Err, errBackendDown, "the lost hook or hint shows on the outcome")
+			backend.failKey("")
+			person.cookies = signedIn
+			require.Equal(t, http.StatusUnauthorized, person.me(application), "the session ended all the same")
+		})
+	}
+}
+
 func withoutErrorAndIdentity(outcome auth.Outcome) auth.Outcome {
 	outcome.Err, outcome.Identity = nil, nil
 	return outcome
 }
 
-// failingBackend is a memory backend whose Revoke fails once failRevoke was called and whose Get fails on
-// a done context.
+// failingBackend is a memory backend whose Revoke fails once failRevoke was called, whose Put and Get of
+// the key set by failKey fail, and whose Get fails on a done context.
 type failingBackend struct {
 	session.Backend
-	mutex   sync.Mutex
-	failing bool
+	mutex      sync.Mutex
+	failing    bool
+	failingKey string
 }
+
+var errBackendDown = errors.New("backend down")
 
 func (b *failingBackend) failRevoke() {
 	b.mutex.Lock()
@@ -319,20 +365,42 @@ func (b *failingBackend) failRevoke() {
 	b.failing = true
 }
 
+func (b *failingBackend) failKey(key string) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	b.failingKey = key
+}
+
+func (b *failingBackend) fails(key string) bool {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return key == b.failingKey
+}
+
 func (b *failingBackend) Revoke(ctx context.Context, sessionID string, ttl time.Duration) error {
 	b.mutex.Lock()
 	failing := b.failing
 	b.mutex.Unlock()
 	if failing {
-		return errors.New("backend down")
+		return errBackendDown
 	}
 	return b.Backend.Revoke(ctx, sessionID, ttl)
+}
+
+func (b *failingBackend) Put(ctx context.Context, sessionID, key string, value []byte, ttl time.Duration) error {
+	if b.fails(key) {
+		return errBackendDown
+	}
+	return b.Backend.Put(ctx, sessionID, key, value, ttl)
 }
 
 // Get fails on a done context, as a network backend does.
 func (b *failingBackend) Get(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
+	}
+	if b.fails(key) {
+		return nil, false, errBackendDown
 	}
 	return b.Backend.Get(ctx, sessionID, key)
 }

@@ -209,6 +209,21 @@ func TestTheTokenIsCachedUntil30SecondsBeforeExpiry(t *testing.T) {
 	require.Equal(t, 1, keycloak.KeycloakClientLookups(), "the client UUID is cached")
 }
 
+func TestARefusedTokenIsReplacedByTheNextLogin(t *testing.T) {
+	keycloak := startKeycloak(t, nil, nil)
+	client := newClient(t, keycloak, nil)
+	_, err := client.Enrich(t.Context(), loginIdentity())
+	require.NoError(t, err)
+	keycloak.RevokeKeycloakTokens()
+
+	_, err = client.Enrich(t.Context(), loginIdentity())
+	require.ErrorContains(t, err, "answered HTTP 401")
+	_, err = client.Enrich(t.Context(), loginIdentity())
+
+	require.NoError(t, err, "the refused token was dropped, not kept until its renewal time")
+	require.Equal(t, 2, keycloak.KeycloakTokenRequests())
+}
+
 func TestAFailedClientLookupIsRetriedByTheNextLogin(t *testing.T) {
 	failures := &failFirst{path: "/admin/realms/" + realm + "/clients"}
 	keycloak := startKeycloak(t, nil, failures.wrap)
@@ -259,6 +274,7 @@ func TestEnrichRefusesMissingRequirements(t *testing.T) {
 }
 
 func TestEnrichFailuresArePlainErrors(t *testing.T) {
+	const marker = "alice@example.com"
 	keycloak := startKeycloak(t, nil, nil)
 	unreachable := &fakeKeycloak{url: "http://127.0.0.1:1"}
 	testCases := []struct {
@@ -271,6 +287,9 @@ func TestEnrichFailuresArePlainErrors(t *testing.T) {
 		{name: "wrong service secret", keycloak: keycloak, configure: func(options *Options) { options.ClientSecret = "wrong" }, identity: loginIdentity()},
 		{name: "unknown client roles client", keycloak: keycloak, configure: func(options *Options) { options.ClientRolesClientID = "other" }, identity: loginIdentity()},
 		{name: "unreachable", keycloak: unreachable, identity: loginIdentity()},
+		{name: "reason phrase of a proxy", keycloak: keycloak, configure: func(options *Options) {
+			options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: adminAPIAnswer{reason: marker}}
+		}, identity: loginIdentity()},
 		{name: "no subject", keycloak: keycloak, identity: &auth.Identity{}},
 		{name: "no identity", keycloak: keycloak, identity: nil},
 	}
@@ -285,6 +304,7 @@ func TestEnrichFailuresArePlainErrors(t *testing.T) {
 			require.Equal(t, http.StatusInternalServerError, status)
 			require.NotContains(t, err.Error(), serviceSecret)
 			require.NotContains(t, err.Error(), "wrong")
+			require.NotContains(t, err.Error(), marker, "the reason phrase is the server's free text")
 		})
 	}
 }
@@ -369,6 +389,19 @@ func (c *testClock) advance(duration time.Duration) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.current = c.current.Add(duration)
+}
+
+// adminAPIAnswer answers every Admin API call with 502 and its own reason phrase, and passes the other
+// requests on.
+type adminAPIAnswer struct {
+	reason string
+}
+
+func (a adminAPIAnswer) RoundTrip(request *http.Request) (*http.Response, error) {
+	if !strings.HasPrefix(request.URL.Path, "/admin/") {
+		return http.DefaultTransport.RoundTrip(request)
+	}
+	return &http.Response{Status: "502 " + a.reason, StatusCode: http.StatusBadGateway, Header: http.Header{}, Body: http.NoBody, Request: request}, nil
 }
 
 // failFirst answers the first request to path with 503.

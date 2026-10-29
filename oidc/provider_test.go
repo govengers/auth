@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -99,6 +100,19 @@ func TestNewFailsWhenDiscoveryFails(t *testing.T) {
 	}
 	_, err := oidc.New(t.Context(), discoveryOptions(t, serveDiscovery(t, "", "")))
 	require.NoError(t, err, "the served document is valid without a change")
+}
+
+func TestDiscoveryErrorsCarryNoAnswerText(t *testing.T) {
+	const marker = "alice@example.com"
+	options := discoveryOptions(t, startIssuer(t, nil).IssuerURL())
+	options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: &answeringTransport{
+		path: "/.well-known/openid-configuration", status: http.StatusServiceUnavailable, reason: marker, contentType: "text/html", body: "<p>" + marker + "</p>",
+	}}
+
+	_, err := oidc.New(t.Context(), options)
+
+	require.ErrorContains(t, err, "discover issuer: 503 Service Unavailable")
+	require.NotContains(t, err.Error(), marker, "the answer's free text stays out of the error")
 }
 
 func discoveryOptions(t *testing.T, issuer string) *oidc.Options {
