@@ -1,6 +1,7 @@
 package oidc_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -73,32 +74,60 @@ func TestNewValidatesOptions(t *testing.T) {
 
 func TestNewFailsWhenDiscoveryFails(t *testing.T) {
 	issuer := startIssuer(t, nil)
-	badEndSession := httptest.NewUnstartedServer(nil)
-	document := []byte(`{"issuer":"http://` + badEndSession.Listener.Addr().String() + `","end_session_endpoint":"/logout"}`)
-	badEndSession.Config.Handler = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write(document) // the test reads the outcome from New, not from this write
-	})
-	badEndSession.Start()
-	t.Cleanup(badEndSession.Close)
 	testCases := []struct {
-		name   string
-		issuer string
+		name      string
+		issuer    string
+		wantError string
 	}{
-		{name: "unreachable", issuer: "http://127.0.0.1:1"},
-		{name: "issuer mismatch", issuer: issuer.IssuerURL() + "/"},
-		{name: "no discovery document", issuer: issuer.IssuerURL() + "/nothing"},
-		{name: "relative end_session_endpoint", issuer: badEndSession.URL},
+		{name: "unreachable", issuer: "http://127.0.0.1:1", wantError: "discover issuer"},
+		{name: "issuer mismatch", issuer: issuer.IssuerURL() + "/", wantError: "discover issuer"},
+		{name: "no discovery document", issuer: issuer.IssuerURL() + "/nothing", wantError: "discover issuer"},
+		{name: "plain HTTP authorization endpoint", issuer: serveDiscovery(t, "authorization_endpoint", "http://idp.example.com/authorize"), wantError: "authorization_endpoint"},
+		{name: "plain HTTP token endpoint", issuer: serveDiscovery(t, "token_endpoint", "http://idp.example.com/token"), wantError: "token_endpoint"},
+		{name: "no token endpoint", issuer: serveDiscovery(t, "token_endpoint", ""), wantError: "token_endpoint"},
+		{name: "plain HTTP JWKS", issuer: serveDiscovery(t, "jwks_uri", "http://idp.example.com/jwks"), wantError: "jwks_uri"},
+		{name: "plain HTTP end_session_endpoint", issuer: serveDiscovery(t, "end_session_endpoint", "http://idp.example.com/logout"), wantError: "end_session_endpoint"},
+		{name: "relative end_session_endpoint", issuer: serveDiscovery(t, "end_session_endpoint", "/logout"), wantError: "end_session_endpoint"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, err := oidc.New(t.Context(), &oidc.Options{
-				Name: "test", Issuer: testCase.issuer, ClientID: clientID, ClientSecret: clientSecret, ExternalURL: externalURL, Sessions: newStore(t),
-			})
+			_, err := oidc.New(t.Context(), discoveryOptions(t, testCase.issuer))
 
 			require.ErrorContains(t, err, `oidc provider "test"`)
+			require.ErrorContains(t, err, testCase.wantError)
 		})
 	}
+	_, err := oidc.New(t.Context(), discoveryOptions(t, serveDiscovery(t, "", "")))
+	require.NoError(t, err, "the served document is valid without a change")
+}
+
+func discoveryOptions(t *testing.T, issuer string) *oidc.Options {
+	t.Helper()
+	return &oidc.Options{Name: "test", Issuer: issuer, ClientID: clientID, ClientSecret: clientSecret, ExternalURL: externalURL, Sessions: newStore(t)}
+}
+
+// serveDiscovery serves a discovery document on loopback whose endpoints are the server's own, with
+// field set to value unless field is "", and returns the issuer URL.
+func serveDiscovery(t *testing.T, field, value string) string {
+	t.Helper()
+	server := httptest.NewUnstartedServer(nil)
+	issuer := "http://" + server.Listener.Addr().String()
+	document := map[string]string{
+		"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token",
+		"jwks_uri": issuer + "/jwks", "end_session_endpoint": issuer + "/logout",
+	}
+	if field != "" {
+		document[field] = value
+	}
+	body, err := json.Marshal(document)
+	require.NoError(t, err)
+	server.Config.Handler = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write(body) // the test reads the outcome from New, not from this write
+	})
+	server.Start()
+	t.Cleanup(server.Close)
+	return issuer
 }
 
 func TestNewDoesNotKeepTheCallersOptions(t *testing.T) {
@@ -117,7 +146,7 @@ func TestNewDoesNotKeepTheCallersOptions(t *testing.T) {
 	require.Equal(t, before.ExternalURL, options.ExternalURL)
 	require.Empty(t, options.PathPrefix)
 	options.Scopes[0] = "changed"
-	login := newBrowser(t).app(mount(t, before.Sessions, provider), prefix+"/login", nil)
+	login := newBrowser(t).get(mount(t, before.Sessions, provider), prefix+"/login", nil)
 	require.Equal(t, "openid email", queryOf(t, login.Header().Get("Location")).Get("scope"))
 }
 
@@ -134,9 +163,9 @@ func TestScopes(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			app := newApp(t, issuer, func(options *oidc.Options) { options.Scopes = testCase.scopes })
+			application := newApplication(t, issuer, func(options *oidc.Options) { options.Scopes = testCase.scopes })
 
-			login := newBrowser(t).app(app.handler, prefix+"/login", nil)
+			login := newBrowser(t).get(application.handler, prefix+"/login", nil)
 
 			require.Equal(t, testCase.want, queryOf(t, login.Header().Get("Location")).Get("scope"))
 		})
@@ -155,9 +184,9 @@ func TestRoutesAndLoginURL(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			app := newApp(t, issuer, func(options *oidc.Options) { options.PathPrefix = testCase.pathPrefix })
+			application := newApplication(t, issuer, func(options *oidc.Options) { options.PathPrefix = testCase.pathPrefix })
 
-			routes := app.provider.Routes()
+			routes := application.provider.Routes()
 
 			paths := []string{}
 			for _, route := range routes {
@@ -168,15 +197,15 @@ func TestRoutesAndLoginURL(t *testing.T) {
 				testCase.wantPathPrefix + "/login", testCase.wantPathPrefix + "/callback",
 				testCase.wantPathPrefix + "/logout", testCase.wantPathPrefix + "/frontchannel-logout",
 			}, paths)
-			require.Equal(t, externalURL+testCase.wantPathPrefix+"/login", app.provider.LoginURL())
-			require.Equal(t, "test", app.provider.Name())
+			require.Equal(t, externalURL+testCase.wantPathPrefix+"/login", application.provider.LoginURL())
+			require.Equal(t, "test", application.provider.Name())
 		})
 	}
 }
 
 func TestLoginURLWorksAsTheGuardsLoginURL(t *testing.T) {
-	app := newApp(t, startIssuer(t, nil), nil)
-	guard, err := session.NewGuard(&session.GuardOptions{Store: app.store, LoginURL: app.provider.LoginURL()})
+	application := newApplication(t, startIssuer(t, nil), nil)
+	guard, err := session.NewGuard(&session.GuardOptions{Store: application.store, LoginURL: application.provider.LoginURL()})
 	require.NoError(t, err)
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/reports?year=2026", nil)
 	recorder := httptest.NewRecorder()

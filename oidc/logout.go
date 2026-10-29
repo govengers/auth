@@ -20,7 +20,7 @@ func (p *Provider) handleLogout(writer http.ResponseWriter, request *http.Reques
 		p.handleFrontChannelLogout(writer, request)
 		return
 	}
-	ctx := request.Context()
+	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the hint or OnLogout
 	identity := p.sessionIdentity(ctx, request)
 	rawIdentityToken := p.ownIdentityToken(ctx, request, identity)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
@@ -40,7 +40,7 @@ func (p *Provider) handleLogout(writer http.ResponseWriter, request *http.Reques
 func (p *Provider) handleFrontChannelLogout(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Cache-Control", "no-store, must-revalidate")
 	writer.Header().Set("Pragma", "no-cache")
-	ctx := request.Context()
+	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the sid check or OnLogout
 	identity := p.sessionIdentity(ctx, request)
 	if err := p.checkFrontChannelRequest(request.URL.Query(), identity); err != nil {
 		p.refuseFrontChannel(writer, request, err)
@@ -74,14 +74,28 @@ func (p *Provider) isFrontChannelLogout(request *http.Request) bool {
 func (p *Provider) checkFrontChannelRequest(query url.Values, identity *auth.Identity) error {
 	issuer, sessionID := query.Get("iss"), query.Get("sid")
 	switch {
-	case query.Has("iss") != query.Has("sid") || (query.Has("iss") && (issuer == "" || sessionID == "")):
+	case !sentTogether(query):
 		return frontChannelInvalid("iss and sid must be sent together")
-	case query.Has("iss") && issuer != p.options.Issuer:
+	case issuer != "" && issuer != p.options.Issuer:
 		return frontChannelInvalid("unexpected issuer")
-	case sessionID != "" && identity != nil && p.owns(identity) && sessionID != stringClaim(identity.Real().Claims, "sid"):
+	case sessionID != "" && p.ownsDifferentSession(identity, sessionID):
 		return frontChannelInvalid("sid does not match the session")
 	}
 	return nil
+}
+
+// sentTogether reports whether iss and sid are both absent or both non-empty.
+func sentTogether(query url.Values) bool {
+	if !query.Has("iss") && !query.Has("sid") {
+		return true
+	}
+	return query.Get("iss") != "" && query.Get("sid") != ""
+}
+
+// ownsDifferentSession reports whether identity logged in here, with an IdP session (sid claim) other than
+// sessionID.
+func (p *Provider) ownsDifferentSession(identity *auth.Identity, sessionID string) bool {
+	return identity != nil && p.owns(identity) && stringClaim(identity.Real().Claims, "sid") != sessionID
 }
 
 func frontChannelInvalid(reason string) error {

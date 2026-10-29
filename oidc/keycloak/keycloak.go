@@ -142,22 +142,22 @@ func validate(options Options) error {
 func newTokenRequester(options Options) func(ctx context.Context) (*oauth2.Token, error) {
 	tokenURL := options.URL + "/realms/" + url.PathEscape(options.AuthenticationRealm) + "/protocol/openid-connect/token"
 	if options.GrantType == GrantTypePassword {
-		config := &oauth2.Config{
+		configuration := &oauth2.Config{
 			ClientID:     options.ClientID,
 			ClientSecret: options.ClientSecret,
 			Endpoint:     oauth2.Endpoint{TokenURL: tokenURL, AuthStyle: oauth2.AuthStyleInParams},
 		}
 		return func(ctx context.Context) (*oauth2.Token, error) {
-			return config.PasswordCredentialsToken(ctx, options.Username, options.Password)
+			return configuration.PasswordCredentialsToken(ctx, options.Username, options.Password)
 		}
 	}
-	config := &clientcredentials.Config{
+	configuration := &clientcredentials.Config{
 		ClientID:     options.ClientID,
 		ClientSecret: options.ClientSecret,
 		TokenURL:     tokenURL,
 		AuthStyle:    oauth2.AuthStyleInParams,
 	}
-	return config.Token
+	return configuration.Token
 }
 
 // Enrich has the auth.Hook shape; identity.Subject is the Keycloak user ID. It returns a Clone with
@@ -216,11 +216,17 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 		return c.adminToken, nil
 	}
 	token, err := c.requestToken(context.WithValue(ctx, oauth2.HTTPClient, c.options.HTTPClient))
+	var retrieveError *oauth2.RetrieveError
+	if errors.As(err, &retrieveError) {
+		// the status only: the answer's description and body are Keycloak's free text (LOG-009)
+		return "", fmt.Errorf("request admin token: token endpoint answered HTTP %d", retrieveError.Response.StatusCode)
+	}
 	if err != nil {
 		return "", dependency.Error("request admin token", err)
 	}
-	// oauth2 turns expires_in into Expiry on the wall clock (the client credentials grant keeps no
-	// ExpiresIn); without expires_in Expiry is zero and the token is not reused.
+	// oauth2 turns expires_in into Expiry with time.Now (the client credentials grant keeps no ExpiresIn),
+	// so the remaining lifetime is read off the wall clock on purpose and only the deadline uses c.now;
+	// without expires_in Expiry is zero and the token is not reused.
 	lifetime := time.Until(token.Expiry)
 	c.adminToken = token.AccessToken
 	c.adminTokenRenewAt = c.now().Add(lifetime - tokenRenewalMargin)

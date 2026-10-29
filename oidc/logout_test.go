@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -45,12 +46,12 @@ func (l *logouts) subjects() []string {
 func TestLogoutSendsTheIDTokenHintToTheEndSessionEndpoint(t *testing.T) {
 	issuer := startIssuer(t, nil)
 	ended := &logouts{}
-	app := newApp(t, issuer, func(options *oidc.Options) { options.OnLogout = ended.hook })
+	application := newApplication(t, issuer, func(options *oidc.Options) { options.OnLogout = ended.hook })
 	person := newBrowser(t)
-	require.Equal(t, http.StatusFound, person.signIn(app, prefix+"/login").Code)
-	identityToken := person.sessionValue(app.store, providerName+".id_token")
+	require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
+	identityToken := person.sessionValue(application.store, providerName+".id_token")
 
-	response := person.app(app.handler, prefix+"/logout", nil)
+	response := person.get(application.handler, prefix+"/logout", nil)
 
 	require.Equal(t, http.StatusFound, response.Code)
 	location := response.Header().Get("Location")
@@ -59,10 +60,10 @@ func TestLogoutSendsTheIDTokenHintToTheEndSessionEndpoint(t *testing.T) {
 	require.Equal(t, clientID, query.Get("client_id"))
 	require.Equal(t, identityToken, query.Get("id_token_hint"))
 	require.Equal(t, externalURL+"/", query.Get("post_logout_redirect_uri"))
-	require.Equal(t, http.StatusUnauthorized, person.me(app))
+	require.Equal(t, http.StatusUnauthorized, person.me(application))
 	require.Equal(t, []string{"user-1"}, ended.subjects())
-	require.Equal(t, auth.ActionLogout, app.outcomes.last(t).Action)
-	require.Equal(t, auth.ResultSuccess, app.outcomes.last(t).Result)
+	require.Equal(t, auth.ActionLogout, application.outcomes.last(t).Action)
+	require.Equal(t, auth.ResultSuccess, application.outcomes.last(t).Result)
 
 	require.Equal(t, externalURL+"/", person.issuer(location))
 	require.Equal(t, []string{identityToken}, issuer.IDTokenHints())
@@ -85,46 +86,46 @@ func TestLogoutWithoutHintGoesToThePostLogoutURL(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			ended := &logouts{}
 			issuer := startIssuer(t, func(options *fakeprovider.OIDCOptions) { options.OmitEndSessionEndpoint = testCase.omitEndpoint })
-			app := newApp(t, issuer, func(options *oidc.Options) {
+			application := newApplication(t, issuer, func(options *oidc.Options) {
 				options.OnLogout = ended.hook
 				options.PostLogoutURL = testCase.postLogoutURL
 			})
 			person := newBrowser(t)
 			if testCase.signedIn {
-				require.Equal(t, http.StatusFound, person.signIn(app, prefix+"/login").Code)
+				require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
 			}
 
-			response := person.app(app.handler, prefix+"/logout", nil)
+			response := person.get(application.handler, prefix+"/logout", nil)
 
 			require.Equal(t, http.StatusFound, response.Code)
 			require.Equal(t, testCase.wantLocation, response.Header().Get("Location"))
 			require.Equal(t, testCase.wantLogouts, ended.subjects())
-			require.Equal(t, http.StatusUnauthorized, person.me(app))
+			require.Equal(t, http.StatusUnauthorized, person.me(application))
 		})
 	}
 }
 
 func TestLogoutOfAnotherProvidersSessionSendsNoHint(t *testing.T) {
-	app := newApp(t, startIssuer(t, nil), nil)
+	application := newApplication(t, startIssuer(t, nil), nil)
 	person := newBrowser(t)
-	person.plantSession(app.store, &auth.Identity{Provider: "password", Subject: "user-9", Active: true})
+	person.plantSession(application.store, &auth.Identity{Provider: "password", Subject: "user-9", Active: true})
 
-	response := person.app(app.handler, prefix+"/logout", nil)
+	response := person.get(application.handler, prefix+"/logout", nil)
 
 	require.Equal(t, externalURL+"/", response.Header().Get("Location"))
-	require.Equal(t, http.StatusUnauthorized, person.me(app), "the session ends all the same")
+	require.Equal(t, http.StatusUnauthorized, person.me(application), "the session ends all the same")
 }
 
 func TestLogoutWhileImpersonatingUsesTheRealLogin(t *testing.T) {
 	issuer := startIssuer(t, nil)
-	app := newApp(t, issuer, nil)
+	application := newApplication(t, issuer, nil)
 	person := newBrowser(t)
-	require.Equal(t, http.StatusFound, person.signIn(app, prefix+"/login").Code)
-	person.replaceIdentity(app.store, func(real *auth.Identity) *auth.Identity {
+	require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
+	person.replaceIdentity(application.store, func(real *auth.Identity) *auth.Identity {
 		return &auth.Identity{Provider: "password", Subject: "user-9", Active: true, Impersonator: real}
 	})
 
-	response := person.app(app.handler, prefix+"/logout", nil)
+	response := person.get(application.handler, prefix+"/logout", nil)
 
 	require.True(t, strings.HasPrefix(response.Header().Get("Location"), issuer.IssuerURL()+"/end_session?"))
 }
@@ -156,32 +157,32 @@ func TestFrontChannelLogout(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			issuer := startIssuer(t, nil)
 			ended := &logouts{}
-			app := newApp(t, issuer, func(options *oidc.Options) {
+			application := newApplication(t, issuer, func(options *oidc.Options) {
 				options.DisableIframeLogoutDetection = testCase.disableIframe
 				options.OnLogout = ended.hook
 			})
 			person := newBrowser(t)
 			switch testCase.session {
 			case "own":
-				require.Equal(t, http.StatusFound, person.signIn(app, prefix+"/login").Code)
+				require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
 			case "foreign":
-				person.plantSession(app.store, &auth.Identity{Provider: "other", Subject: "user-9", Active: true})
+				person.plantSession(application.store, &auth.Identity{Provider: "other", Subject: "user-9", Active: true})
 			}
 			target := prefix + strings.ReplaceAll(testCase.target, "{issuer}", issuer.IssuerURL())
 
-			response := person.app(app.handler, target, testCase.header)
+			response := person.get(application.handler, target, testCase.header)
 
 			require.Equal(t, testCase.wantStatus, response.Code, response.Body.String())
 			if testCase.wantStatus == http.StatusOK {
 				require.Equal(t, loggedOutPage, response.Body.String())
 				require.Equal(t, "no-store, must-revalidate", response.Header().Get("Cache-Control"))
 				require.Equal(t, "no-cache", response.Header().Get("Pragma"))
-				require.Equal(t, auth.ActionFrontChannelLogout, app.outcomes.last(t).Action)
+				require.Equal(t, auth.ActionFrontChannelLogout, application.outcomes.last(t).Action)
 			}
 			if testCase.wantStatus == http.StatusBadRequest {
-				require.Equal(t, auth.ResultDenied, app.outcomes.last(t).Result)
+				require.Equal(t, auth.ResultDenied, application.outcomes.last(t).Result)
 			}
-			sessionAlive := person.me(app) == http.StatusOK
+			sessionAlive := person.me(application) == http.StatusOK
 			require.Equal(t, testCase.session != "none" && !testCase.wantEnded, sessionAlive)
 			if testCase.wantEnded {
 				require.Equal(t, []string{"user-1"}, ended.subjects())
@@ -204,16 +205,49 @@ func TestLogoutAnswers500WhenTheSessionCannotBeEnded(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			backend := &failingBackend{}
 			store := newStoreOn(t, backend)
-			app := newAppOn(t, store, startIssuer(t, nil), nil)
+			application := newApplicationOn(t, store, startIssuer(t, nil), nil)
 			person := newBrowser(t)
-			require.Equal(t, http.StatusFound, person.signIn(app, prefix+"/login").Code)
+			require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
 			backend.failRevoke()
 
-			response := person.app(app.handler, prefix+testCase.target, nil)
+			response := person.get(application.handler, prefix+testCase.target, nil)
 
 			require.Equal(t, http.StatusInternalServerError, response.Code)
 			require.Equal(t, testCase.wantType, response.Header().Get("Content-Type"))
-			require.Equal(t, auth.Outcome{Provider: providerName, Action: testCase.wantAction, Result: auth.ResultError}, withoutErrorAndIdentity(app.outcomes.last(t)))
+			require.Equal(t, auth.Outcome{Provider: providerName, Action: testCase.wantAction, Result: auth.ResultError}, withoutErrorAndIdentity(application.outcomes.last(t)))
+		})
+	}
+}
+
+func TestLogoutIgnoresAClientDisconnect(t *testing.T) {
+	issuer := startIssuer(t, nil)
+	testCases := []struct {
+		name     string
+		target   string
+		wantHint bool
+	}{
+		{name: "RP-initiated", target: prefix + "/logout", wantHint: true},
+		{name: "front-channel", target: prefix + "/frontchannel-logout?iss=" + url.QueryEscape(issuer.IssuerURL()) + "&sid=idp-session-1"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			ended := &logouts{}
+			application := newApplicationOn(t, newStoreOn(t, &failingBackend{}), issuer, func(options *oidc.Options) { options.OnLogout = ended.hook })
+			person := newBrowser(t)
+			require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
+			disconnected, disconnect := context.WithCancel(t.Context())
+			disconnect()
+			request := httptest.NewRequestWithContext(disconnected, http.MethodGet, testCase.target, nil)
+			for _, cookie := range person.cookies {
+				request.AddCookie(cookie)
+			}
+			response := httptest.NewRecorder()
+
+			application.handler.ServeHTTP(response, request)
+
+			require.Equal(t, []string{"user-1"}, ended.subjects(), "OnLogout still learns who logged out")
+			require.Equal(t, testCase.wantHint, queryOf(t, response.Header().Get("Location")).Has("id_token_hint"))
+			require.Equal(t, http.StatusUnauthorized, person.me(application), "the session ended")
 		})
 	}
 }
@@ -223,7 +257,8 @@ func withoutErrorAndIdentity(outcome auth.Outcome) auth.Outcome {
 	return outcome
 }
 
-// failingBackend is a memory backend whose Revoke fails once failRevoke was called.
+// failingBackend is a memory backend whose Revoke fails once failRevoke was called and whose Get fails on
+// a done context.
 type failingBackend struct {
 	session.Backend
 	mutex   sync.Mutex
@@ -246,6 +281,14 @@ func (b *failingBackend) Revoke(ctx context.Context, sessionID string, ttl time.
 	return b.Backend.Revoke(ctx, sessionID, ttl)
 }
 
+// Get fails on a done context, as a network backend does.
+func (b *failingBackend) Get(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return b.Backend.Get(ctx, sessionID, key)
+}
+
 func newStoreOn(t *testing.T, backend *failingBackend) *session.Store {
 	t.Helper()
 	memory, err := session.NewMemoryBackend(nil)
@@ -259,7 +302,7 @@ func newStoreOn(t *testing.T, backend *failingBackend) *session.Store {
 // plantSession gives the browser a session holding identity, as another provider's login would.
 func (b *browser) plantSession(store *session.Store, identity *auth.Identity) {
 	b.t.Helper()
-	b.app(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	b.get(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		current, err := store.Start(request.Context(), writer, request)
 		require.NoError(b.t, err)
 		require.NoError(b.t, current.SaveIdentity(request.Context(), identity))

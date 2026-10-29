@@ -62,12 +62,12 @@ func ExampleNew() {
 		fmt.Println(err)
 		return
 	}
-	mux := http.NewServeMux()
-	auth.RegisterRoutes(mux, provider.Routes())
-	mux.Handle("GET /reports", guard.RequireUI()(auth.IdentityHandler()))
+	serveMux := http.NewServeMux()
+	auth.RegisterRoutes(serveMux, provider.Routes())
+	serveMux.Handle("GET /reports", guard.RequireUI()(auth.IdentityHandler()))
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/reports", nil))
+	serveMux.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/reports", nil))
 
 	for _, route := range provider.Routes() {
 		fmt.Println(route.Method, route.Path)

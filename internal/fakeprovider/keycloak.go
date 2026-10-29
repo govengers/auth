@@ -18,13 +18,13 @@ type keycloakRole struct {
 // /realms/{realm}/protocol/openid-connect/token for KeycloakAuthenticationRealm, and the five Admin API
 // GETs the keycloak package calls for KeycloakRealm, answering for User. Admin GETs need a token of that
 // endpoint; an unknown user, client or realm is a 404, as in Keycloak.
-func (h *OIDCHandler) registerKeycloakRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /realms/{realm}/protocol/openid-connect/token", h.keycloakToken)
-	mux.HandleFunc("GET /admin/realms/{realm}/users/{user}/role-mappings/realm/composite", h.requireAdmin(h.keycloakRealmRoles))
-	mux.HandleFunc("GET /admin/realms/{realm}/clients", h.requireAdmin(h.keycloakClients))
-	mux.HandleFunc("GET /admin/realms/{realm}/users/{user}/role-mappings/clients/{client}/composite", h.requireAdmin(h.keycloakClientRoles))
-	mux.HandleFunc("GET /admin/realms/{realm}/users/{user}/groups", h.requireAdmin(h.keycloakGroups))
-	mux.HandleFunc("GET /admin/realms/{realm}/users/{user}", h.requireAdmin(h.keycloakUser))
+func (h *OIDCHandler) registerKeycloakRoutes(serveMux *http.ServeMux) {
+	serveMux.HandleFunc("POST /realms/{realm}/protocol/openid-connect/token", h.keycloakToken)
+	serveMux.HandleFunc("GET /admin/realms/{realm}/users/{user}/role-mappings/realm/composite", h.requireAdmin(h.keycloakRealmRoles))
+	serveMux.HandleFunc("GET /admin/realms/{realm}/clients", h.requireAdmin(h.keycloakClients))
+	serveMux.HandleFunc("GET /admin/realms/{realm}/users/{user}/role-mappings/clients/{client}/composite", h.requireAdmin(h.keycloakClientRoles))
+	serveMux.HandleFunc("GET /admin/realms/{realm}/users/{user}/groups", h.requireAdmin(h.keycloakGroups))
+	serveMux.HandleFunc("GET /admin/realms/{realm}/users/{user}", h.requireAdmin(h.keycloakUser))
 }
 
 // KeycloakTokenRequests returns how many requests reached the Keycloak token endpoint.

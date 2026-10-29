@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -22,9 +24,9 @@ var errProvisioning = errors.New("provisioning failed")
 
 func TestLoginRedirectsToTheIssuerWithStateNonceAndS256Challenge(t *testing.T) {
 	issuer := startIssuer(t, nil)
-	app := newApp(t, issuer, nil)
+	application := newApplication(t, issuer, nil)
 
-	response := newBrowser(t).app(app.handler, prefix+"/login", nil)
+	response := newBrowser(t).get(application.handler, prefix+"/login", nil)
 
 	require.Equal(t, http.StatusFound, response.Code)
 	require.Equal(t, "no-store", response.Header().Get("Cache-Control"))
@@ -39,22 +41,22 @@ func TestLoginRedirectsToTheIssuerWithStateNonceAndS256Challenge(t *testing.T) {
 	require.Len(t, query.Get("code_challenge"), 43)
 	require.Len(t, query.Get("state"), 43)
 	require.Len(t, query.Get("nonce"), 43)
-	require.Equal(t, auth.Outcome{Provider: providerName, Action: auth.ActionLogin, Result: auth.ResultSuccess}, app.outcomes.last(t))
+	require.Equal(t, auth.Outcome{Provider: providerName, Action: auth.ActionLogin, Result: auth.ResultSuccess}, application.outcomes.last(t))
 }
 
 func TestCallbackStartsARotatedSessionAndRedirectsToTheReturnPath(t *testing.T) {
-	app := newApp(t, startIssuer(t, nil), nil)
+	application := newApplication(t, startIssuer(t, nil), nil)
 	person := newBrowser(t)
-	callback := person.toCallback(app, prefix+"/login?return_to=%2Fdashboard%3Ftab%3D2")
+	callback := person.toCallback(application, prefix+"/login?return_to=%2Fdashboard%3Ftab%3D2")
 	loginCookie := person.cookies["auth_session"].Value
 
-	response := person.app(app.handler, callback, nil)
+	response := person.get(application.handler, callback, nil)
 
 	require.Equal(t, http.StatusFound, response.Code, response.Body.String())
 	require.Equal(t, externalURL+"/dashboard?tab=2", response.Header().Get("Location"))
 	require.NotEqual(t, loginCookie, person.cookies["auth_session"].Value, "the session ID rotates at login")
-	require.Contains(t, person.sessionValue(app.store, providerName+".id_token"), ".")
-	current := person.app(app.handler, "/me", nil)
+	require.Contains(t, person.sessionValue(application.store, providerName+".id_token"), ".")
+	current := person.get(application.handler, "/me", nil)
 	require.Equal(t, http.StatusOK, current.Code)
 	var identity auth.IdentityResponse
 	require.NoError(t, json.Unmarshal(current.Body.Bytes(), &identity))
@@ -63,14 +65,14 @@ func TestCallbackStartsARotatedSessionAndRedirectsToTheReturnPath(t *testing.T) 
 		Picture: "https://example.com/ada.png", Active: true, Roles: []string{},
 		OIDCRoles: []string{"admin"}, OIDCClientRoles: []string{"editor"}, Groups: []string{"/staff"},
 	}, identity)
-	outcome := app.outcomes.last(t)
+	outcome := application.outcomes.last(t)
 	require.Equal(t, auth.ActionCallback, outcome.Action)
 	require.Equal(t, auth.ResultSuccess, outcome.Result)
 	require.Equal(t, "idp-session-1", outcome.Identity.Claims["sid"])
 }
 
 func TestCallbackReturnsOnlyToSafePaths(t *testing.T) {
-	app := newApp(t, startIssuer(t, nil), nil)
+	application := newApplication(t, startIssuer(t, nil), nil)
 	testCases := []struct {
 		name     string
 		returnTo string
@@ -90,7 +92,7 @@ func TestCallbackReturnsOnlyToSafePaths(t *testing.T) {
 				loginTarget += "?return_to=" + url.QueryEscape(testCase.returnTo)
 			}
 
-			response := newBrowser(t).signIn(app, loginTarget)
+			response := newBrowser(t).signIn(application, loginTarget)
 
 			require.Equal(t, externalURL+testCase.want, response.Header().Get("Location"))
 		})
@@ -119,27 +121,27 @@ func TestCallbackRefusals(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			app := newApp(t, startIssuer(t, testCase.faults), nil)
+			application := newApplication(t, startIssuer(t, testCase.faults), nil)
 			person := newBrowser(t)
-			callback := person.toCallback(app, prefix+"/login")
+			callback := person.toCallback(application, prefix+"/login")
 			if testCase.callback != nil {
 				callback = testCase.callback(callback)
 			}
 			if testCase.replay {
-				require.Equal(t, http.StatusFound, person.app(app.handler, callback, nil).Code)
+				require.Equal(t, http.StatusFound, person.get(application.handler, callback, nil).Code)
 			}
 			if testCase.withoutJar {
 				person = newBrowser(t)
 			}
 
-			response := person.app(app.handler, callback, nil)
+			response := person.get(application.handler, callback, nil)
 
 			require.Equal(t, testCase.wantStatus, response.Code, response.Body.String())
 			require.JSONEq(t, `{"code":"`+testCase.wantCode+`","message":"`+messageOf(testCase.wantStatus)+`"}`, response.Body.String())
 			if !testCase.replay {
-				require.Equal(t, http.StatusUnauthorized, person.me(app), "no session")
+				require.Equal(t, http.StatusUnauthorized, person.me(application), "no session")
 			}
-			outcome := app.outcomes.last(t)
+			outcome := application.outcomes.last(t)
 			require.Equal(t, auth.ActionCallback, outcome.Action)
 			require.Equal(t, auth.ResultDenied, outcome.Result)
 			require.Error(t, outcome.Err)
@@ -150,16 +152,49 @@ func TestCallbackRefusals(t *testing.T) {
 func TestCallbackFailsWhenTheIssuerIsUnreachable(t *testing.T) {
 	issuer := startIssuer(t, nil)
 	transport := &failingTransport{failPath: "/token"}
-	app := newApp(t, issuer, func(options *oidc.Options) {
+	application := newApplication(t, issuer, func(options *oidc.Options) {
 		options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
 	})
 
-	response := newBrowser(t).signIn(app, prefix+"/login")
+	response := newBrowser(t).signIn(application, prefix+"/login")
 
 	require.Equal(t, http.StatusInternalServerError, response.Code)
 	require.JSONEq(t, `{"code":"internal","message":"internal error"}`, response.Body.String())
-	require.Equal(t, auth.ResultError, app.outcomes.last(t).Result)
+	require.Equal(t, auth.ResultError, application.outcomes.last(t).Result)
 	require.Positive(t, transport.requests(), "discovery went through HTTPClient")
+}
+
+func TestCallbackClassifiesTokenEndpointErrorsWithoutTheirText(t *testing.T) {
+	const marker = "alice@example.com"
+	testCases := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+		wantStatus  int
+		wantResult  auth.Result
+	}{
+		{name: "refusal with a description", status: http.StatusBadRequest, contentType: "application/json", body: `{"error":"invalid_grant","error_description":"` + marker + `","error_uri":"https://idp.example.com/` + marker + `"}`, wantStatus: http.StatusUnauthorized, wantResult: auth.ResultDenied},
+		{name: "refusal as a page", status: http.StatusUnauthorized, contentType: "text/html", body: "<p>" + marker + "</p>", wantStatus: http.StatusUnauthorized, wantResult: auth.ResultDenied},
+		{name: "outage as a page", status: http.StatusServiceUnavailable, contentType: "text/html", body: "<p>" + marker + "</p>", wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError},
+		{name: "outage with an error code", status: http.StatusBadGateway, contentType: "application/json", body: `{"error":"temporarily_unavailable","error_description":"` + marker + `"}`, wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			transport := &answeringTransport{path: "/token", status: testCase.status, contentType: testCase.contentType, body: testCase.body}
+			application := newApplication(t, startIssuer(t, nil), func(options *oidc.Options) {
+				options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
+			})
+
+			response := newBrowser(t).signIn(application, prefix+"/login")
+
+			require.Equal(t, testCase.wantStatus, response.Code, response.Body.String())
+			outcome := application.outcomes.last(t)
+			require.Equal(t, testCase.wantResult, outcome.Result)
+			require.ErrorContains(t, outcome.Err, "token endpoint answered HTTP "+strconv.Itoa(testCase.status))
+			require.NotContains(t, outcome.Err.Error(), marker, "the IdP's free text stays out of outcomes and events")
+		})
+	}
 }
 
 func TestAllowedEmailDomains(t *testing.T) {
@@ -182,9 +217,9 @@ func TestAllowedEmailDomains(t *testing.T) {
 			issuer := startIssuer(t, func(options *fakeprovider.OIDCOptions) {
 				options.User.Email, options.User.EmailVerified = testCase.email, testCase.emailVerified
 			})
-			app := newApp(t, issuer, func(options *oidc.Options) { options.AllowedEmailDomains = []string{"EXAMPLE.com", "corp.example"} })
+			application := newApplication(t, issuer, func(options *oidc.Options) { options.AllowedEmailDomains = []string{"EXAMPLE.com", "corp.example"} })
 
-			response := newBrowser(t).signIn(app, prefix+"/login")
+			response := newBrowser(t).signIn(application, prefix+"/login")
 
 			require.Equal(t, testCase.wantStatus, response.Code)
 			if testCase.wantStatus == http.StatusForbidden {
@@ -209,20 +244,20 @@ func TestOnLogin(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			app := newApp(t, startIssuer(t, nil), func(options *oidc.Options) { options.OnLogin = testCase.hook })
+			application := newApplication(t, startIssuer(t, nil), func(options *oidc.Options) { options.OnLogin = testCase.hook })
 			person := newBrowser(t)
 
-			response := person.signIn(app, prefix+"/login")
+			response := person.signIn(application, prefix+"/login")
 
 			require.Equal(t, testCase.wantStatus, response.Code)
-			outcome := app.outcomes.last(t)
+			outcome := application.outcomes.last(t)
 			require.Equal(t, "user-1", outcome.Identity.Subject, "the outcome names the authenticated user")
 			if testCase.wantCode != "" {
 				require.Contains(t, response.Body.String(), `"code":"`+testCase.wantCode+`"`)
-				require.Equal(t, http.StatusUnauthorized, person.me(app), "no session after a refused login")
+				require.Equal(t, http.StatusUnauthorized, person.me(application), "no session after a refused login")
 				return
 			}
-			current := person.app(app.handler, "/me", nil)
+			current := person.get(application.handler, "/me", nil)
 			var identity auth.IdentityResponse
 			require.NoError(t, json.Unmarshal(current.Body.Bytes(), &identity))
 			require.Equal(t, testCase.wantRoles, identity.Roles)
@@ -243,65 +278,65 @@ func TestErrorURL(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			app := newApp(t, startIssuer(t, nil), func(options *oidc.Options) { options.ErrorURL = testCase.errorURL })
+			application := newApplication(t, startIssuer(t, nil), func(options *oidc.Options) { options.ErrorURL = testCase.errorURL })
 			person := newBrowser(t)
 
-			response := person.app(app.handler, testCase.callback(person.toCallback(app, prefix+"/login")), nil)
+			response := person.get(application.handler, testCase.callback(person.toCallback(application, prefix+"/login")), nil)
 
 			require.Equal(t, http.StatusFound, response.Code)
 			require.Equal(t, testCase.wantLocation, response.Header().Get("Location"))
-			require.Equal(t, auth.ResultDenied, app.outcomes.last(t).Result)
+			require.Equal(t, auth.ResultDenied, application.outcomes.last(t).Result)
 		})
 	}
 }
 
 func TestErrorURLAlsoReceivesInternalFailures(t *testing.T) {
-	app := newApp(t, startIssuer(t, nil), func(options *oidc.Options) {
+	application := newApplication(t, startIssuer(t, nil), func(options *oidc.Options) {
 		options.ErrorURL = "/login"
 		options.OnLogin = refuseWith(errProvisioning)
 	})
 
-	response := newBrowser(t).signIn(app, prefix+"/login")
+	response := newBrowser(t).signIn(application, prefix+"/login")
 
 	require.Equal(t, externalURL+"/login?code=internal", response.Header().Get("Location"))
-	require.Equal(t, auth.ResultError, app.outcomes.last(t).Result)
+	require.Equal(t, auth.ResultError, application.outcomes.last(t).Result)
 }
 
 func TestGoogleStyleLoginWithAnOpaqueAccessToken(t *testing.T) {
 	issuer := startIssuer(t, func(options *fakeprovider.OIDCOptions) { options.OpaqueAccessToken = true })
-	app := newApp(t, issuer, func(options *oidc.Options) { options.ClaimMapper = oidc.GoogleClaimMapper })
+	application := newApplication(t, issuer, func(options *oidc.Options) { options.ClaimMapper = oidc.GoogleClaimMapper })
 	person := newBrowser(t)
 
-	require.Equal(t, http.StatusFound, person.signIn(app, prefix+"/login").Code)
+	require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
 
 	var identity auth.IdentityResponse
-	require.NoError(t, json.Unmarshal(person.app(app.handler, "/me", nil).Body.Bytes(), &identity))
+	require.NoError(t, json.Unmarshal(person.get(application.handler, "/me", nil).Body.Bytes(), &identity))
 	require.Equal(t, "ada", identity.Username, "the part of the email before @")
 	require.Empty(t, identity.OIDCRoles, "an opaque access token carries no roles")
 }
 
 func TestTwoProvidersShareOneStore(t *testing.T) {
 	store := newStore(t)
-	first := newAppOn(t, store, startIssuer(t, nil), nil)
+	first := newApplicationOn(t, store, startIssuer(t, nil), nil)
 	secondIssuer := startIssuer(t, func(options *fakeprovider.OIDCOptions) {
 		options.User.Subject = "user-2"
 		options.RedirectURIs = []string{externalURL + "/auth/oidc/second/callback"}
 	})
-	second := newAppOn(t, store, secondIssuer, func(options *oidc.Options) { options.Name = "second" })
+	second := newApplicationOn(t, store, secondIssuer, func(options *oidc.Options) { options.Name = "second" })
 	handler := mount(t, store, first.provider, second.provider)
 	person := newBrowser(t)
 
-	require.Equal(t, http.StatusFound, person.app(handler, person.toCallback(first, prefix+"/login"), nil).Code)
-	login := person.app(handler, "/auth/oidc/second/login", nil)
-	require.Equal(t, http.StatusFound, person.app(handler, person.issuer(login.Header().Get("Location")), nil).Code)
+	require.Equal(t, http.StatusFound, person.get(handler, person.toCallback(first, prefix+"/login"), nil).Code)
+	login := person.get(handler, "/auth/oidc/second/login", nil)
+	require.Equal(t, http.StatusFound, person.get(handler, person.issuer(login.Header().Get("Location")), nil).Code)
 
 	var identity auth.IdentityResponse
-	require.NoError(t, json.Unmarshal(person.app(handler, "/me", nil).Body.Bytes(), &identity))
+	require.NoError(t, json.Unmarshal(person.get(handler, "/me", nil).Body.Bytes(), &identity))
 	require.Equal(t, "second", identity.Provider, "the second login replaced the first session")
 	require.Equal(t, "user-2", identity.Subject)
-	logout := person.app(handler, prefix+"/logout", nil)
+	logout := person.get(handler, prefix+"/logout", nil)
 	require.Equal(t, externalURL+"/", logout.Header().Get("Location"), "the first provider sends no hint for the second's session")
-	require.Equal(t, http.StatusUnauthorized, person.app(handler, "/me", nil).Code)
+	require.Equal(t, http.StatusUnauthorized, person.get(handler, "/me", nil).Code)
 }
 
 func grantRole(role string) auth.Hook {
@@ -362,4 +397,22 @@ func (f *failingTransport) requests() int {
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
 	return f.passed
+}
+
+// answeringTransport answers requests to path itself and passes the others on.
+type answeringTransport struct {
+	path        string
+	status      int
+	contentType string
+	body        string
+}
+
+func (a *answeringTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if !strings.HasSuffix(request.URL.Path, a.path) {
+		return http.DefaultTransport.RoundTrip(request)
+	}
+	return &http.Response{
+		Status: strconv.Itoa(a.status) + " " + http.StatusText(a.status), StatusCode: a.status,
+		Header: http.Header{"Content-Type": {a.contentType}}, Body: io.NopCloser(strings.NewReader(a.body)), Request: request,
+	}, nil
 }

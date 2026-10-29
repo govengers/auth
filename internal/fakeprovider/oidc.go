@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -80,7 +81,7 @@ type OIDCHandler struct {
 	endpointURL string // IssuerURL without a trailing "/"
 	key         *rsa.PrivateKey
 	keyID       string
-	mux         *http.ServeMux
+	serveMux    *http.ServeMux
 
 	mutex                 sync.Mutex
 	codes                 map[string]authorizationGrant
@@ -96,7 +97,8 @@ type authorizationGrant struct {
 	redirectURI string
 }
 
-// NewOIDCHandler returns a fake issuer with a fresh RSA signing key.
+// NewOIDCHandler returns a fake issuer with a fresh RSA signing key. It keeps a copy of options:
+// changing them afterwards has no effect.
 func NewOIDCHandler(options *OIDCOptions) (*OIDCHandler, error) {
 	if options == nil || options.ClientID == "" || options.ClientSecret == "" {
 		return nil, errors.New("fakeprovider: ClientID and ClientSecret are required")
@@ -110,6 +112,9 @@ func NewOIDCHandler(options *OIDCOptions) (*OIDCHandler, error) {
 		return nil, fmt.Errorf("fakeprovider: generate signing key: %w", err)
 	}
 	resolved := *options
+	resolved.RedirectURIs = slices.Clone(options.RedirectURIs)
+	resolved.PostLogoutRedirectURIs = slices.Clone(options.PostLogoutRedirectURIs)
+	resolved.User = cloneUser(options.User)
 	if resolved.User.Subject == "" {
 		resolved.User.Subject = defaultSubject
 	}
@@ -124,26 +129,38 @@ func NewOIDCHandler(options *OIDCOptions) (*OIDCHandler, error) {
 		codes:       map[string]authorizationGrant{},
 		adminTokens: map[string]bool{},
 	}
-	handler.mux = handler.routes(strings.TrimSuffix(issuer.Path, "/"))
+	handler.serveMux = handler.routes(strings.TrimSuffix(issuer.Path, "/"))
 	return handler, nil
 }
 
-func (h *OIDCHandler) routes(issuerPath string) *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET "+issuerPath+"/.well-known/openid-configuration", h.discovery)
-	mux.HandleFunc("GET "+issuerPath+"/jwks", h.jwks)
-	mux.HandleFunc("GET "+issuerPath+"/authorize", h.authorize)
-	mux.HandleFunc("POST "+issuerPath+"/token", h.token)
-	mux.HandleFunc("GET "+issuerPath+"/end_session", h.endSession)
-	if h.options.KeycloakRealm != "" {
-		h.registerKeycloakRoutes(mux)
+// cloneUser copies the slices and maps of user, so the caller's options cannot change a running issuer.
+func cloneUser(user OIDCUser) OIDCUser {
+	user.RealmRoles = slices.Clone(user.RealmRoles)
+	user.ClientRoles = slices.Clone(user.ClientRoles)
+	user.Groups = slices.Clone(user.Groups)
+	user.Attributes = maps.Clone(user.Attributes)
+	for name, values := range user.Attributes {
+		user.Attributes[name] = slices.Clone(values)
 	}
-	return mux
+	return user
+}
+
+func (h *OIDCHandler) routes(issuerPath string) *http.ServeMux {
+	serveMux := http.NewServeMux()
+	serveMux.HandleFunc("GET "+issuerPath+"/.well-known/openid-configuration", h.discovery)
+	serveMux.HandleFunc("GET "+issuerPath+"/jwks", h.jwks)
+	serveMux.HandleFunc("GET "+issuerPath+"/authorize", h.authorize)
+	serveMux.HandleFunc("POST "+issuerPath+"/token", h.token)
+	serveMux.HandleFunc("GET "+issuerPath+"/end_session", h.endSession)
+	if h.options.KeycloakRealm != "" {
+		h.registerKeycloakRoutes(serveMux)
+	}
+	return serveMux
 }
 
 // ServeHTTP serves the issuer's endpoints.
 func (h *OIDCHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	h.mux.ServeHTTP(writer, request)
+	h.serveMux.ServeHTTP(writer, request)
 }
 
 // IssuerURL returns the issuer as configured: the iss claim and the discovery issuer.

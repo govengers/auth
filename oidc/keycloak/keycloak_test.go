@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,11 +17,11 @@ import (
 )
 
 const (
-	realm         = "staff"
-	userID        = "5d3f6e2a-1b2c-4d5e-8f90-123456789abc"
-	appClientID   = "app"
-	serviceClient = "app-admin"
-	serviceSecret = "service-secret"
+	realm               = "staff"
+	userID              = "5d3f6e2a-1b2c-4d5e-8f90-123456789abc"
+	applicationClientID = "app"
+	serviceClient       = "app-admin"
+	serviceSecret       = "service-secret"
 )
 
 // fakeKeycloak is the fake issuer in Keycloak layout, with the base URL keycloak.Options.URL needs.
@@ -35,7 +37,7 @@ func startKeycloak(t *testing.T, configure func(options *fakeprovider.OIDCOption
 	server := httptest.NewUnstartedServer(nil)
 	base := "http://" + server.Listener.Addr().String()
 	options := fakeprovider.OIDCOptions{
-		IssuerURL: base + "/realms/" + realm, ClientID: appClientID, ClientSecret: "app-secret",
+		IssuerURL: base + "/realms/" + realm, ClientID: applicationClientID, ClientSecret: "app-secret",
 		KeycloakRealm: realm, KeycloakClientID: serviceClient, KeycloakClientSecret: serviceSecret,
 		User: fakeprovider.OIDCUser{
 			Subject: userID, PreferredUsername: "ada",
@@ -60,7 +62,7 @@ func startKeycloak(t *testing.T, configure func(options *fakeprovider.OIDCOption
 
 func newClient(t *testing.T, keycloak *fakeKeycloak, configure func(options *Options)) *Client {
 	t.Helper()
-	options := &Options{URL: keycloak.url, Realm: realm, ClientID: serviceClient, ClientSecret: serviceSecret, ClientRolesClientID: appClientID}
+	options := &Options{URL: keycloak.url, Realm: realm, ClientID: serviceClient, ClientSecret: serviceSecret, ClientRolesClientID: applicationClientID}
 	if configure != nil {
 		configure(options)
 	}
@@ -129,7 +131,7 @@ func TestEnrichReplacesRolesGroupsAndAttributes(t *testing.T) {
 		wantClientRoles []string
 		wantLookups     int
 	}{
-		{name: "with client roles", clientRoles: appClientID, wantClientRoles: []string{"editor"}, wantLookups: 1},
+		{name: "with client roles", clientRoles: applicationClientID, wantClientRoles: []string{"editor"}, wantLookups: 1},
 		{name: "without client roles", clientRoles: "", wantClientRoles: nil, wantLookups: 0},
 	}
 	for _, testCase := range testCases {
@@ -283,6 +285,40 @@ func TestEnrichFailuresArePlainErrors(t *testing.T) {
 			require.Equal(t, http.StatusInternalServerError, status)
 			require.NotContains(t, err.Error(), serviceSecret)
 			require.NotContains(t, err.Error(), "wrong")
+		})
+	}
+}
+
+func TestTokenEndpointErrorsCarryOnlyTheirStatus(t *testing.T) {
+	const marker = "alice@example.com"
+	testCases := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+	}{
+		{name: "refusal with a description", status: http.StatusUnauthorized, contentType: "application/json", body: `{"error":"invalid_client","error_description":"` + marker + `"}`},
+		{name: "outage as a page", status: http.StatusBadGateway, contentType: "text/html", body: "<p>" + marker + "</p>"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			answer := func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+					if !strings.HasSuffix(request.URL.Path, "/protocol/openid-connect/token") {
+						next.ServeHTTP(writer, request)
+						return
+					}
+					writer.Header().Set("Content-Type", testCase.contentType)
+					writer.WriteHeader(testCase.status)
+					_, _ = writer.Write([]byte(testCase.body)) // the test reads the outcome from Enrich
+				})
+			}
+			client := newClient(t, startKeycloak(t, nil, answer), nil)
+
+			_, err := client.Enrich(t.Context(), loginIdentity())
+
+			require.ErrorContains(t, err, "token endpoint answered HTTP "+strconv.Itoa(testCase.status))
+			require.NotContains(t, err.Error(), marker, "the IdP's free text stays out of outcomes and events")
 		})
 	}
 }
