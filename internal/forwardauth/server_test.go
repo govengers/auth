@@ -291,6 +291,24 @@ func TestAnUnmatchedRequestIsRecordedAsAFailureAndKeptBySampling(t *testing.T) {
 	require.Equal(t, "no route", event["error"])
 }
 
+func TestATrailingSlashIsAnUnmatchedRequestNotARedirect(t *testing.T) {
+	callback := auth.Route{Method: http.MethodGet, Path: testRoutePath, Handler: http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusFound)
+	})}
+	testHarness := newHarness(t, harnessOptions{sampleRate: 1000, routes: []auth.Route{callback}})
+
+	for _, target := range []string{"/auth/ui/", "/auth/ready/", testRoutePath + "/?code=secret-code&state=secret-state"} {
+		response := testHarness.serve(t, http.MethodGet, target, nil)
+
+		require.Equal(t, http.StatusNotFound, response.Code, target)
+		require.JSONEq(t, `{"code":"not_found","message":"not found"}`, response.Body.String(), target)
+		require.Empty(t, response.Header().Get("Location"), target)
+	}
+	require.Equal(t, 3, testHarness.events.count(), "every request has its event")
+	require.Equal(t, "code=redacted&state=redacted", testHarness.events.last(t)["request"].(map[string]any)["query"])
+	require.Equal(t, 3.0, requestCount(t, testHarness.registry, map[string]string{"route": "unmatched", "method": http.MethodGet, "status": "404"}))
+}
+
 // requestCount returns the forwardauth_http_requests_total sample with exactly labels, or fails.
 func requestCount(t *testing.T, registry *prometheus.Registry, labels map[string]string) float64 {
 	t.Helper()
@@ -456,6 +474,17 @@ func TestTheMetricsListenerServesOnlyGETMetrics(t *testing.T) {
 	require.Contains(t, metrics.Body.String(), "forwardauth_http_requests_in_flight")
 	require.Equal(t, http.StatusNotFound, serveMetrics(http.MethodGet, "/").Code)
 	require.Equal(t, http.StatusMethodNotAllowed, serveMetrics(http.MethodPost, "/metrics").Code)
+}
+
+func TestBothListenersBoundEveryPhaseOfAConnection(t *testing.T) {
+	testHarness := newHarness(t, harnessOptions{})
+
+	for _, server := range []*http.Server{testHarness.server.httpServer, testHarness.server.metricsServer} {
+		require.Positive(t, server.ReadHeaderTimeout, server.Addr)
+		require.Positive(t, server.ReadTimeout, server.Addr)
+		require.Positive(t, server.WriteTimeout, server.Addr)
+		require.Positive(t, server.IdleTimeout, server.Addr)
+	}
 }
 
 func TestNetHTTPErrorLinesOfBothListenersAreJSONThroughTheLogger(t *testing.T) {

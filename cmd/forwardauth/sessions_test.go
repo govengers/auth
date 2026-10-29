@@ -85,7 +85,7 @@ func TestTheRedisClientHonoursTheContextDeadline(t *testing.T) {
 func TestNewSessionsFailsWhenRedisDoesNotAnswer(t *testing.T) {
 	address, _ := fakeRedis(t, func(connection net.Conn) { _ = connection.Close() })
 
-	created, err := newSessions(t.Context(), redisConfiguration(address), testDependencies(t))
+	created, err := newSessionStore(t.Context(), redisConfiguration(address), testDependencies(t))
 
 	require.ErrorContains(t, err, "SESSION_REDIS_ADDRESS: ping Redis at "+address)
 	require.Nil(t, created)
@@ -94,7 +94,7 @@ func TestNewSessionsFailsWhenRedisDoesNotAnswer(t *testing.T) {
 func TestNewSessionsUsesRedisAndPingsItForReadiness(t *testing.T) {
 	redisServer := miniredis.RunT(t)
 
-	created, err := newSessions(t.Context(), redisConfiguration(redisServer.Addr()), testDependencies(t))
+	created, err := newSessionStore(t.Context(), redisConfiguration(redisServer.Addr()), testDependencies(t))
 
 	require.NoError(t, err)
 	require.NoError(t, created.readinessCheck()(t.Context()))

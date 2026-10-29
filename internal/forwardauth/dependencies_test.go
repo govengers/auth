@@ -1,7 +1,11 @@
 package forwardauth
 
 import (
+	"bufio"
 	"context"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -116,6 +120,72 @@ func TestHTTPCallsOfARequestAreSummedOnItsEvent(t *testing.T) {
 	require.NotContains(t, github["error"], "alice", "no URL in the recorded error")
 	require.Equal(t, uint64(2), dependencyCount(t, registry, "github", http.MethodGet, "success"), "/ok and the call outside a request")
 	require.Equal(t, uint64(2), dependencyCount(t, registry, "github", http.MethodGet, "failure"))
+}
+
+// rawServer reads one request per connection, answers it with answer and closes the connection.
+func rawServer(t *testing.T, answer string) string {
+	t.Helper()
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return // closed by the cleanup
+			}
+			if _, err := http.ReadRequest(bufio.NewReader(connection)); err == nil {
+				_, _ = connection.Write([]byte(answer)) // the client may already have given up
+			}
+			_ = connection.Close()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close() // test listener, nothing to flush
+		<-served
+	})
+	return "http://" + listener.Addr().String()
+}
+
+func TestTheRecordedTransportErrorRepeatsNothingTheServerSent(t *testing.T) {
+	const canary = "alice@example.com"
+	testCases := []struct {
+		name   string
+		answer string
+	}{
+		{name: "malformed header line", answer: "HTTP/1.1 200 OK\r\n" + canary + "\r\n\r\n"},
+		{name: "header value with a NUL byte", answer: "HTTP/1.1 200 OK\r\nX-User: " + canary + "\x00\r\n\r\n"},
+		{name: "malformed status code", answer: "HTTP/1.1 2" + canary + " OK\r\n\r\n"},
+		{name: "malformed status line", answer: canary + "\r\n\r\n"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			dependencies, _ := newTestDependencies(t)
+			calls := &dependencyCalls{sums: map[string]*dependencySum{}}
+			request, err := http.NewRequestWithContext(context.WithValue(t.Context(), dependencyCallsKey{}, calls), http.MethodGet, rawServer(t, testCase.answer), nil)
+			require.NoError(t, err)
+
+			_, err = dependencies.HTTPClient("oidc").Do(request) //nolint:bodyclose // the call fails, there is no body
+
+			require.ErrorContains(t, err, canary, "the fixture reproduces a transport error with the server's bytes")
+			we := wideevent.Begin(nil, "test")
+			calls.recordOn(we)
+			oidc := we.FieldsMap()["http"].(map[string]any)["oidc"].(map[string]any)
+			require.Equal(t, 1, oidc["failures"])
+			require.NotEmpty(t, oidc["error"])
+			require.NotContains(t, oidc["error"], "alice")
+		})
+	}
+}
+
+func TestTheRecordedTransportErrorKeepsCancellation(t *testing.T) {
+	for _, contextError := range []error{context.Canceled, context.DeadlineExceeded} {
+		require.ErrorIs(t, transportFailure(fmt.Errorf("net/http: %w", contextError)), contextError)
+	}
+	dial := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}
+	require.Equal(t, dial, transportFailure(fmt.Errorf("wrapped: %w", dial)), "a dial error names nothing the server sent")
+	require.EqualError(t, transportFailure(fmt.Errorf("read: %w", errors.New("alice@example.com"))), "transport failure (*errors.errorString)")
 }
 
 // failingBackend fails every operation.

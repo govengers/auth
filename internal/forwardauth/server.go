@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -36,7 +37,9 @@ const (
 	bearerPrefix          = "Bearer "
 	readinessCheckTimeout = 2 * time.Second
 	shutdownTimeout       = 20 * time.Second // below the 30 s default termination grace period [LAY-003]
-	maximumPort           = 65535
+
+	// MaximumPort is the highest TCP port.
+	MaximumPort = 65535
 
 	// MaximumShutdownDelay keeps ShutdownDelay plus the 20 s drain within the 30 s default termination
 	// grace period of a pod [LAY-003].
@@ -54,7 +57,7 @@ var headerNamePattern = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 type ServerOptions struct {
 	Version           string
 	Port, MetricsPort int                             // 0 picks a free port (tests)
-	PathPrefix        string                          // required: redirect.IsPathPrefix (no gin parameter, wildcard or "." segment), e.g. "/auth"
+	PathPrefix        string                          // required, e.g. "/auth"; see ValidatePathPrefix
 	Routes            []auth.Route                    // provider routes, absolute paths
 	Guard             *session.Guard                  // required
 	APIKeys           *apikey.Authenticator           // optional; runs before the Guard on the checks
@@ -94,24 +97,24 @@ func NewServer(options *ServerOptions) (*Server, error) {
 	server.ready.Store(true)
 	server.engine = server.newEngine(metrics)
 	errorLog := slog.NewLogLogger(resolved.Logger.Handler(), slog.LevelError)
-	server.httpServer = &http.Server{
-		Addr:              ":" + strconv.Itoa(resolved.Port),
-		Handler:           server.engine,
+	server.httpServer = newHTTPServer(resolved.Port, server.engine, errorLog)
+	metricsRoutes := http.NewServeMux()
+	metricsRoutes.Handle("GET /metrics", promhttp.HandlerFor(resolved.MetricsRegistry, promhttp.HandlerOpts{Registry: resolved.MetricsRegistry}))
+	server.metricsServer = newHTTPServer(resolved.MetricsPort, metricsRoutes, errorLog)
+	return server, nil
+}
+
+// newHTTPServer bounds every phase of a connection, so slow or idle clients cannot hold it [LAY-006, MET-001].
+func newHTTPServer(port int, handler http.Handler, errorLog *log.Logger) *http.Server {
+	return &http.Server{
+		Addr:              ":" + strconv.Itoa(port),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		ErrorLog:          errorLog,
 	}
-	metricsRoutes := http.NewServeMux()
-	metricsRoutes.Handle("GET /metrics", promhttp.HandlerFor(resolved.MetricsRegistry, promhttp.HandlerOpts{Registry: resolved.MetricsRegistry}))
-	server.metricsServer = &http.Server{
-		Addr:              ":" + strconv.Itoa(resolved.MetricsPort),
-		Handler:           metricsRoutes,
-		ReadHeaderTimeout: 5 * time.Second,
-		ErrorLog:          errorLog,
-	}
-	return server, nil
 }
 
 func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
@@ -124,14 +127,14 @@ func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
 		resolved.JWTHeader = defaultJWTHeader
 	}
 	var problems []error
-	if !redirect.IsPathPrefix(resolved.PathPrefix) {
-		problems = append(problems, fmt.Errorf("PathPrefix %q must be \"/\"-separated segments of A-Z a-z 0-9 . _ ~ - without a trailing \"/\" and without a \".\" or \"..\" segment", resolved.PathPrefix))
+	if err := ValidatePathPrefix(resolved.PathPrefix); err != nil {
+		problems = append(problems, fmt.Errorf("PathPrefix %w", err))
 	}
 	if err := ValidateJWTHeader(resolved.JWTHeader); err != nil {
 		problems = append(problems, fmt.Errorf("JWTHeader %w", err))
 	}
 	if !validPort(resolved.Port) || !validPort(resolved.MetricsPort) {
-		problems = append(problems, fmt.Errorf("ports %d and %d must be between 0 and %d", resolved.Port, resolved.MetricsPort, maximumPort))
+		problems = append(problems, fmt.Errorf("ports %d and %d must be between 0 and %d", resolved.Port, resolved.MetricsPort, MaximumPort))
 	}
 	if resolved.SampleRate < 1 {
 		problems = append(problems, fmt.Errorf("SampleRate %d must be at least 1", resolved.SampleRate))
@@ -143,6 +146,15 @@ func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
 		return ServerOptions{}, fmt.Errorf("forwardauth server: %w", errors.Join(problems...))
 	}
 	return resolved, nil
+}
+
+// ValidatePathPrefix reports why prefix cannot hold the routes: it must pass redirect.IsPathPrefix, so
+// it has no gin parameter, wildcard or "." segment.
+func ValidatePathPrefix(prefix string) error {
+	if !redirect.IsPathPrefix(prefix) {
+		return fmt.Errorf("%q must be \"/\"-separated segments of A-Z a-z 0-9 . _ ~ - without a trailing \"/\" and without a \".\" or \"..\" segment", prefix)
+	}
+	return nil
 }
 
 // ValidateJWTHeader reports why name cannot carry the JWT of a check answer: it must be a header name,
@@ -159,13 +171,16 @@ func ValidateJWTHeader(name string) error {
 }
 
 func validPort(port int) bool {
-	return port >= 0 && port <= maximumPort
+	return port >= 0 && port <= MaximumPort
 }
 
 // newEngine builds the gin engine: wide event outermost so it records the final status, then the HTTP
-// metrics, then the sums of the outbound calls, then the panic recovery, then the routes.
+// metrics, then the sums of the outbound calls, then the panic recovery, then the routes. A trailing
+// "/" is an unmatched route: gin's redirect would answer before the middleware, without event or
+// metric, and print the raw query in debug mode [LOG-009].
 func (s *Server) newEngine(metrics *httpMetrics) *gin.Engine {
 	engine := gin.New()
+	engine.RedirectTrailingSlash = false
 	engine.Use(
 		wideevent.Middleware(
 			wideevent.WithEmitter(latestValues(s.options.Emitter)),

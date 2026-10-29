@@ -10,8 +10,9 @@ excluded := "/cmd/|/internal/fakeprovider/|/test/"
 default:
     @just --list
 
-# Vet and lint with the govengers baseline
+# Vet and lint with the govengers baseline; no executable may be tracked (it would ship in every module download)
 lint:
+    ! git ls-files -z | xargs -0 file --mime-type | grep -E ':[[:space:]]+application/(x-mach-binary|x-executable|x-pie-executable|x-sharedlib|x-dosexec|vnd.microsoft.portable-executable)$'
     go vet ./...
     if [ -d test/e2e ]; then go vet -tags e2e ./test/e2e/...; fi
     golangci-lint run ./...

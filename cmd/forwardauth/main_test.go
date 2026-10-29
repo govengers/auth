@@ -46,6 +46,11 @@ func TestValidateConfigurationAcceptsCompleteSetups(t *testing.T) {
 	}{
 		{name: "oidc", configuration: validOIDCConfiguration},
 		{name: "github", configuration: validGitHubConfiguration},
+		{name: "external URL with a trailing slash", configuration: func() *Configuration {
+			configuration := validOIDCConfiguration()
+			configuration.ExternalURL = "https://app.example.com/"
+			return configuration
+		}},
 		{name: "oidc with keycloak (client credentials), redis, jwt and api keys", configuration: func() *Configuration {
 			configuration := validOIDCConfiguration()
 			configuration.KeycloakEnabled = true
@@ -53,7 +58,7 @@ func TestValidateConfigurationAcceptsCompleteSetups(t *testing.T) {
 			configuration.KeycloakClientID, configuration.KeycloakClientSecret = "forwardauth", "keycloak-secret"
 			configuration.SessionRedisEnabled, configuration.SessionRedisAddress = true, "redis:6379"
 			configuration.JWTEnabled, configuration.JWTPrivateKey = true, "-----BEGIN PRIVATE KEY-----"
-			configuration.APIKeys = []string{"ci:" + testSecret}
+			configuration.APIKeysEnabled, configuration.APIKeys = true, []string{"ci:" + testSecret}
 			configuration.APIKeyPermissions = []string{"ci=builds:write+*:read"}
 			configuration.SessionSameSite = "none"
 			return configuration
@@ -83,6 +88,8 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		{name: "unknown provider", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.Provider = "password" }, problems: []string{"PROVIDER"}},
 		{name: "relative external URL", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.ExternalURL = "app.example.com" }, problems: []string{"EXTERNAL_URL"}},
 		{name: "external URL with a query", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.ExternalURL = "https://app.example.com/?a=b" }, problems: []string{"EXTERNAL_URL"}},
+		{name: "external URL with a path", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.ExternalURL = "https://app.example.com/app/" }, problems: []string{"EXTERNAL_URL must be an origin (scheme and host) without a path"}},
+		{name: "external URL with an empty path segment", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.ExternalURL = "https://app.example.com//" }, problems: []string{"EXTERNAL_URL must be an origin"}},
 		{name: "path prefix without leading slash", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.PathPrefix = "auth" }, problems: []string{"PATH_PREFIX"}},
 		{name: "path prefix with trailing slash", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.PathPrefix = "/auth/" }, problems: []string{"PATH_PREFIX"}},
 		{name: "path prefix with a gin parameter", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.PathPrefix = "/auth/:tenant" }, problems: []string{"PATH_PREFIX"}},
@@ -125,14 +132,19 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		{name: "jwt without key", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTEnabled = true }, problems: []string{"JWT_PRIVATE_KEY"}},
 		{name: "jwt header that is no header name", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "X Auth" }, problems: []string{"JWT_HEADER \"X Auth\" is not an HTTP header name"}},
 		{name: "jwt header the check answer sets", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "Cache-Control" }, problems: []string{"JWT_HEADER \"Cache-Control\" is set by the check answer"}},
-		{name: "api key secret too short", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.APIKeys = []string{"ci:short-secret"} }, problems: []string{"API_KEYS: apikey: key 0: key secret is shorter than 16 bytes"}},
+		{name: "api keys enabled without keys", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.APIKeysEnabled = true }, problems: []string{"API_KEYS needs at least one name:secret when API_KEYS_ENABLED=true"}},
+		{name: "api key secret too short", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
+			configuration.APIKeysEnabled, configuration.APIKeys = true, []string{"ci:short-secret"}
+		}, problems: []string{"API_KEYS: apikey: key 0: key secret is shorter than 16 bytes"}},
 		{name: "api key used twice", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
-			configuration.APIKeys = []string{"ci:" + testSecret, "ci:other-secret-0123456789"}
+			configuration.APIKeysEnabled, configuration.APIKeys = true, []string{"ci:" + testSecret, "ci:other-secret-0123456789"}
 		}, problems: []string{"API_KEYS: apikey: key 1: name or secret is used by another key"}},
 		{name: "problems of several kinds at once", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.PathPrefix, configuration.APIKeys, configuration.JWTHeader = "/auth/:tenant", []string{"ci:short-secret"}, "X Auth"
+			configuration.APIKeysEnabled = true
 		}, problems: []string{"PATH_PREFIX", "API_KEYS", "JWT_HEADER"}},
 		{name: "permissions for an unknown key", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
+			configuration.APIKeysEnabled, configuration.APIKeys = true, []string{"other:" + testSecret}
 			configuration.APIKeyPermissions = []string{"ci=builds:write"}
 		}, problems: []string{"API_KEY_PERMISSIONS names \"ci\""}},
 	}
@@ -149,6 +161,21 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAPIKeysFollowTheirFlag(t *testing.T) {
+	configuration := validOIDCConfiguration()
+	configuration.APIKeys = []string{"ci:short-secret"}
+
+	require.NoError(t, validateConfiguration(configuration), "keys are ignored while API_KEYS_ENABLED is false")
+	disabled, err := newAPIKeys(configuration, nil)
+	require.NoError(t, err)
+	require.Nil(t, disabled)
+
+	configuration.APIKeysEnabled, configuration.APIKeys = true, []string{"ci:" + testSecret}
+	enabled, err := newAPIKeys(configuration, nil)
+	require.NoError(t, err)
+	require.NotNil(t, enabled)
 }
 
 func TestAPIKeysParsesKeysAndTheirPermissions(t *testing.T) {

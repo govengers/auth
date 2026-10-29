@@ -41,23 +41,28 @@ func TestBootFailsListingEveryMissingOrInvalidVariable(t *testing.T) {
 			problems: []string{"GITHUB_ALLOWED_TEAMS"},
 		},
 		{
+			name:        "api keys enabled without keys",
+			environment: merged(oidcEnvironment("http://127.0.0.1:1"), map[string]string{"EXTERNAL_URL": "http://127.0.0.1:8080", "API_KEYS_ENABLED": "true"}),
+			problems:    []string{"API_KEYS needs at least one name:secret when API_KEYS_ENABLED=true"},
+		},
+		{
 			name: "permissions for a key that does not exist",
 			environment: merged(oidcEnvironment("http://127.0.0.1:1"), map[string]string{
-				"EXTERNAL_URL": "http://127.0.0.1:8080", "API_KEYS": "ci:ci-secret-0123456789", "API_KEY_PERMISSIONS": "deploy=builds:write",
+				"EXTERNAL_URL": "http://127.0.0.1:8080", "API_KEYS_ENABLED": "true", "API_KEYS": "ci:ci-secret-0123456789", "API_KEY_PERMISSIONS": "deploy=builds:write",
 			}),
 			problems: []string{`API_KEY_PERMISSIONS names \"deploy\", which is no key in API_KEYS`},
 		},
 		{
 			name: "unparsable permission",
 			environment: merged(oidcEnvironment("http://127.0.0.1:1"), map[string]string{
-				"EXTERNAL_URL": "http://127.0.0.1:8080", "API_KEYS": "ci:ci-secret-0123456789", "API_KEY_PERMISSIONS": "ci=Builds:write",
+				"EXTERNAL_URL": "http://127.0.0.1:8080", "API_KEYS_ENABLED": "true", "API_KEYS": "ci:ci-secret-0123456789", "API_KEY_PERMISSIONS": "ci=Builds:write",
 			}),
 			problems: []string{`API_KEY_PERMISSIONS entry for \"ci\"`},
 		},
 		{
 			name: "every problem at once, also those the components judge",
 			environment: merged(oidcEnvironment("http://127.0.0.1:1"), map[string]string{
-				"EXTERNAL_URL": "http://127.0.0.1:8080", "PATH_PREFIX": "/auth/:tenant", "API_KEYS": "ci:ci-secret-0123456789,deploy:ci-secret-0123456789",
+				"EXTERNAL_URL": "http://127.0.0.1:8080", "PATH_PREFIX": "/auth/:tenant", "API_KEYS_ENABLED": "true", "API_KEYS": "ci:ci-secret-0123456789,deploy:ci-secret-0123456789",
 			}),
 			problems: []string{"PATH_PREFIX", "API_KEYS: apikey: key 1: name or secret is used by another key"},
 		},

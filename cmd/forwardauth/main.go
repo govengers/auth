@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"slices"
@@ -52,8 +53,6 @@ const (
 	grantTypeClientCredentials = "client_credentials"
 	grantTypePassword          = "password"
 
-	maximumPort = 65535
-
 	redisStartupTimeout = 5 * time.Second
 )
 
@@ -68,6 +67,7 @@ type Configuration struct {
 	WideEventSampleRate     int
 	ShutdownDelaySeconds    int
 	IdentityEndpointEnabled bool
+	APIKeysEnabled          bool
 	APIKeys                 []string
 	APIKeyPermissions       []string
 
@@ -155,12 +155,12 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	sessions, err := newSessions(ctx, configuration, dependencies)
+	sessions, err := newSessionStore(ctx, configuration, dependencies)
 	if err != nil {
 		return err
 	}
 	defer sessions.close(logger)
-	server, err := newServer(ctx, configuration, sessions, &telemetry{registry: metricsRegistry, dependencies: dependencies, logger: logger})
+	server, err := newServer(ctx, configuration, sessions, &instruments{registry: metricsRegistry, dependencies: dependencies, logger: logger})
 	if err != nil {
 		return err
 	}
@@ -178,16 +178,16 @@ func ginMode(devMode bool) string {
 	return gin.ReleaseMode
 }
 
-// telemetry is what the components report to: the registry /metrics serves, the recorder of outbound
+// instruments are what the components report to: the registry /metrics serves, the recorder of outbound
 // calls and the logger of the lines outside a request.
-type telemetry struct {
+type instruments struct {
 	registry     *prometheus.Registry
 	dependencies *forwardauth.Dependencies
 	logger       *slog.Logger
 }
 
 // newServer builds every component after the session store and the server that serves them.
-func newServer(ctx context.Context, configuration *Configuration, sessions *sessions, telemetry *telemetry) (*forwardauth.Server, error) {
+func newServer(ctx context.Context, configuration *Configuration, sessions *sessionStore, telemetry *instruments) (*forwardauth.Server, error) {
 	outcomeCounter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: telemetry.registry, Namespace: "forwardauth"})
 	if err != nil {
 		return nil, err
@@ -255,13 +255,13 @@ func newEmitter(devMode bool) wideevent.Emitter {
 	return wideevent.JSONStdoutEmitter()
 }
 
-// sessions is the session store and, with SESSION_REDIS_ENABLED, the Redis client behind it.
-type sessions struct {
+// sessionStore is the session store and, with SESSION_REDIS_ENABLED, the Redis client behind it.
+type sessionStore struct {
 	store *session.Store
 	redis *redis.Client // nil for the in-memory backend
 }
 
-func newSessions(ctx context.Context, configuration *Configuration, dependencies *forwardauth.Dependencies) (*sessions, error) {
+func newSessionStore(ctx context.Context, configuration *Configuration, dependencies *forwardauth.Dependencies) (*sessionStore, error) {
 	encryptionKey, err := session.ParseKey(configuration.SessionEncryptionKey)
 	if err != nil {
 		return nil, err
@@ -270,7 +270,7 @@ func newSessions(ctx context.Context, configuration *Configuration, dependencies
 	if err != nil {
 		return nil, err
 	}
-	created := &sessions{}
+	created := &sessionStore{}
 	backend, err := created.newBackend(ctx, configuration, dependencies)
 	if err != nil {
 		return nil, err
@@ -292,7 +292,7 @@ func newSessions(ctx context.Context, configuration *Configuration, dependencies
 
 // newBackend opens the Redis client when SESSION_REDIS_ENABLED, fails when Redis does not answer
 // [RES-007] and records its calls; otherwise it returns the in-memory backend (exactly one replica).
-func (s *sessions) newBackend(ctx context.Context, configuration *Configuration, dependencies *forwardauth.Dependencies) (session.Backend, error) {
+func (s *sessionStore) newBackend(ctx context.Context, configuration *Configuration, dependencies *forwardauth.Dependencies) (session.Backend, error) {
 	if !configuration.SessionRedisEnabled {
 		return session.NewMemoryBackend(nil)
 	}
@@ -322,14 +322,14 @@ func newRedisClient(configuration *Configuration) *redis.Client {
 }
 
 // readinessCheck pings Redis; the in-memory backend needs no check.
-func (s *sessions) readinessCheck() func(ctx context.Context) error {
+func (s *sessionStore) readinessCheck() func(ctx context.Context) error {
 	if s.redis == nil {
 		return nil
 	}
 	return func(ctx context.Context) error { return s.redis.Ping(ctx).Err() }
 }
 
-func (s *sessions) closeRedis() error {
+func (s *sessionStore) closeRedis() error {
 	if s.redis == nil {
 		return nil
 	}
@@ -340,7 +340,7 @@ func (s *sessions) closeRedis() error {
 }
 
 // close runs after the server drained; a failure is logged, the process is ending anyway.
-func (s *sessions) close(logger *slog.Logger) {
+func (s *sessionStore) close(logger *slog.Logger) {
 	if err := s.closeRedis(); err != nil {
 		logger.Error("shutdown incomplete", "error", err.Error())
 	}
@@ -450,10 +450,10 @@ func newGitHubProvider(configuration *Configuration, store *session.Store, obser
 	return selectedProvider{routes: provider.Routes(), loginURL: provider.LoginURL(), refreshers: []session.Refresher{provider}}, nil
 }
 
-// newAPIKeys returns nil without API_KEYS: the checks then run without the API key middleware.
+// newAPIKeys returns nil when API_KEYS_ENABLED is false: the checks then run without the API key middleware.
 func newAPIKeys(configuration *Configuration, observer auth.Observer) (*apikey.Authenticator, error) {
-	if len(configuration.APIKeys) == 0 {
-		return nil, nil // no keys configured is not an error
+	if !configuration.APIKeysEnabled {
+		return nil, nil // API keys disabled is not an error
 	}
 	keys, err := apiKeys(configuration.APIKeys, configuration.APIKeyPermissions)
 	if err != nil {
@@ -511,6 +511,7 @@ func serverValues(configuration *Configuration) []config.Value {
 		config.Int("WIDE_EVENT_SAMPLE_RATE").Default(10).Into(&configuration.WideEventSampleRate),
 		config.Int("SHUTDOWN_DELAY_SECONDS").Default(5).Into(&configuration.ShutdownDelaySeconds),
 		config.Bool("IDENTITY_ENDPOINT_ENABLED").Default(false).Into(&configuration.IdentityEndpointEnabled),
+		config.Bool("API_KEYS_ENABLED").Default(false).Into(&configuration.APIKeysEnabled),
 		config.StringArray("API_KEYS").Default(nil).Sensitive().Into(&configuration.APIKeys),
 		config.StringArray("API_KEY_PERMISSIONS").Default(nil).Into(&configuration.APIKeyPermissions),
 	}
@@ -605,15 +606,17 @@ func validateConfiguration(configuration *Configuration) error {
 
 func validateServer(configuration *Configuration) error {
 	var problems []error
-	if _, err := redirect.ExternalURL(configuration.ExternalURL); err != nil {
+	if externalURL, err := redirect.ExternalURL(configuration.ExternalURL); err != nil {
 		problems = append(problems, fmt.Errorf("EXTERNAL_URL: %w", err))
+	} else if !isOrigin(externalURL) {
+		problems = append(problems, errors.New("EXTERNAL_URL must be an origin (scheme and host) without a path: the routes live at PATH_PREFIX from the root"))
 	}
-	if !redirect.IsPathPrefix(configuration.PathPrefix) {
-		problems = append(problems, fmt.Errorf("PATH_PREFIX %q must be \"/\"-separated segments of A-Z a-z 0-9 . _ ~ - without a trailing \"/\" and without a \".\" or \"..\" segment", configuration.PathPrefix))
+	if err := forwardauth.ValidatePathPrefix(configuration.PathPrefix); err != nil {
+		problems = append(problems, fmt.Errorf("PATH_PREFIX %w", err))
 	}
 	problems = append(problems,
-		rangeProblem("PORT", configuration.Port, 1, maximumPort),
-		rangeProblem("METRICS_PORT", configuration.MetricsPort, 1, maximumPort),
+		rangeProblem("PORT", configuration.Port, 1, forwardauth.MaximumPort),
+		rangeProblem("METRICS_PORT", configuration.MetricsPort, 1, forwardauth.MaximumPort),
 		minimumProblem("WIDE_EVENT_SAMPLE_RATE", configuration.WideEventSampleRate, 1),
 		rangeProblem("SHUTDOWN_DELAY_SECONDS", configuration.ShutdownDelaySeconds, 0, int(forwardauth.MaximumShutdownDelay/time.Second)),
 	)
@@ -621,6 +624,14 @@ func validateServer(configuration *Configuration) error {
 		problems = append(problems, fmt.Errorf("PORT and METRICS_PORT must differ, both are %d", configuration.Port))
 	}
 	return errors.Join(problems...)
+}
+
+// isOrigin reports whether externalURL (a redirect.ExternalURL result) has no path. The binary mounts its
+// routes at PATH_PREFIX from the root and returns to EXTERNAL_URL + X-Forwarded-Uri, which already
+// carries any path of the application.
+func isOrigin(externalURL string) bool {
+	parsed, err := url.Parse(externalURL)
+	return err == nil && parsed.Path == ""
 }
 
 func validateSession(configuration *Configuration) error {
@@ -646,11 +657,17 @@ func validateSession(configuration *Configuration) error {
 	return errors.Join(problems...)
 }
 
-// validateAPIKeys parses API_KEYS and API_KEY_PERMISSIONS and lets apikey.New judge the keys (secret
-// length, duplicates), so its problems are listed with all others.
+// validateAPIKeys parses API_KEYS and API_KEY_PERMISSIONS when API_KEYS_ENABLED and lets apikey.New
+// judge the keys (secret length, duplicates), so its problems are listed with all others.
 func validateAPIKeys(configuration *Configuration) error {
+	if !configuration.APIKeysEnabled {
+		return nil
+	}
+	if len(configuration.APIKeys) == 0 {
+		return errors.New("API_KEYS needs at least one name:secret when API_KEYS_ENABLED=true")
+	}
 	keys, err := apiKeys(configuration.APIKeys, configuration.APIKeyPermissions)
-	if err != nil || len(keys) == 0 {
+	if err != nil {
 		return err
 	}
 	if _, err := apikey.New(&apikey.Options{Keys: keys}); err != nil {
