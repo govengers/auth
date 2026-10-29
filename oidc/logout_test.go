@@ -343,6 +343,40 @@ func TestLogoutDegradesWhenTheSessionCannotBeRead(t *testing.T) {
 	}
 }
 
+func TestLogoutFailureKeepsTheSessionReadError(t *testing.T) {
+	issuer := startIssuer(t, nil)
+	testCases := []struct {
+		name       string
+		target     string
+		failRevoke bool
+		wantStatus int
+		wantErr    error
+	}{
+		{name: "RP-initiated, session not ended", target: prefix + "/logout", failRevoke: true, wantStatus: http.StatusInternalServerError, wantErr: errRevokeFailed},
+		{name: "front-channel, session not ended", target: prefix + "/frontchannel-logout", failRevoke: true, wantStatus: http.StatusInternalServerError, wantErr: errRevokeFailed},
+		{name: "front-channel, refused", target: prefix + "/frontchannel-logout?iss=https%3A%2F%2Fother.example.com&sid=idp-session-1", wantStatus: http.StatusBadRequest, wantErr: auth.ErrInvalidRequest},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			backend := &failingBackend{}
+			application := newApplicationOn(t, newStoreOn(t, backend), issuer, nil)
+			person := newBrowser(t)
+			require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
+			backend.failKey("identity")
+			if testCase.failRevoke {
+				backend.failRevoke()
+			}
+
+			response := person.get(application.handler, testCase.target, nil)
+
+			require.Equal(t, testCase.wantStatus, response.Code)
+			outcome := application.outcomes.last(t)
+			require.ErrorIs(t, outcome.Err, testCase.wantErr)
+			require.ErrorIs(t, outcome.Err, errBackendDown, "the failed read shows on the outcome too")
+		})
+	}
+}
+
 func withoutErrorAndIdentity(outcome auth.Outcome) auth.Outcome {
 	outcome.Err, outcome.Identity = nil, nil
 	return outcome
@@ -357,7 +391,10 @@ type failingBackend struct {
 	failingKey string
 }
 
-var errBackendDown = errors.New("backend down")
+var (
+	errBackendDown  = errors.New("backend down")
+	errRevokeFailed = errors.New("revoke failed")
+)
 
 func (b *failingBackend) failRevoke() {
 	b.mutex.Lock()
@@ -382,7 +419,7 @@ func (b *failingBackend) Revoke(ctx context.Context, sessionID string, ttl time.
 	failing := b.failing
 	b.mutex.Unlock()
 	if failing {
-		return errBackendDown
+		return errRevokeFailed
 	}
 	return b.Backend.Revoke(ctx, sessionID, ttl)
 }

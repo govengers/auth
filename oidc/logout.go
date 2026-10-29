@@ -31,13 +31,14 @@ func (p *Provider) handleLogout(writer http.ResponseWriter, request *http.Reques
 	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the hint or OnLogout
 	current, identity, identityError := p.sessionIdentity(ctx, request)
 	rawIdentityToken, tokenError := p.ownIdentityToken(ctx, current, identity)
+	readError := errors.Join(identityError, tokenError)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
-		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: err, Identity: identity})
+		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: errors.Join(err, readError), Identity: identity})
 		return
 	}
 	p.runOnLogout(ctx, identity)
 	redirect.To(writer, p.logoutLocation(rawIdentityToken))
-	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity, Err: errors.Join(identityError, tokenError)})
+	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity, Err: readError})
 }
 
 // handleFrontChannelLogout is OpenID Connect Front-Channel Logout 1.0: the IdP loads it in an iframe.
@@ -51,7 +52,7 @@ func (p *Provider) handleFrontChannelLogout(writer http.ResponseWriter, request 
 	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the sid check or OnLogout
 	_, identity, readError := p.sessionIdentity(ctx, request)
 	if err := p.checkFrontChannelRequest(request.URL.Query(), identity); err != nil {
-		p.refuseFrontChannel(writer, request, err)
+		p.refuseFrontChannel(writer, request, errors.Join(err, readError))
 		return
 	}
 	if identity != nil && !p.owns(identity) {
@@ -61,7 +62,7 @@ func (p *Provider) handleFrontChannelLogout(writer http.ResponseWriter, request 
 	}
 	// without a readable identity this only expires the cookie (and drops what is left server-side)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
-		p.refuseFrontChannel(writer, request, err)
+		p.refuseFrontChannel(writer, request, errors.Join(err, readError))
 		return
 	}
 	p.runOnLogout(ctx, identity)
