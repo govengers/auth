@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-// ErrSessionRevoked is returned by Backend.Put for a session that carries a revocation marker.
+// ErrRevoked is returned by Backend.Put for a session that carries a revocation marker.
 // Store and Session translate it into an auth.ErrUnauthenticated refusal.
-var ErrSessionRevoked = errors.New("session revoked")
+var ErrRevoked = errors.New("session revoked")
 
 // Backend stores the server-side half of sessions: one opaque, already encrypted value per (sessionID, key).
 // sessionID is a non-secret identifier derived from the cookie (SHA-256), never the cookie value.
@@ -19,7 +19,7 @@ var ErrSessionRevoked = errors.New("session revoked")
 // Values expire after their own ttl, which is always positive. Applications may implement it (e.g. on Postgres); share one backend
 // between replicas. Implementations must be safe for concurrent use.
 type Backend interface {
-	// Put stores value under (sessionID, key) for ttl, replacing an existing value; ErrSessionRevoked when revoked.
+	// Put stores value under (sessionID, key) for ttl, replacing an existing value; ErrRevoked when revoked.
 	Put(ctx context.Context, sessionID, key string, value []byte, ttl time.Duration) error
 	// Get returns the live value under (sessionID, key); found is false when there is none or it expired.
 	Get(ctx context.Context, sessionID, key string) (value []byte, found bool, err error)

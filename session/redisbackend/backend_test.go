@@ -157,7 +157,7 @@ func TestRevocationMarkerBlocksPut(t *testing.T) {
 
 	err := backend.Put(ctx, "s1", "key", []byte("value"), time.Hour)
 
-	require.ErrorIs(t, err, session.ErrSessionRevoked)
+	require.ErrorIs(t, err, session.ErrRevoked)
 	require.False(t, server.Exists("session:{s1}:key"), "a refused put writes nothing")
 	require.False(t, server.Exists("session:{s1}"), "a refused put indexes nothing")
 }
@@ -339,7 +339,7 @@ func TestInvalidSessionIDIsRefused(t *testing.T) {
 				err := operation.call(sessionID)
 
 				require.ErrorContains(t, err, "session ID must be non-empty", "%q", sessionID)
-				require.NotErrorIs(t, err, session.ErrSessionRevoked, "%q", sessionID)
+				require.NotErrorIs(t, err, session.ErrRevoked, "%q", sessionID)
 				require.NotContains(t, err.Error(), "abc", "the ID stays out of the message")
 			}
 			require.Empty(t, server.Keys(), "a refused call writes nothing")
@@ -361,7 +361,7 @@ func TestConnectionFailureSurfacesAsError(t *testing.T) {
 			require.Error(t, err)
 			require.ErrorContains(t, err, "redis session backend")
 			require.NotErrorIs(t, err, redis.Nil)
-			require.NotErrorIs(t, err, session.ErrSessionRevoked)
+			require.NotErrorIs(t, err, session.ErrRevoked)
 			require.NoError(t, errors.Unwrap(err), "the go-redis chain is dropped")
 		})
 	}

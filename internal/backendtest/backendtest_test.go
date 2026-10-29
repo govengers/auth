@@ -30,7 +30,7 @@ func (b *referenceBackend) Put(_ context.Context, sessionID, key string, value [
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 	if b.revoked[sessionID].After(b.now) {
-		return session.ErrSessionRevoked
+		return session.ErrRevoked
 	}
 	b.values[[2]string{sessionID, key}] = referenceValue{value: slices.Clone(value), expiresAt: b.now.Add(ttl)}
 	return nil

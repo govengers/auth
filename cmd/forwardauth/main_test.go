@@ -135,10 +135,10 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		{name: "api keys enabled without keys", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.APIKeysEnabled = true }, problems: []string{"API_KEYS needs at least one name:secret when API_KEYS_ENABLED=true"}},
 		{name: "api key secret too short", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.APIKeysEnabled, configuration.APIKeys = true, []string{"ci:short-secret"}
-		}, problems: []string{"API_KEYS: apikey: key 0: key secret is shorter than 16 bytes"}},
+		}, problems: []string{"API_KEYS: apikey: key 1: key secret is shorter than 16 bytes"}},
 		{name: "api key used twice", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.APIKeysEnabled, configuration.APIKeys = true, []string{"ci:" + testSecret, "ci:other-secret-0123456789"}
-		}, problems: []string{"API_KEYS: apikey: key 1: name or secret is used by another key"}},
+		}, problems: []string{"API_KEYS: apikey: key 2: name or secret is used by another key"}},
 		{name: "problems of several kinds at once", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.PathPrefix, configuration.APIKeys, configuration.JWTHeader = "/auth/:tenant", []string{"ci:short-secret"}, "X Auth"
 			configuration.APIKeysEnabled = true

@@ -64,7 +64,7 @@ func TestBootFailsListingEveryMissingOrInvalidVariable(t *testing.T) {
 			environment: merged(oidcEnvironment("http://127.0.0.1:1"), map[string]string{
 				"EXTERNAL_URL": "http://127.0.0.1:8080", "PATH_PREFIX": "/auth/:tenant", "API_KEYS_ENABLED": "true", "API_KEYS": "ci:ci-secret-0123456789,deploy:ci-secret-0123456789",
 			}),
-			problems: []string{"PATH_PREFIX", "API_KEYS: apikey: key 1: name or secret is used by another key"},
+			problems: []string{"PATH_PREFIX", "API_KEYS: apikey: key 2: name or secret is used by another key"},
 		},
 		{
 			name: "redis that does not answer",

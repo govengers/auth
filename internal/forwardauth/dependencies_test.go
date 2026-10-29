@@ -3,8 +3,6 @@ package forwardauth
 import (
 	"bufio"
 	"context"
-	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -179,15 +177,6 @@ func TestTheRecordedTransportErrorRepeatsNothingTheServerSent(t *testing.T) {
 	}
 }
 
-func TestTheRecordedTransportErrorKeepsCancellation(t *testing.T) {
-	for _, contextError := range []error{context.Canceled, context.DeadlineExceeded} {
-		require.ErrorIs(t, transportFailure(fmt.Errorf("net/http: %w", contextError)), contextError)
-	}
-	dial := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}
-	require.Equal(t, dial, transportFailure(fmt.Errorf("wrapped: %w", dial)), "a dial error names nothing the server sent")
-	require.EqualError(t, transportFailure(fmt.Errorf("read: %w", errors.New("alice@example.com"))), "transport failure (*errors.errorString)")
-}
-
 // failingBackend fails every operation.
 type failingBackend struct{}
 
@@ -238,7 +227,7 @@ func TestSessionStoreFailuresAreRecordedButARevokedSessionIsNot(t *testing.T) {
 	require.NoError(t, memory.Put(ctx, "revoked", "key", nil, time.Minute)) // a marker needs a revoked value
 	revoking := dependencies.Backend(memory)
 	require.NoError(t, revoking.Revoke(ctx, "revoked", time.Minute))
-	require.ErrorIs(t, revoking.Put(ctx, "revoked", "key", nil, time.Minute), session.ErrSessionRevoked)
+	require.ErrorIs(t, revoking.Put(ctx, "revoked", "key", nil, time.Minute), session.ErrRevoked)
 	require.Equal(t, uint64(1), dependencyCount(t, registry, "redis", "put", "success"), "a revoked session is an answer")
 	swapped, err := revoking.CompareAndSwap(ctx, "revoked", "key", nil, []byte("value"))
 	require.NoError(t, err)

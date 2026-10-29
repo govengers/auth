@@ -25,8 +25,8 @@ type verifiedLogin struct {
 	accessClaims     map[string]any // nil for an opaque access token
 }
 
-// handleLogin starts a login: a fresh session holding state, nonce and PKCE verifier, then a redirect to
-// the IdP's authorization endpoint.
+// handleLogin starts a login: state, nonce and PKCE verifier in the session (oauthlogin.Begin keeps one
+// holding a live identity, else starts a new one), then a redirect to the IdP's authorization endpoint.
 func (p *Provider) handleLogin(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
 	state, err := oauthlogin.Begin(ctx, p.options.Sessions, writer, request, p.loginKey)

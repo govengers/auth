@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -113,6 +114,10 @@ func TestGetJSONFailsWhenGitHubIsUnreachable(t *testing.T) {
 	_, err := provider.fetchTeams(cancelled, provider.apiClient(&oauth2.Token{AccessToken: "gho_secret"}))
 
 	require.ErrorContains(t, err, "GET /user/teams")
+	require.ErrorIs(t, err, context.Canceled)
+	require.NotContains(t, err.Error(), "per_page", "the request URL is reduced to its origin")
+	var urlError *url.Error
+	require.False(t, errors.As(err, &urlError), "net/http's error is not part of the API")
 }
 
 func TestFetchTeamsStopsAfterFiftyPages(t *testing.T) {

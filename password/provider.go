@@ -42,7 +42,7 @@ type Provider struct {
 	dummyHash          string // verified for unknown users, so a lookup costs the same either way
 	now                func() time.Time
 	verifyHash         func(password, encodedHash string) (bool, Parameters, error) // verifyHash; tests observe the calls
-	reporter           failure.Reporter
+	reporter           *failure.Reporter
 }
 
 // New validates options, applies the defaults to a copy and precomputes the dummy hash used for unknown users
@@ -68,13 +68,17 @@ func newProvider(options Options) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("password provider: dummy hash: %w", err)
 	}
+	reporter, err := failure.NewReporter(&failure.ReporterOptions{Provider: providerName, Observer: options.Observer})
+	if err != nil {
+		return nil, fmt.Errorf("password provider: %w", err)
+	}
 	return &Provider{
 		options:            options,
 		backupCodeAlphabet: distinctRunes(options.TOTP.BackupCodeAlphabet),
 		dummyHash:          dummyHash,
 		now:                time.Now,
 		verifyHash:         verifyHash,
-		reporter:           failure.Reporter{Provider: providerName, Observer: options.Observer},
+		reporter:           reporter,
 	}, nil
 }
 

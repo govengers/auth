@@ -24,6 +24,7 @@ import (
 	"golang.org/x/oauth2/clientcredentials"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/internal/tokenendpoint"
 )
@@ -61,8 +62,8 @@ type Options struct {
 }
 
 // Client reads users' authorization from the Keycloak Admin API. It caches its access token until 30 s
-// before expiry and the client UUID of ClientRolesClientID after the first successful lookup. It is safe
-// for concurrent use.
+// before expiry, or until the Admin API answers 401 to it (then the next call requests a new one), and the
+// client UUID of ClientRolesClientID after the first successful lookup. It is safe for concurrent use.
 type Client struct {
 	options      Options
 	requestToken func(ctx context.Context) (*oauth2.Token, error)
@@ -322,7 +323,7 @@ func (c *Client) getJSON(ctx context.Context, accessToken, endpoint string, targ
 	request.Header.Set("Accept", "application/json")
 	response, err := c.options.HTTPClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("call admin API: %w", err) // net/http, not a dependency: callers may detect a cancelled context
+		return dependency.Error("call admin API", err)
 	}
 	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
 	if response.StatusCode == http.StatusUnauthorized {

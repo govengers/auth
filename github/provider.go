@@ -56,7 +56,7 @@ type Provider struct {
 	options  Options // resolved copy: defaults applied, slices cloned, team lists lower-cased
 	oauth    *oauth2.Config
 	api      *url.URL // parsed APIURL: the only scheme and host the session's token is sent to
-	reporter failure.Reporter
+	reporter *failure.Reporter
 }
 
 // New validates options and returns a Provider working on a copy of them: the caller's struct and
@@ -73,7 +73,10 @@ func New(options *Options) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("github: APIURL: %w", err)
 	}
-	reporter := failure.Reporter{Provider: providerName, Observer: resolved.Observer, ErrorURL: resolved.ErrorURL}
+	reporter, err := failure.NewReporter(&failure.ReporterOptions{Provider: providerName, Observer: resolved.Observer, ErrorURL: resolved.ErrorURL})
+	if err != nil {
+		return nil, fmt.Errorf("github: %w", err)
+	}
 	return &Provider{options: resolved, oauth: oauthConfiguration(resolved), api: api, reporter: reporter}, nil
 }
 

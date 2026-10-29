@@ -33,6 +33,50 @@ func TestResult(t *testing.T) {
 	}
 }
 
+func TestNewReporter(t *testing.T) {
+	testCases := []struct {
+		name      string
+		options   *ReporterOptions
+		wantError string
+	}{
+		{name: "nil options", wantError: "Provider is required"},
+		{name: "no provider", options: &ReporterOptions{}, wantError: "Provider is required"},
+		{name: "relative ErrorURL", options: &ReporterOptions{Provider: "github", ErrorURL: "error"}, wantError: "ErrorURL must be"},
+		{name: "ErrorURL with a fragment", options: &ReporterOptions{Provider: "github", ErrorURL: "https://app.example.com/error#top"}, wantError: "ErrorURL must be"},
+		{name: "provider only", options: &ReporterOptions{Provider: "github"}},
+		{name: "ErrorURL path", options: &ReporterOptions{Provider: "github", ErrorURL: "/error"}},
+		{name: "absolute ErrorURL", options: &ReporterOptions{Provider: "github", ErrorURL: "https://app.example.com/error"}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			reporter, err := NewReporter(testCase.options)
+			if testCase.wantError != "" {
+				require.ErrorContains(t, err, testCase.wantError)
+				require.Nil(t, reporter)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, *testCase.options, reporter.options)
+		})
+	}
+}
+
+func TestNewReporterWorksOnACopy(t *testing.T) {
+	options := &ReporterOptions{Provider: "github"}
+	reporter := newReporter(t, options)
+
+	options.Provider = "changed"
+
+	require.Equal(t, "github", reporter.options.Provider)
+}
+
+func newReporter(t *testing.T, options *ReporterOptions) *Reporter {
+	t.Helper()
+	reporter, err := NewReporter(options)
+	require.NoError(t, err)
+	return reporter
+}
+
 func TestReporterRefusals(t *testing.T) {
 	refusal := &auth.Error{Kind: auth.ErrUnauthenticated, Code: "login_failed"}
 	testCases := []struct {
@@ -54,9 +98,9 @@ func TestReporterRefusals(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			var reported []auth.Outcome
-			reporter := Reporter{Provider: "github", ErrorURL: testCase.errorURL, Observer: func(_ context.Context, outcome auth.Outcome) {
+			reporter := newReporter(t, &ReporterOptions{Provider: "github", ErrorURL: testCase.errorURL, Observer: func(_ context.Context, outcome auth.Outcome) {
 				reported = append(reported, outcome)
-			}}
+			}})
 			recorder := httptest.NewRecorder()
 			outcome := auth.Outcome{Provider: "other", Action: auth.ActionCallback, Err: testCase.err}
 
@@ -76,9 +120,10 @@ func TestReporterRefusals(t *testing.T) {
 
 func TestReporterWithoutObserverReportsNothing(t *testing.T) {
 	recorder := httptest.NewRecorder()
+	reporter := newReporter(t, &ReporterOptions{Provider: "github"})
 
-	Reporter{Provider: "github"}.Refuse(t.Context(), recorder, auth.Outcome{Err: auth.ErrForbidden})
-	Reporter{Provider: "github"}.Report(t.Context(), auth.Outcome{Result: auth.ResultSuccess})
+	reporter.Refuse(t.Context(), recorder, auth.Outcome{Err: auth.ErrForbidden})
+	reporter.Report(t.Context(), auth.Outcome{Result: auth.ResultSuccess})
 
 	require.Equal(t, http.StatusForbidden, recorder.Code)
 }

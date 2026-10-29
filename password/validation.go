@@ -49,7 +49,8 @@ func isSpecial(character rune) bool {
 }
 
 // identifierKind is what a login identifier names. The format decides it because the login request has one
-// identifier field: usernames cannot contain "@", so an identifier with "@" can only be an email.
+// identifier field: usernames cannot contain "@", so an identifier with "@" can only be an email (DES-008
+// exception in .govengers.yml).
 type identifierKind int
 
 const (

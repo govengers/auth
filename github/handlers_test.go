@@ -718,6 +718,127 @@ func TestRefreshTeamsKeepsTheImpersonatedIdentity(t *testing.T) {
 	require.Empty(t, stored.Impersonator.Roles)
 }
 
+// A save by another request while refresh-teams waits for GitHub is kept, and the refreshed membership is
+// applied to it: the route answers the identity it stored.
+func TestRefreshTeamsKeepsAConcurrentSave(t *testing.T) {
+	deactivated := func(stored *auth.Identity) *auth.Identity {
+		changed := stored.Clone()
+		changed.Active = false
+		return changed
+	}
+	testCases := []struct {
+		name          string
+		impersonating bool
+		save          func(stored *auth.Identity) *auth.Identity // what the other request saves
+		want          func(stored *auth.Identity) *auth.Identity // the identity stored and answered
+	}{
+		{name: "deactivation", save: deactivated, want: func(stored *auth.Identity) *auth.Identity {
+			want := deactivated(stored)
+			want.Teams, want.Roles = []string{"acme/developers"}, nil
+			return want
+		}},
+		{name: "permission removed", save: func(stored *auth.Identity) *auth.Identity {
+			changed := stored.Clone()
+			changed.Permissions = nil
+			return changed
+		}, want: func(stored *auth.Identity) *auth.Identity {
+			want := stored.Clone()
+			want.Permissions, want.Teams, want.Roles = nil, []string{"acme/developers"}, nil
+			return want
+		}},
+		{name: "impersonation stopped", impersonating: true, save: func(stored *auth.Identity) *auth.Identity {
+			return stored.Impersonator
+		}, want: func(stored *auth.Identity) *auth.Identity {
+			want := stored.Impersonator.Clone()
+			want.Teams, want.Roles = []string{"acme/developers"}, nil
+			return want
+		}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			transport := &beforeTeamsTransport{}
+			environment := newTestEnvironment(t, defaultTestTeams(), func(options *Options) {
+				options.HTTPClient = &http.Client{Transport: transport}
+				options.OnLogin = func(_ context.Context, identity *auth.Identity) (*auth.Identity, error) {
+					mapped := identity.Clone()
+					mapped.Permissions = []auth.Permission{{Resource: "builds", Access: auth.AccessWrite}}
+					return mapped, nil
+				}
+			})
+			login := environment.login(t)
+			current := environment.sessionOf(t, login)
+			stored := environment.identityOf(t, login)
+			if testCase.impersonating {
+				stored = &auth.Identity{Provider: "password", Subject: "user-1", Active: true, Impersonator: stored}
+				require.NoError(t, current.SaveIdentity(t.Context(), stored))
+			}
+			environment.fake.SetTeams([]fakeprovider.GitHubTeam{{Organization: "acme", Slug: "developers"}})
+			transport.set(func() {
+				require.NoError(t, current.SaveIdentity(t.Context(), testCase.save(stored)))
+			})
+
+			response := environment.serve(withSessionCookie(t, newRequest(t, http.MethodPost, testExternalURL+"/auth/github/refresh-teams"), login))
+
+			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+			want := testCase.want(stored)
+			require.Equal(t, want, environment.identityOf(t, login))
+			var body auth.IdentityResponse
+			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
+			require.Equal(t, auth.NewIdentityResponse(want), body)
+			require.Equal(t, auth.ResultSuccess, environment.outcomes.last(t).Result)
+		})
+	}
+}
+
+func TestRefreshTeamsRefusesWhenOtherRequestsKeepSaving(t *testing.T) {
+	environment := newTestEnvironment(t, defaultTestTeams(), nil)
+	login := environment.login(t)
+	current := environment.sessionOf(t, login)
+	stored := environment.identityOf(t, login)
+	saves := 0
+	environment.backend.beforeSwap = func() {
+		saves++
+		changed := stored.Clone()
+		changed.Name = fmt.Sprintf("save %d", saves)
+		require.NoError(t, current.SaveIdentity(t.Context(), changed))
+	}
+
+	response := environment.serve(withSessionCookie(t, newRequest(t, http.MethodPost, testExternalURL+"/auth/github/refresh-teams"), login))
+
+	require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
+	require.Equal(t, 2, saves, "one retry")
+	latest := environment.identityOf(t, login)
+	require.Equal(t, "save 2", latest.Name, "the other request's save stays")
+	outcome := environment.outcomes.last(t)
+	require.Equal(t, auth.ResultDenied, outcome.Result)
+	require.ErrorIs(t, outcome.Err, auth.ErrConflict)
+}
+
+// beforeTeamsTransport runs the function set last once, before the next GET /user/teams reaches GitHub.
+type beforeTeamsTransport struct {
+	mutex       sync.Mutex
+	beforeTeams func()
+}
+
+func (t *beforeTeamsTransport) set(beforeTeams func()) {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+	t.beforeTeams = beforeTeams
+}
+
+func (t *beforeTeamsTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	var beforeTeams func()
+	if strings.HasSuffix(request.URL.Path, "/user/teams") {
+		t.mutex.Lock()
+		beforeTeams, t.beforeTeams = t.beforeTeams, nil
+		t.mutex.Unlock()
+	}
+	if beforeTeams != nil {
+		beforeTeams()
+	}
+	return http.DefaultTransport.RoundTrip(request)
+}
+
 // startSessionWith starts a session holding identity and returns the response that set its cookie.
 func startSessionWith(t *testing.T, environment *testEnvironment, identity *auth.Identity) *httptest.ResponseRecorder {
 	t.Helper()

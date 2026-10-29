@@ -48,22 +48,33 @@ func (p *Provider) Refresh(ctx context.Context, current session.Session, identit
 	if identity == nil {
 		return nil, errors.New("github: refresh: identity is nil")
 	}
-	token, err := sessionToken(ctx, current)
+	userMembership, err := p.sessionMembership(ctx, current)
 	if err != nil {
 		return nil, err
-	}
-	teams, err := p.fetchTeams(ctx, p.apiClient(token))
-	if err != nil {
-		return nil, err
-	}
-	userMembership := p.membershipOf(teams)
-	if !userMembership.allowed {
-		return nil, notAllowed()
 	}
 	return withMembership(identity, userMembership), nil
 }
 
-// login starts a fresh session holding state, nonce and PKCE verifier and redirects to GitHub.
+// sessionMembership refetches the team membership of the user whose GitHub token current holds; refusals
+// as Refresh.
+func (p *Provider) sessionMembership(ctx context.Context, current session.Session) (membership, error) {
+	token, err := sessionToken(ctx, current)
+	if err != nil {
+		return membership{}, err
+	}
+	teams, err := p.fetchTeams(ctx, p.apiClient(token))
+	if err != nil {
+		return membership{}, err
+	}
+	userMembership := p.membershipOf(teams)
+	if !userMembership.allowed {
+		return membership{}, notAllowed()
+	}
+	return userMembership, nil
+}
+
+// login stores state, nonce and PKCE verifier in the session (oauthlogin.Begin keeps one holding a live
+// identity, else starts a new one) and redirects to GitHub.
 func (p *Provider) login(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
 	state, err := oauthlogin.Begin(ctx, p.options.Sessions, writer, request, loginKey)
@@ -212,7 +223,7 @@ func (p *Provider) refreshTeams(writer http.ResponseWriter, request *http.Reques
 // refreshSession refreshes and saves the real identity of the request's GitHub session. A refusal
 // (token rejected, no allowed team) ends the session; when that fails, the failure is the error (the
 // session is still usable, so it is no refusal). The stored identity is returned with errors after the
-// session was read.
+// session was read. A save by another request during the GitHub call is kept (saveMembership).
 func (p *Provider) refreshSession(ctx context.Context, writer http.ResponseWriter, request *http.Request) (*auth.Identity, error) {
 	current, err := p.options.Sessions.Open(request)
 	if err != nil {
@@ -225,7 +236,7 @@ func (p *Provider) refreshSession(ctx context.Context, writer http.ResponseWrite
 	if stored.Real().Provider != providerName {
 		return stored, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "not a GitHub session"}
 	}
-	refreshed, err := p.Refresh(ctx, current, stored.Real())
+	userMembership, err := p.sessionMembership(ctx, current)
 	if errors.Is(err, auth.ErrUnauthenticated) || errors.Is(err, auth.ErrForbidden) {
 		if endError := p.options.Sessions.End(ctx, writer, request); endError != nil {
 			return stored, fmt.Errorf("github: end refused session: %w", endError)
@@ -235,11 +246,32 @@ func (p *Provider) refreshSession(ctx context.Context, writer http.ResponseWrite
 	if err != nil {
 		return stored, err
 	}
-	updated := impersonation.WithReal(stored, refreshed)
-	if err := current.SaveIdentity(ctx, updated); err != nil {
-		return stored, fmt.Errorf("github: save refreshed identity: %w", err)
+	return p.saveMembership(ctx, current, stored, userMembership)
+}
+
+// saveMembership saves stored with userMembership applied to its real identity, swapping against stored.
+// When another request saved the session since stored was read (a deactivation, an impersonation, the
+// Guard's refresh), the membership is applied to that save once more, so neither change is lost; a second
+// conflict refuses with ErrConflict.
+func (p *Provider) saveMembership(ctx context.Context, current session.Session, stored *auth.Identity, userMembership membership) (*auth.Identity, error) {
+	for attempt := 1; ; attempt++ {
+		updated := impersonation.WithReal(stored, withMembership(stored.Real(), userMembership))
+		swapped, err := current.SwapIdentity(ctx, stored, updated)
+		if err != nil {
+			return stored, fmt.Errorf("github: save refreshed identity: %w", err)
+		}
+		if swapped {
+			return updated, nil
+		}
+		if attempt == 2 {
+			return stored, &auth.Error{Kind: auth.ErrConflict, Reason: "session saved by other requests during the team refresh"}
+		}
+		latest, err := current.Identity(ctx)
+		if err != nil {
+			return stored, fmt.Errorf("github: refresh teams: %w", err)
+		}
+		stored = latest
 	}
-	return updated, nil
 }
 
 // sessionToken returns the GitHub token stored in current; none or unreadable: ErrUnauthenticated.
