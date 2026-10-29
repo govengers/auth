@@ -83,6 +83,7 @@ type IdentityResponse struct {
 	OIDCClientRoles []string          `json:"oidcClientRoles,omitempty"`
 	Groups          []string          `json:"groups,omitempty"`
 	Teams           []string          `json:"teams,omitempty"`
+	Permissions     []Permission      `json:"permissions,omitempty"` // text form: ["builds:write"]
 	Impersonator    *IdentityResponse `json:"impersonator,omitempty"`
 }
 
@@ -106,6 +107,7 @@ func NewIdentityResponse(identity *Identity) IdentityResponse {
 		OIDCClientRoles: slices.Clone(identity.OIDCClientRoles),
 		Groups:          slices.Clone(identity.Groups),
 		Teams:           slices.Clone(identity.Teams),
+		Permissions:     slices.Clone(identity.Permissions),
 	}
 	if identity.Impersonator != nil {
 		response.Impersonator = new(NewIdentityResponse(identity.Impersonator))

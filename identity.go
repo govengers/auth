@@ -27,6 +27,7 @@ type Identity struct {
 	OIDCClientRoles []string            `json:"oidcClientRoles,omitempty"` // Keycloak client roles of the configured client
 	Groups          []string            `json:"groups,omitempty"`          // OIDC groups (path or name, per IdP mapper)
 	Teams           []string            `json:"teams,omitempty"`           // GitHub "org/team-slug", lower-case
+	Permissions     []Permission        `json:"permissions,omitempty"`     // resource permissions, text form in JSON ("builds:write"); from API keys, JWTs or hooks
 	Attributes      map[string][]string `json:"attributes,omitempty"`      // Keycloak user attributes
 	Claims          map[string]any      `json:"claims,omitempty"`          // OIDC ID token claims, or all claims of a verified JWT
 	Data            map[string]any      `json:"data,omitempty"`            // application data from hooks and resolvers; JSON round trip (numbers become float64)
@@ -41,7 +42,7 @@ func (i *Identity) Real() *Identity {
 	return i.Impersonator
 }
 
-// Clone returns a deep copy: slices, Attributes and the Impersonator chain are copied; Claims and Data are copied one level (values shared). Nil-safe.
+// Clone returns a deep copy: slices (Permissions included), Attributes and the Impersonator chain are copied; Claims and Data are copied one level (values shared). Nil-safe.
 func (i *Identity) Clone() *Identity {
 	if i == nil {
 		return nil
@@ -52,6 +53,7 @@ func (i *Identity) Clone() *Identity {
 	clone.OIDCClientRoles = slices.Clone(i.OIDCClientRoles)
 	clone.Groups = slices.Clone(i.Groups)
 	clone.Teams = slices.Clone(i.Teams)
+	clone.Permissions = slices.Clone(i.Permissions)
 	clone.Attributes = cloneAttributes(i.Attributes)
 	clone.Claims = maps.Clone(i.Claims)
 	clone.Data = maps.Clone(i.Data)

@@ -76,11 +76,13 @@ func TestNewIdentityResponse(t *testing.T) {
 		OIDCClientRoles: []string{"client-role"},
 		Groups:          []string{"/engineering"},
 		Teams:           []string{"org/team"},
+		Permissions:     []Permission{{Resource: "builds", Access: AccessWrite}, {Resource: AllResources, Access: AccessRead}},
 		Impersonator:    &IdentityResponse{Provider: "password", Subject: "admin-1", Roles: []string{RoleAdmin}},
 	}, response)
 
 	response.Roles[0] = "changed"
 	response.Groups[0] = "changed"
+	response.Permissions[0] = Permission{Resource: "changed", Access: AccessRead}
 	require.Equal(t, fullIdentity(), identity)
 }
 
@@ -96,7 +98,7 @@ func TestNewIdentityResponseJSON(t *testing.T) {
 			want: `{"provider":"keycloak","subject":"subject-1","userId":"6f1c2a52-6c43-4c5e-9d3a-0f3d1c2b4a5e","username":"ada",
 				"name":"Ada Lovelace","email":"ada@example.com","picture":"https://example.com/ada.png","active":true,"roles":["admin"],
 				"oidcRoles":["realm-role"],"oidcClientRoles":["client-role"],"groups":["/engineering"],"teams":["org/team"],
-				"impersonator":{"provider":"password","subject":"admin-1","active":false,"roles":["admin"]}}`,
+				"permissions":["builds:write","*:read"],"impersonator":{"provider":"password","subject":"admin-1","active":false,"roles":["admin"]}}`,
 		},
 		{
 			name:     "nil user ID omitted and roles never null",
