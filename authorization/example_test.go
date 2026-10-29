@@ -39,3 +39,20 @@ func ExampleAll() {
 	// <nil>
 	// 403 forbidden
 }
+
+func ExampleHasPermission() {
+	continuousIntegration := auth.WithIdentity(context.Background(), &auth.Identity{
+		Provider:    "apikey",
+		Subject:     "ci",
+		Active:      true,
+		Permissions: []auth.Permission{{Resource: "builds", Access: auth.AccessWrite}, {Resource: "*", Access: auth.AccessRead}},
+	})
+
+	fmt.Println(authorization.HasPermission("builds", auth.AccessWrite)(continuousIntegration))
+	fmt.Println(authorization.HasPermission("deployments", auth.AccessRead)(continuousIntegration))
+	fmt.Println(authorization.HasPermission("deployments", auth.AccessWrite)(continuousIntegration))
+	// Output:
+	// <nil>
+	// <nil>
+	// forbidden: missing permission deployments:write
+}
