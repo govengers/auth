@@ -88,6 +88,10 @@ func (p *Provider) sessionIdentity(ctx context.Context, request *http.Request) *
 // continueLogin answers an authenticated user: a pending second-factor step when TOTP asks for one, else a
 // session and status with the identity.
 func (p *Provider) continueLogin(writer http.ResponseWriter, request *http.Request, user *User, status int) reply {
+	if user.TOTPEnabled && !p.options.TOTP.Enabled {
+		// Fail closed: switching TOTP off must not downgrade the users who enrolled to a single factor.
+		return refused(fmt.Errorf("user %s has TOTP enabled, but the provider's TOTP is off", user.ID))
+	}
 	if challenge, pending := p.challengeFor(user); pending {
 		return p.startChallenge(writer, request, user, challenge)
 	}

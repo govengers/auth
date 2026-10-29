@@ -83,6 +83,19 @@ func TestLoginChallengesTOTPUsers(t *testing.T) {
 	requireRefusal(t, browser.get(statusPath), http.StatusUnauthorized, "unauthenticated")
 }
 
+func TestLoginFailsForEnrolledUsersWhileTOTPIsOff(t *testing.T) {
+	fixture := newFixture(t, Options{})
+	user := fixture.createUser(t, "ada", "")
+	require.NoError(t, fixture.storage.SetTOTP(t.Context(), user.ID, testSecret, nil))
+	browser := fixture.newClient(t)
+
+	recorder := browser.login("ada")
+
+	requireRefusal(t, recorder, http.StatusInternalServerError, "internal")
+	require.False(t, browser.hasSession())
+	require.Equal(t, auth.ResultError, fixture.outcomes.last(t).Result)
+}
+
 func TestVerifyTOTP(t *testing.T) {
 	testCases := []struct {
 		name       string

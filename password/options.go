@@ -34,7 +34,7 @@ const (
 
 // TOTPOptions configure the second factor.
 type TOTPOptions struct {
-	Enabled            bool          // routes the TOTP endpoints and challenges users who enabled TOTP
+	Enabled            bool          // routes the TOTP endpoints and challenges users who enabled TOTP; while off, their logins fail (500)
 	Required           bool          // users without TOTP enroll during login; needs Enabled
 	Issuer             string        // required when Enabled (otpauth issuer)
 	Period             uint          // default 30 s; at most 3600
