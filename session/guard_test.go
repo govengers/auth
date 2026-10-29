@@ -437,6 +437,13 @@ func TestGuardRefreshRefusalThatCannotEndTheSessionIs500(t *testing.T) {
 		require.NotErrorIs(t, outcome.Err, auth.ErrUnauthenticated)
 		require.ErrorContains(t, outcome.Err, "user deleted", "the refusal stays readable")
 	}
+
+	fixture.clock.advance(time.Second)
+	again := serveGuarded(fixture.guard.RequireAPI(), apiRequest)
+
+	require.Equal(t, http.StatusInternalServerError, again.recorder.Code, "the refused identity does not pass on the claim")
+	require.Nil(t, again.identity)
+	require.Equal(t, 3, refresher.callCount(), "the claim was released, so the next request refreshes again")
 }
 
 func TestGuardRefreshFailureKeepsTheIdentity(t *testing.T) {
