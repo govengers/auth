@@ -24,8 +24,8 @@ import (
 	"golang.org/x/oauth2/clientcredentials"
 
 	"github.com/govengers/auth"
-	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/internal/redirect"
+	"github.com/govengers/auth/internal/tokenendpoint"
 )
 
 const (
@@ -216,13 +216,8 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 		return c.adminToken, nil
 	}
 	token, err := c.requestToken(context.WithValue(ctx, oauth2.HTTPClient, c.options.HTTPClient))
-	var retrieveError *oauth2.RetrieveError
-	if errors.As(err, &retrieveError) {
-		// the status only: the answer's description and body are Keycloak's free text (LOG-009)
-		return "", fmt.Errorf("request admin token: token endpoint answered HTTP %d", retrieveError.Response.StatusCode)
-	}
 	if err != nil {
-		return "", dependency.Error("request admin token", err)
+		return "", tokenendpoint.Error("request admin token", err)
 	}
 	// oauth2 turns expires_in into Expiry with time.Now (the client credentials grant keeps no ExpiresIn),
 	// so the remaining lifetime is read off the wall clock on purpose and only the deadline uses c.now;
