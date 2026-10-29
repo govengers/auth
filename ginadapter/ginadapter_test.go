@@ -368,6 +368,8 @@ func TestObserveRecordsAGuardRefreshOnce(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, started.SaveIdentity(t.Context(), &auth.Identity{Provider: "github", Subject: "42", UserID: userID, Active: true}))
 	// Every request is due for a refresh: the stored identity was refreshed more than a nanosecond ago.
+	// The Guard's clock cannot be set from this package, so a short interval through the options stands in
+	// for it (TST-005); sealing the session and the request in between take far longer than a nanosecond.
 	guard, err := session.NewGuard(&session.GuardOptions{Store: store, Refreshers: []session.Refresher{failingRefresher{}}, RefreshInterval: time.Nanosecond, Observer: ginadapter.Observe})
 	require.NoError(t, err)
 	var fields []wideevent.Field
