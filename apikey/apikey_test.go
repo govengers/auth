@@ -90,34 +90,34 @@ func TestNew(t *testing.T) {
 	resolver := func(context.Context, string) (*auth.Identity, error) { return nil, nil }
 	build := apikey.Key{Name: "build", Secret: buildSecret}
 	testCases := []struct {
-		name    string
-		options *apikey.Options
-		wantErr string
+		name      string
+		options   *apikey.Options
+		wantError string
 	}{
-		{name: "nil options", options: nil, wantErr: "options are required"},
-		{name: "neither keys nor resolver", options: &apikey.Options{}, wantErr: "at least one of Keys and Resolver"},
+		{name: "nil options", options: nil, wantError: "options are required"},
+		{name: "neither keys nor resolver", options: &apikey.Options{}, wantError: "at least one of Keys and Resolver"},
 		{name: "keys only", options: &apikey.Options{Keys: []apikey.Key{build}}},
 		{name: "resolver only", options: &apikey.Options{Resolver: resolver}},
 		{name: "keys and resolver", options: &apikey.Options{Keys: []apikey.Key{build}, Resolver: resolver}},
 		{name: "custom header", options: &apikey.Options{Keys: []apikey.Key{build}, HeaderName: "X-Token"}},
-		{name: "authorization header", options: &apikey.Options{Keys: []apikey.Key{build}, HeaderName: "authorization"}, wantErr: "HeaderName must not be Authorization"},
-		{name: "empty name", options: &apikey.Options{Keys: []apikey.Key{{Secret: buildSecret}}}, wantErr: "key 0: key name is required"},
-		{name: "blank name", options: &apikey.Options{Keys: []apikey.Key{{Name: "  ", Secret: buildSecret}}}, wantErr: "key 0: key name is required"},
-		{name: "secret one byte short", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: "0123456789abcde"}}}, wantErr: "shorter than 16 bytes"},
+		{name: "authorization header", options: &apikey.Options{Keys: []apikey.Key{build}, HeaderName: "authorization"}, wantError: "HeaderName must not be Authorization"},
+		{name: "empty name", options: &apikey.Options{Keys: []apikey.Key{{Secret: buildSecret}}}, wantError: "key 0: key name is required"},
+		{name: "blank name", options: &apikey.Options{Keys: []apikey.Key{{Name: "  ", Secret: buildSecret}}}, wantError: "key 0: key name is required"},
+		{name: "secret one byte short", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: "0123456789abcde"}}}, wantError: "shorter than 16 bytes"},
 		{name: "secret of minimum size", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: "0123456789abcdef"}}}},
-		{name: "secret with trailing space", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret + " "}}}, wantErr: "leading or trailing whitespace"},
-		{name: "duplicate name", options: &apikey.Options{Keys: []apikey.Key{build, {Name: "build", Secret: adminSecret}}}, wantErr: "key 1: name or secret is used by another key"},
-		{name: "duplicate secret", options: &apikey.Options{Keys: []apikey.Key{build, {Name: "other", Secret: buildSecret}}}, wantErr: "key 1: name or secret is used by another key"},
+		{name: "secret with trailing space", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret + " "}}}, wantError: "leading or trailing whitespace"},
+		{name: "duplicate name", options: &apikey.Options{Keys: []apikey.Key{build, {Name: "build", Secret: adminSecret}}}, wantError: "key 1: name or secret is used by another key"},
+		{name: "duplicate secret", options: &apikey.Options{Keys: []apikey.Key{build, {Name: "other", Secret: buildSecret}}}, wantError: "key 1: name or secret is used by another key"},
 		{name: "valid permissions", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret, Permissions: buildPermissions}}}},
-		{name: "invalid permission access", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret, Permissions: []auth.Permission{{Resource: "builds", Access: "admin"}}}}}, wantErr: "key 0: permission"},
-		{name: "invalid permission resource", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret, Permissions: []auth.Permission{{Access: auth.AccessRead}}}}}, wantErr: "key 0: permission"},
+		{name: "invalid permission access", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret, Permissions: []auth.Permission{{Resource: "builds", Access: "admin"}}}}}, wantError: "key 0: permission"},
+		{name: "invalid permission resource", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret, Permissions: []auth.Permission{{Access: auth.AccessRead}}}}}, wantError: "key 0: permission"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			authenticator, err := apikey.New(testCase.options)
 
-			if testCase.wantErr != "" {
-				require.ErrorContains(t, err, testCase.wantErr)
+			if testCase.wantError != "" {
+				require.ErrorContains(t, err, testCase.wantError)
 				require.Nil(t, authenticator)
 				return
 			}
