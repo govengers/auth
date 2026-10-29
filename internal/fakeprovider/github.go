@@ -60,18 +60,25 @@ type GitHubOptions struct {
 }
 
 // GitHubServer is a fake GitHub on http://127.0.0.1:<port>: the OAuth endpoints (authorize
-// auto-approves, the token endpoint checks the client credentials and PKCE S256) and the REST API parts
-// the github provider uses. It is safe for concurrent use.
+// auto-approves, the token endpoint checks the client credentials, PKCE S256 and that redirect_uri is
+// the one the code was issued for) and the REST API parts the github provider uses. It is safe for
+// concurrent use.
 type GitHubServer struct {
 	server   *httptest.Server
 	options  GitHubOptions
 	mutex    sync.Mutex
 	teams    []GitHubTeam
-	codes    map[string]string // authorization code -> PKCE code challenge, single use
-	tokens   map[string]bool   // issued access token -> not revoked
+	codes    map[string]githubGrant // authorization code -> its grant, single use
+	tokens   map[string]bool        // issued access token -> not revoked
 	revoked  []string
 	failures map[GitHubEndpoint]int
 	calls    map[GitHubEndpoint]int
+}
+
+// githubGrant is what an authorization code was issued for.
+type githubGrant struct {
+	challenge   string // PKCE code challenge
+	redirectURI string
 }
 
 type githubTeamResponse struct {
@@ -87,7 +94,7 @@ func StartGitHub(tb testing.TB, options GitHubOptions) *GitHubServer {
 	fake := &GitHubServer{
 		options:  withGitHubDefaults(options),
 		teams:    slices.Clone(options.Teams),
-		codes:    map[string]string{},
+		codes:    map[string]githubGrant{},
 		tokens:   map[string]bool{},
 		failures: map[GitHubEndpoint]int{},
 		calls:    map[GitHubEndpoint]int{},
@@ -200,17 +207,17 @@ func (s *GitHubServer) authorize(writer http.ResponseWriter, request *http.Reque
 	if failure != 0 {
 		callback.Set("error", "access_denied")
 	} else {
-		callback.Set("code", s.issueCode(query.Get("code_challenge")))
+		callback.Set("code", s.issueCode(githubGrant{challenge: query.Get("code_challenge"), redirectURI: query.Get("redirect_uri")}))
 	}
 	redirectURI.RawQuery = callback.Encode()
 	http.Redirect(writer, request, redirectURI.String(), http.StatusFound) //nolint:gosec // G710: an authorize endpoint redirects to the client's redirect_uri by design
 }
 
-func (s *GitHubServer) issueCode(challenge string) string {
+func (s *GitHubServer) issueCode(grant githubGrant) string {
 	code := rand.Text()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	s.codes[code] = challenge
+	s.codes[code] = grant
 	return code
 }
 
@@ -228,9 +235,13 @@ func (s *GitHubServer) token(writer http.ResponseWriter, request *http.Request) 
 		writeGitHubJSON(writer, http.StatusOK, map[string]string{"error": "incorrect_client_credentials"})
 		return
 	}
-	challenge, found := s.popCode(request.PostForm.Get("code"))
-	if !found || !matchesChallenge(request.PostForm.Get("code_verifier"), challenge) {
+	grant, found := s.popCode(request.PostForm.Get("code"))
+	if !found || !matchesChallenge(request.PostForm.Get("code_verifier"), grant.challenge) {
 		writeGitHubJSON(writer, http.StatusOK, map[string]string{"error": "bad_verification_code"})
+		return
+	}
+	if request.PostForm.Get("redirect_uri") != grant.redirectURI {
+		writeGitHubJSON(writer, http.StatusOK, map[string]string{"error": "redirect_uri_mismatch"})
 		return
 	}
 	writeGitHubJSON(writer, http.StatusOK, map[string]string{"access_token": s.issueToken(), "token_type": "bearer", "scope": "read:org"})
@@ -244,12 +255,12 @@ func (s *GitHubServer) validClient(request *http.Request) bool {
 	return clientID == s.options.ClientID && subtle.ConstantTimeCompare([]byte(clientSecret), []byte(s.options.ClientSecret)) == 1
 }
 
-func (s *GitHubServer) popCode(code string) (string, bool) {
+func (s *GitHubServer) popCode(code string) (githubGrant, bool) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	challenge, found := s.codes[code]
+	grant, found := s.codes[code]
 	delete(s.codes, code)
-	return challenge, found
+	return grant, found
 }
 
 func matchesChallenge(verifier, challenge string) bool {

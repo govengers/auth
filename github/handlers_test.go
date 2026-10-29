@@ -52,6 +52,7 @@ func TestLoginFailsWhenTheSessionCannotBeStored(t *testing.T) {
 	outcome := environment.outcomes.last(t)
 	require.Equal(t, auth.ResultError, outcome.Result)
 	require.ErrorIs(t, outcome.Err, errBackendDown)
+	require.ErrorContains(t, outcome.Err, "github: begin login: ")
 }
 
 func TestCallbackStartsTheSession(t *testing.T) {
@@ -285,23 +286,69 @@ func TestCallbackRefusesAWrongPKCEVerifier(t *testing.T) {
 	require.JSONEq(t, `{"code":"login_failed","message":"authentication required"}`, response.Body.String())
 }
 
-func TestCallbackRedirectsFailuresToTheErrorURL(t *testing.T) {
-	environment := newTestEnvironment(t, nil, func(options *Options) { options.ErrorURL = "/login?source=github" })
+func TestCallbackRefusesACodeIssuedForAnotherRedirectURI(t *testing.T) {
+	environment := newTestEnvironment(t, defaultTestTeams(), nil)
 	login := environment.startLogin(t, "")
+	location, err := url.Parse(login.Header().Get("Location"))
+	require.NoError(t, err)
+	query := location.Query()
+	query.Set("redirect_uri", "https://other.example.com/callback")
+	location.RawQuery = query.Encode()
+	otherCallback, err := url.Parse(approve(t, location.String()))
+	require.NoError(t, err)
+	require.Equal(t, "other.example.com", otherCallback.Host)
 
-	response := environment.callback(t, login, approve(t, login.Header().Get("Location")))
+	response := environment.callback(t, login, testExternalURL+"/auth/github/callback?"+otherCallback.RawQuery)
 
-	require.Equal(t, http.StatusFound, response.Code)
-	require.Equal(t, testExternalURL+"/login?source=github&code=forbidden", response.Header().Get("Location"))
-	require.Equal(t, "no-store", response.Header().Get("Cache-Control"))
-	require.Equal(t, auth.ResultDenied, environment.outcomes.last(t).Result)
+	require.Equal(t, http.StatusUnauthorized, response.Code)
+	require.JSONEq(t, `{"code":"login_failed","message":"authentication required"}`, response.Body.String())
+}
 
-	environment.fake.FailWith(fakeprovider.GitHubEndpointUser, http.StatusInternalServerError)
-	login = environment.startLogin(t, "")
-	response = environment.callback(t, login, approve(t, login.Header().Get("Location")))
-	require.Equal(t, http.StatusFound, response.Code, "an internal failure goes to the ErrorURL too")
-	require.Equal(t, testExternalURL+"/login?source=github&code=internal", response.Header().Get("Location"))
-	require.Equal(t, auth.ResultError, environment.outcomes.last(t).Result)
+func TestCallbackRedirectsFailuresToTheErrorURL(t *testing.T) {
+	testCases := []struct {
+		name       string
+		teams      []fakeprovider.GitHubTeam
+		prepare    func(environment *testEnvironment)
+		wantCode   string
+		wantResult auth.Result
+	}{
+		{name: "refusal", wantCode: "forbidden", wantResult: auth.ResultDenied},
+		{
+			name: "GitHub failure", teams: defaultTestTeams(),
+			prepare:  failing(fakeprovider.GitHubEndpointUser, http.StatusInternalServerError),
+			wantCode: "internal", wantResult: auth.ResultError,
+		},
+		{
+			name: "session rotation fails", teams: defaultTestTeams(),
+			prepare:  func(environment *testEnvironment) { environment.backend.failRevoke.Store(true) },
+			wantCode: "internal", wantResult: auth.ResultError,
+		},
+		{
+			name: "session store fails", teams: defaultTestTeams(),
+			prepare:  func(environment *testEnvironment) { environment.backend.failPut.Store(true) },
+			wantCode: "internal", wantResult: auth.ResultError,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			environment := newTestEnvironment(t, testCase.teams, func(options *Options) { options.ErrorURL = "/login?source=github" })
+			login := environment.startLogin(t, "")
+			if testCase.prepare != nil {
+				testCase.prepare(environment)
+			}
+
+			response := environment.callback(t, login, approve(t, login.Header().Get("Location")))
+
+			require.Equal(t, http.StatusFound, response.Code, response.Body.String())
+			require.Equal(t, testExternalURL+"/login?source=github&code="+testCase.wantCode, response.Header().Get("Location"))
+			require.Equal(t, "no-store", response.Header().Get("Cache-Control"))
+			require.Len(t, environment.outcomes.outcomes, 2, "one login and one callback outcome")
+			outcome := environment.outcomes.last(t)
+			require.Equal(t, auth.ActionCallback, outcome.Action)
+			require.Equal(t, testCase.wantResult, outcome.Result)
+			require.Error(t, outcome.Err)
+		})
+	}
 }
 
 func TestCallbackRunsOnLogin(t *testing.T) {
@@ -424,7 +471,10 @@ func TestLogoutFailsWhenTheSessionCannotBeEnded(t *testing.T) {
 }
 
 func TestLogoutIgnoresAClientDisconnect(t *testing.T) {
-	environment := newTestEnvironment(t, defaultTestTeams(), nil)
+	var loggedOut []*auth.Identity
+	environment := newTestEnvironment(t, defaultTestTeams(), func(options *Options) {
+		options.OnLogout = func(_ context.Context, identity *auth.Identity) { loggedOut = append(loggedOut, identity) }
+	})
 	login := environment.login(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -434,7 +484,27 @@ func TestLogoutIgnoresAClientDisconnect(t *testing.T) {
 
 	require.Equal(t, http.StatusFound, response.Code)
 	require.Len(t, environment.fake.RevokedTokens(), 1)
-	require.NoError(t, environment.outcomes.last(t).Err)
+	require.Len(t, loggedOut, 1)
+	outcome := environment.outcomes.last(t)
+	require.NoError(t, outcome.Err)
+	require.Equal(t, "42", outcome.Identity.Subject)
+}
+
+func TestLogoutWithAnUnreadableSessionIsADegradedSuccess(t *testing.T) {
+	environment := newTestEnvironment(t, defaultTestTeams(), nil)
+	login := environment.login(t)
+	environment.backend.failGet.Store(true)
+
+	response := environment.serve(withSessionCookie(t, newRequest(t, http.MethodGet, testExternalURL+"/auth/github/logout"), login))
+
+	require.Equal(t, http.StatusFound, response.Code)
+	require.Equal(t, -1, sessionCookie(t, response).MaxAge)
+	environment.backend.failGet.Store(false)
+	_, err := environment.sessionOf(t, login).Identity(t.Context())
+	require.ErrorIs(t, err, auth.ErrUnauthenticated, "the session is ended all the same")
+	outcome := environment.outcomes.last(t)
+	require.Equal(t, auth.ResultSuccess, outcome.Result)
+	require.ErrorIs(t, outcome.Err, errBackendDown)
 }
 
 func TestRefreshTeams(t *testing.T) {

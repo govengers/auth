@@ -25,11 +25,23 @@ const (
 
 var errBackendDown = errors.New("backend down")
 
-// switchableBackend is a memory backend whose Put and Revoke can be made to fail.
+// switchableBackend is a memory backend whose Get, Put and Revoke can be made to fail. Get honours the
+// context like the Redis backend does.
 type switchableBackend struct {
 	*session.MemoryBackend
+	failGet    atomic.Bool
 	failPut    atomic.Bool
 	failRevoke atomic.Bool
+}
+
+func (b *switchableBackend) Get(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	if b.failGet.Load() {
+		return nil, false, errBackendDown
+	}
+	return b.MemoryBackend.Get(ctx, sessionID, key)
 }
 
 func (b *switchableBackend) Put(ctx context.Context, sessionID, key string, value []byte, ttl time.Duration) error {

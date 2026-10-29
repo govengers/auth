@@ -69,7 +69,7 @@ func (p *Provider) login(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
 	state, err := oauthlogin.Begin(ctx, p.options.Sessions, writer, request, loginKey)
 	if err != nil {
-		p.refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogin, Err: err})
+		p.refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogin, Err: fmt.Errorf("github: begin login: %w", err)})
 		return
 	}
 	redirect.To(writer, p.oauth.AuthCodeURL(state.State, oauth2.S256ChallengeOption(state.Verifier)))
@@ -85,7 +85,7 @@ func (p *Provider) callback(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if err := p.startSession(ctx, writer, request, completed); err != nil {
-		p.refuse(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err, Identity: completed.identity})
+		p.refuseCallback(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err, Identity: completed.identity})
 		return
 	}
 	redirect.To(writer, p.options.ExternalURL+completed.returnPath)
@@ -153,14 +153,14 @@ func (p *Provider) startSession(ctx context.Context, writer http.ResponseWriter,
 // OnLogout and redirects to PostLogoutURL.
 func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
-	identity, token := p.sessionState(ctx, request)
+	identity, token, readErr := p.sessionState(context.WithoutCancel(ctx), request)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
 		p.refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: fmt.Errorf("github: end session: %w", err), Identity: identity})
 		return
 	}
-	outcome := auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity}
+	outcome := auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity, Err: readErr}
 	if token != nil {
-		outcome.Err = p.revokeToken(ctx, token)
+		outcome.Err = errors.Join(outcome.Err, p.revokeToken(ctx, token))
 	}
 	if identity != nil && p.options.OnLogout != nil {
 		p.options.OnLogout(ctx, identity)
@@ -170,16 +170,24 @@ func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) {
 }
 
 // sessionState returns the identity and the GitHub token of the request's session, each nil when
-// absent or unreadable: logout ends the session either way.
-func (p *Provider) sessionState(ctx context.Context, request *http.Request) (*auth.Identity, *oauth2.Token) {
+// absent. A backend failure leaves them nil too and is returned to degrade the outcome: logout ends
+// the session either way, but a token that could not be read stays valid at GitHub.
+func (p *Provider) sessionState(ctx context.Context, request *http.Request) (*auth.Identity, *oauth2.Token, error) {
 	current, err := p.options.Sessions.Open(request)
 	if err != nil {
-		return nil, nil
+		return nil, nil, unlessAbsent(err)
 	}
-	// Errors mean there is no identity or token to report or revoke; ending the session does not need them.
-	identity, _ := current.Identity(ctx)
-	token, _ := sessionToken(ctx, current)
-	return identity, token
+	identity, identityErr := current.Identity(ctx)
+	token, tokenErr := sessionToken(ctx, current)
+	return identity, token, errors.Join(unlessAbsent(identityErr), unlessAbsent(tokenErr))
+}
+
+// unlessAbsent returns err unless it only says that there is nothing (ErrUnauthenticated).
+func unlessAbsent(err error) error {
+	if errors.Is(err, auth.ErrUnauthenticated) {
+		return nil
+	}
+	return err
 }
 
 // refreshTeams refreshes the teams of the request's GitHub session and answers its IdentityResponse.
