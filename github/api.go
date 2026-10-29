@@ -157,7 +157,7 @@ func (p *Provider) getJSON(ctx context.Context, client *http.Client, path string
 	if err != nil {
 		return fmt.Errorf("github: GET %s: %w", path, err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
 	if response.StatusCode == http.StatusUnauthorized {
 		return &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "GitHub rejected the token"}
 	}
@@ -192,7 +192,7 @@ func (p *Provider) revokeToken(ctx context.Context, token *oauth2.Token) error {
 	if err != nil {
 		return fmt.Errorf("github: revoke token: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
 	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusOK {
 		return fmt.Errorf("github: revoke token: GitHub answered %d", response.StatusCode)
 	}
