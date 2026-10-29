@@ -31,12 +31,20 @@ func Decode(writer http.ResponseWriter, request *http.Request, target any) error
 	return nil
 }
 
-// Write writes body as JSON with status, Content-Type application/json and Cache-Control no-store.
+// internalErrorBody is auth.WriteError's body for an internal error (this package cannot import auth).
+const internalErrorBody = `{"code":"internal","message":"internal error"}`
+
+// Write writes body as JSON with status, Content-Type application/json and Cache-Control no-store. A body
+// that does not encode (an identity carrying an invalid auth.Permission from application code) is answered
+// 500 internal instead, before anything was written.
 func Write(writer http.ResponseWriter, status int, body any) {
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		status, encoded = http.StatusInternalServerError, []byte(internalErrorBody)
+	}
 	writer.Header().Set("Content-Type", "application/json")
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.WriteHeader(status)
-	// Bodies are the library's own response types, which always encode; a write error means the client is
-	// gone and there is nobody left to answer.
-	_ = json.NewEncoder(writer).Encode(body)
+	// A write error means the client is gone and there is nobody left to answer.
+	_, _ = writer.Write(append(encoded, '\n'))
 }
