@@ -750,17 +750,18 @@ func minimumProblem(name string, value, minimum int) error {
 	return nil
 }
 
-// sameSiteMode parses SESSION_SAME_SITE.
+// sameSiteMode parses SESSION_SAME_SITE. Strict is refused: every login of the binary returns from the
+// provider's site, and a browser withholds a strict cookie, the login state with it, on that redirect.
 func sameSiteMode(value string) (http.SameSite, error) {
 	switch value {
 	case "lax":
 		return http.SameSiteLaxMode, nil
-	case "strict":
-		return http.SameSiteStrictMode, nil
 	case "none":
 		return http.SameSiteNoneMode, nil
+	case "strict":
+		return http.SameSiteDefaultMode, errors.New("SESSION_SAME_SITE=strict breaks the login: browsers withhold the cookie on the redirect back from the provider; use lax")
 	default:
-		return http.SameSiteDefaultMode, fmt.Errorf("SESSION_SAME_SITE %q must be lax, strict or none", value)
+		return http.SameSiteDefaultMode, fmt.Errorf("SESSION_SAME_SITE %q must be lax or none", value)
 	}
 }
 

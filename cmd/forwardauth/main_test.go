@@ -99,6 +99,7 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		{name: "session key not base64", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionEncryptionKey = "not base64!" }, problems: []string{"SESSION_ENCRYPTION_KEY"}},
 		{name: "session key too short", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionEncryptionKey = "c2hvcnQ=" }, problems: []string{"SESSION_ENCRYPTION_KEY"}},
 		{name: "unknown same site", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionSameSite = "Lax" }, problems: []string{"SESSION_SAME_SITE \"Lax\""}},
+		{name: "strict same site", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionSameSite = "strict" }, problems: []string{"SESSION_SAME_SITE=strict breaks the login"}},
 		{name: "same site none with insecure cookie", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.SessionSameSite, configuration.SessionInsecureCookie = "none", true
 		}, problems: []string{"SESSION_SAME_SITE=none requires a secure cookie"}},
@@ -200,7 +201,6 @@ func TestSameSiteMode(t *testing.T) {
 		want  http.SameSite
 	}{
 		{value: "lax", want: http.SameSiteLaxMode},
-		{value: "strict", want: http.SameSiteStrictMode},
 		{value: "none", want: http.SameSiteNoneMode},
 	}
 	for _, testCase := range testCases {
@@ -211,6 +211,8 @@ func TestSameSiteMode(t *testing.T) {
 			require.Equal(t, testCase.want, got)
 		})
 	}
-	_, err := sameSiteMode(strings.ToUpper("lax"))
-	require.Error(t, err)
+	for _, value := range []string{strings.ToUpper("lax"), "strict"} {
+		_, err := sameSiteMode(value)
+		require.Error(t, err, value)
+	}
 }
