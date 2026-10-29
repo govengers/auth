@@ -15,6 +15,7 @@ import (
 func TestAPIKeysPassTheChecksAndCarryTheirConfiguredPermissionsInTheJWT(t *testing.T) {
 	fake := fakeprovider.StartGitHub(t, fakeprovider.GitHubOptions{})
 	running := start(t, merged(gitHubEnvironment(t, fake), map[string]string{
+		"API_KEYS_ENABLED":    "true",
 		"API_KEYS":            "ci:ci-secret-0123456789,reader:reader-secret-0123456789",
 		"API_KEY_PERMISSIONS": "ci=builds:write+*:read",
 	}))

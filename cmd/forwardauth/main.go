@@ -67,6 +67,7 @@ type Configuration struct {
 	WideEventSampleRate     int
 	ShutdownDelaySeconds    int
 	IdentityEndpointEnabled bool
+	APIKeysEnabled          bool
 	APIKeys                 []string
 	APIKeyPermissions       []string
 
@@ -449,10 +450,10 @@ func newGitHubProvider(configuration *Configuration, store *session.Store, obser
 	return selectedProvider{routes: provider.Routes(), loginURL: provider.LoginURL(), refreshers: []session.Refresher{provider}}, nil
 }
 
-// newAPIKeys returns nil without API_KEYS: the checks then run without the API key middleware.
+// newAPIKeys returns nil when API_KEYS_ENABLED is false: the checks then run without the API key middleware.
 func newAPIKeys(configuration *Configuration, observer auth.Observer) (*apikey.Authenticator, error) {
-	if len(configuration.APIKeys) == 0 {
-		return nil, nil // no keys configured is not an error
+	if !configuration.APIKeysEnabled {
+		return nil, nil // API keys disabled is not an error
 	}
 	keys, err := apiKeys(configuration.APIKeys, configuration.APIKeyPermissions)
 	if err != nil {
@@ -510,6 +511,7 @@ func serverValues(configuration *Configuration) []config.Value {
 		config.Int("WIDE_EVENT_SAMPLE_RATE").Default(10).Into(&configuration.WideEventSampleRate),
 		config.Int("SHUTDOWN_DELAY_SECONDS").Default(5).Into(&configuration.ShutdownDelaySeconds),
 		config.Bool("IDENTITY_ENDPOINT_ENABLED").Default(false).Into(&configuration.IdentityEndpointEnabled),
+		config.Bool("API_KEYS_ENABLED").Default(false).Into(&configuration.APIKeysEnabled),
 		config.StringArray("API_KEYS").Default(nil).Sensitive().Into(&configuration.APIKeys),
 		config.StringArray("API_KEY_PERMISSIONS").Default(nil).Into(&configuration.APIKeyPermissions),
 	}
@@ -655,11 +657,17 @@ func validateSession(configuration *Configuration) error {
 	return errors.Join(problems...)
 }
 
-// validateAPIKeys parses API_KEYS and API_KEY_PERMISSIONS and lets apikey.New judge the keys (secret
-// length, duplicates), so its problems are listed with all others.
+// validateAPIKeys parses API_KEYS and API_KEY_PERMISSIONS when API_KEYS_ENABLED and lets apikey.New
+// judge the keys (secret length, duplicates), so its problems are listed with all others.
 func validateAPIKeys(configuration *Configuration) error {
+	if !configuration.APIKeysEnabled {
+		return nil
+	}
+	if len(configuration.APIKeys) == 0 {
+		return errors.New("API_KEYS needs at least one name:secret when API_KEYS_ENABLED=true")
+	}
 	keys, err := apiKeys(configuration.APIKeys, configuration.APIKeyPermissions)
-	if err != nil || len(keys) == 0 {
+	if err != nil {
 		return err
 	}
 	if _, err := apikey.New(&apikey.Options{Keys: keys}); err != nil {
