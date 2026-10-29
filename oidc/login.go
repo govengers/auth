@@ -151,17 +151,18 @@ func (p *Provider) newIdentity(login verifiedLogin) *auth.Identity {
 	}
 }
 
-// saveSession rotates the session (fixation defense) and stores the identity and the raw ID token in it.
+// saveSession rotates the session (fixation defense) and stores the raw ID token and then the identity in
+// it: the identity authenticates the session, so a failed write leaves none behind the 500.
 func (p *Provider) saveSession(ctx context.Context, writer http.ResponseWriter, request *http.Request, identity *auth.Identity, rawIdentityToken string) error {
 	current, err := p.options.Sessions.Start(ctx, writer, request)
 	if err != nil {
 		return fmt.Errorf("oidc: start session: %w", err)
 	}
-	if err := current.SaveIdentity(ctx, identity); err != nil {
-		return fmt.Errorf("oidc: save identity: %w", err)
-	}
 	if err := current.Put(ctx, p.identityTokenKey, []byte(rawIdentityToken), p.options.Sessions.MaximumAge()); err != nil {
 		return fmt.Errorf("oidc: save ID token: %w", err)
+	}
+	if err := current.SaveIdentity(ctx, identity); err != nil {
+		return fmt.Errorf("oidc: save identity: %w", err)
 	}
 	return nil
 }

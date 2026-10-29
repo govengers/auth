@@ -71,6 +71,19 @@ func TestCallbackStartsARotatedSessionAndRedirectsToTheReturnPath(t *testing.T) 
 	require.Equal(t, "idp-session-1", outcome.Identity.Claims["sid"])
 }
 
+func TestCallbackFailedSessionWriteLeavesNoSession(t *testing.T) {
+	backend := &failingBackend{}
+	backend.failKey(providerName + ".id_token")
+	application := newApplicationOn(t, newStoreOn(t, backend), startIssuer(t, nil), nil)
+	person := newBrowser(t)
+
+	response := person.signIn(application, prefix+"/login")
+
+	require.Equal(t, http.StatusInternalServerError, response.Code)
+	require.ErrorIs(t, application.outcomes.last(t).Err, errBackendDown)
+	require.Equal(t, http.StatusUnauthorized, person.me(application), "the 500 leaves no authenticated session behind")
+}
+
 func TestCallbackReturnsOnlyToSafePaths(t *testing.T) {
 	application := newApplication(t, startIssuer(t, nil), nil)
 	testCases := []struct {

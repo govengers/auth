@@ -305,13 +305,16 @@ func withoutErrorAndIdentity(outcome auth.Outcome) auth.Outcome {
 	return outcome
 }
 
-// failingBackend is a memory backend whose Revoke fails once failRevoke was called and whose Get fails on
-// a done context.
+// failingBackend is a memory backend whose Revoke fails once failRevoke was called, whose Put and Get of
+// the key set by failKey fail, and whose Get fails on a done context.
 type failingBackend struct {
 	session.Backend
-	mutex   sync.Mutex
-	failing bool
+	mutex      sync.Mutex
+	failing    bool
+	failingKey string
 }
+
+var errBackendDown = errors.New("backend down")
 
 func (b *failingBackend) failRevoke() {
 	b.mutex.Lock()
@@ -319,20 +322,42 @@ func (b *failingBackend) failRevoke() {
 	b.failing = true
 }
 
+func (b *failingBackend) failKey(key string) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	b.failingKey = key
+}
+
+func (b *failingBackend) fails(key string) bool {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return key == b.failingKey
+}
+
 func (b *failingBackend) Revoke(ctx context.Context, sessionID string, ttl time.Duration) error {
 	b.mutex.Lock()
 	failing := b.failing
 	b.mutex.Unlock()
 	if failing {
-		return errors.New("backend down")
+		return errBackendDown
 	}
 	return b.Backend.Revoke(ctx, sessionID, ttl)
+}
+
+func (b *failingBackend) Put(ctx context.Context, sessionID, key string, value []byte, ttl time.Duration) error {
+	if b.fails(key) {
+		return errBackendDown
+	}
+	return b.Backend.Put(ctx, sessionID, key, value, ttl)
 }
 
 // Get fails on a done context, as a network backend does.
 func (b *failingBackend) Get(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
+	}
+	if b.fails(key) {
+		return nil, false, errBackendDown
 	}
 	return b.Backend.Get(ctx, sessionID, key)
 }
