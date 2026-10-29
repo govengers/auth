@@ -221,6 +221,9 @@ type Error struct {
 	Reason string
 	Err    error
 }
+// ReasonInactive is the Reason of the ErrForbidden refusal of an inactive identity, shared by every
+// authorization check and jwt.Signer.Sign.
+const ReasonInactive = "inactive"
 // Error returns "<kind>[: <code>][: <reason>][: <cause>]".
 func (e *Error) Error() string
 // Unwrap returns the non-nil of Kind and Err, so errors.Is(err, ErrForbidden) matches.

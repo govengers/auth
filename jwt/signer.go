@@ -166,14 +166,14 @@ func jwkWithKeyID(rawKey any, keyID string) (jwk.Key, error) {
 // Sign mints an RS512 token for identity: header kid and typ JWT; claims iss, aud, iat, nbf (now - 30 s),
 // exp (now + Lifetime), a random jti, the identity's fields and every other key of its Claims (see the
 // package claim table). An invalid permission is an error; an inactive identity is refused with
-// auth.ErrForbidden (Reason "inactive"), since Verify returns every identity as active. It does not
+// auth.ErrForbidden (Reason auth.ReasonInactive), since Verify returns every identity as active. It does not
 // modify identity.
 func (s *Signer) Sign(identity *auth.Identity) (string, error) {
 	if identity == nil {
 		return "", errors.New("sign JWT: identity is nil")
 	}
 	if !identity.Active {
-		return "", &auth.Error{Kind: auth.ErrForbidden, Reason: "inactive"}
+		return "", &auth.Error{Kind: auth.ErrForbidden, Reason: auth.ReasonInactive}
 	}
 	tokenID, err := uuid.NewRandom()
 	if err != nil {

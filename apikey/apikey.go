@@ -33,7 +33,7 @@ type Key struct {
 // auth.ErrUnauthenticated. A returned identity with empty Provider gets "apikey"; it carries its own
 // Permissions (e.g. a stored read_only level becomes "*:read"). Set Active: the Authenticator does not,
 // and every authorization check but IsAuthenticated refuses an inactive identity (403, Reason
-// "inactive"). Any other error is answered as a 500, whatever its kind; only context.Canceled and
+// auth.ReasonInactive). Any other error is answered as a 500, whatever its kind; only context.Canceled and
 // context.DeadlineExceeded stay detectable in it. Every error's text is reported in Outcome.Err and
 // recorded on the wide event, so it must not repeat the key. It must be safe for concurrent use.
 type Resolver func(ctx context.Context, key string) (*auth.Identity, error)

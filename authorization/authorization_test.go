@@ -325,7 +325,7 @@ func TestHasPermission(t *testing.T) {
 		{name: "requiring every resource needs the wildcard", resource: "*", access: auth.AccessRead, identity: withPermissions("builds:write"), want: auth.ErrForbidden, wantReason: "missing permission *:read"},
 		{name: "the wildcard grants every resource", resource: "*", access: auth.AccessRead, identity: withPermissions("*:read")},
 		{name: "no permissions refuse", resource: "builds", access: auth.AccessRead, identity: withPermissions(), want: auth.ErrForbidden, wantReason: "missing permission builds:read"},
-		{name: "inactive identity refuses", resource: "builds", access: auth.AccessRead, identity: inactiveWriter, want: auth.ErrForbidden, wantReason: "inactive"},
+		{name: "inactive identity refuses", resource: "builds", access: auth.AccessRead, identity: inactiveWriter, want: auth.ErrForbidden, wantReason: auth.ReasonInactive},
 		{name: "no identity is unauthenticated", resource: "builds", access: auth.AccessRead, want: auth.ErrUnauthenticated, wantReason: "no identity"},
 	}
 	for _, testCase := range testCases {

@@ -243,7 +243,7 @@ func inactiveRefusal(identity *auth.Identity) error {
 		return unauthenticated()
 	}
 	if !identity.Active {
-		return forbidden("inactive")
+		return forbidden(auth.ReasonInactive)
 	}
 	return nil
 }
