@@ -107,12 +107,9 @@ func (p *Provider) Routes() []auth.Route {
 // Refresh implements session.Refresher: it re-reads the user and updates Username and Email, keeping every
 // other field. A deleted user is ErrUnauthenticated, which ends the session.
 func (p *Provider) Refresh(ctx context.Context, _ session.Session, identity *auth.Identity) (*auth.Identity, error) {
-	user, err := p.options.Storage.GetUserByID(ctx, identity.UserID)
-	if errors.Is(err, ErrUserNotFound) {
-		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "user deleted", Err: err}
-	}
+	user, err := p.knownUser(ctx, identity.UserID, "user deleted")
 	if err != nil {
-		return nil, fmt.Errorf("refresh password user %s: %w", identity.UserID, err)
+		return nil, err
 	}
 	refreshed := identity.Clone()
 	refreshed.Username = textOf(user.Username)
