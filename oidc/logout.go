@@ -7,6 +7,7 @@ import (
 	"net/url"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/failure"
 	"github.com/govengers/auth/internal/fetchmetadata"
 	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/session"
@@ -124,10 +125,10 @@ func (p *Provider) refuseFrontChannel(writer http.ResponseWriter, request *http.
 func (p *Provider) sessionIdentity(ctx context.Context, request *http.Request) (session.Session, *auth.Identity, error) {
 	current, err := p.options.Sessions.Open(request)
 	if err != nil {
-		return session.Session{}, nil, unlessAbsent(err)
+		return session.Session{}, nil, failure.UnlessAbsent(err)
 	}
 	identity, err := current.Identity(ctx)
-	return current, identity, unlessAbsent(err)
+	return current, identity, failure.UnlessAbsent(err)
 }
 
 // ownIdentityToken returns the raw ID token stored at login when identity logged in through this
@@ -139,14 +140,6 @@ func (p *Provider) ownIdentityToken(ctx context.Context, current session.Session
 	}
 	rawIdentityToken, _, err := current.Get(ctx, p.identityTokenKey)
 	return string(rawIdentityToken), err
-}
-
-// unlessAbsent returns err unless it only says that there is nothing (ErrUnauthenticated).
-func unlessAbsent(err error) error {
-	if errors.Is(err, auth.ErrUnauthenticated) {
-		return nil
-	}
-	return err
 }
 
 // owns reports whether the real identity (the impersonator while impersonating) logged in here.

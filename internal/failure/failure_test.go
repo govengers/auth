@@ -13,6 +13,13 @@ import (
 	"github.com/govengers/auth"
 )
 
+func TestUnlessAbsent(t *testing.T) {
+	require.NoError(t, UnlessAbsent(fmt.Errorf("read identity: %w", auth.ErrUnauthenticated)))
+	failed := errors.New("redis down")
+	require.Equal(t, failed, UnlessAbsent(failed))
+	require.NoError(t, UnlessAbsent(nil))
+}
+
 func TestResult(t *testing.T) {
 	testCases := []struct {
 		name string
