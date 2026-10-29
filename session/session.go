@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -86,6 +87,27 @@ func (s Session) SaveIdentity(ctx context.Context, identity *auth.Identity) erro
 		return err
 	}
 	return s.saveEnvelope(ctx, identityEnvelope{Identity: identity, AuthenticatedAt: authenticatedAt, RefreshedAt: s.store.now()})
+}
+
+// SwapIdentity saves identity in place of previous, an identity Identity returned, only while the session
+// still holds an identity equal to previous: authenticatedAt and the expiry stay, refreshedAt=now. false
+// when another request saved a different identity or revoked the session meanwhile; no live identity:
+// ErrUnauthenticated, like Identity.
+func (s Session) SwapIdentity(ctx context.Context, previous, identity *auth.Identity) (bool, error) {
+	if previous == nil || identity == nil {
+		return false, errors.New("swap session identity: previous and identity are required")
+	}
+	stored, err := s.envelope(ctx)
+	if err != nil {
+		return false, err
+	}
+	same, err := sameIdentity(stored.Identity, previous)
+	if err != nil || !same {
+		return false, err
+	}
+	stored.Identity, stored.RefreshedAt = identity, s.store.now()
+	_, swapped, err := s.swapEnvelope(ctx, stored)
+	return swapped, err
 }
 
 // Identity returns the stored identity; none, expired (now > authenticatedAt + MaximumAge) or revoked: *auth.Error ErrUnauthenticated.
@@ -179,4 +201,17 @@ func (s Session) encodeEnvelope(envelope identityEnvelope) ([]byte, time.Duratio
 
 func (s Session) expiresAt(envelope identityEnvelope) time.Time {
 	return envelope.AuthenticatedAt.Add(s.store.options.MaximumAge)
+}
+
+// sameIdentity compares two identities in their stored form (JSON), so a decoded copy equals its original.
+func sameIdentity(stored, other *auth.Identity) (bool, error) {
+	storedJSON, err := json.Marshal(stored)
+	if err != nil {
+		return false, fmt.Errorf("encode session identity: %w", err)
+	}
+	otherJSON, err := json.Marshal(other)
+	if err != nil {
+		return false, fmt.Errorf("encode session identity: %w", err)
+	}
+	return bytes.Equal(storedJSON, otherJSON), nil
 }

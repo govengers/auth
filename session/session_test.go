@@ -197,6 +197,71 @@ func TestIdentityExpiresAbsolutely(t *testing.T) {
 	require.ErrorIs(t, current.SaveIdentity(ctx, updated), auth.ErrUnauthenticated, "an expired session gets no fresh lifetime")
 }
 
+func TestSwapIdentity(t *testing.T) {
+	clock := newTestClock()
+	store := newTestStore(t, clock)
+	ctx := t.Context()
+	request := login(t, store, testIdentity())
+	authenticatedAt := clock.now()
+	current, err := store.Open(request)
+	require.NoError(t, err)
+	previous, err := current.Identity(ctx)
+	require.NoError(t, err)
+	updated := testIdentity()
+	updated.Roles = []string{"writer"}
+	other := testIdentity()
+	other.Active = false
+
+	t.Run("refused arguments", func(t *testing.T) {
+		_, err := current.SwapIdentity(ctx, nil, updated)
+		require.ErrorContains(t, err, "previous and identity are required")
+		_, err = current.SwapIdentity(ctx, previous, nil)
+		require.ErrorContains(t, err, "previous and identity are required")
+	})
+	t.Run("another identity saved meanwhile", func(t *testing.T) {
+		require.NoError(t, current.SaveIdentity(ctx, other))
+		swapped, err := current.SwapIdentity(ctx, previous, updated)
+		require.NoError(t, err)
+		require.False(t, swapped)
+		stored, err := current.Identity(ctx)
+		require.NoError(t, err)
+		require.Equal(t, other, stored, "the other save stays")
+		require.NoError(t, current.SaveIdentity(ctx, previous))
+	})
+	t.Run("another identity saved between the read and the swap", func(t *testing.T) {
+		backend := store.options.Backend
+		t.Cleanup(func() { store.options.Backend = backend })
+		store.options.Backend = &beforeSwapBackend{Backend: backend, beforeSwap: func() {
+			require.NoError(t, current.SaveIdentity(ctx, other))
+		}}
+		swapped, err := current.SwapIdentity(ctx, previous, updated)
+		require.NoError(t, err)
+		require.False(t, swapped)
+		stored, err := current.Identity(ctx)
+		require.NoError(t, err)
+		require.Equal(t, other, stored, "the other save stays")
+		require.NoError(t, current.SaveIdentity(ctx, previous))
+	})
+	t.Run("unchanged identity, also after a save of the same identity", func(t *testing.T) {
+		clock.advance(time.Hour)
+		require.NoError(t, current.SaveIdentity(ctx, previous), "moves refreshedAt only")
+		clock.advance(time.Hour)
+		swapped, err := current.SwapIdentity(ctx, previous, updated)
+		require.NoError(t, err)
+		require.True(t, swapped)
+		envelope, err := current.envelope(ctx)
+		require.NoError(t, err)
+		require.Equal(t, updated, envelope.Identity)
+		require.Equal(t, authenticatedAt, envelope.AuthenticatedAt, "the lifetime stays")
+		require.Equal(t, clock.now(), envelope.RefreshedAt)
+	})
+	t.Run("revoked session", func(t *testing.T) {
+		require.NoError(t, store.End(ctx, httptest.NewRecorder(), request))
+		_, err := current.SwapIdentity(ctx, updated, previous)
+		require.ErrorIs(t, err, auth.ErrUnauthenticated)
+	})
+}
+
 // A handle returned by Start, retained or copied past the absolute expiry, must not begin a second lifetime.
 func TestStartedHandleCannotRestartAnExpiredLifetime(t *testing.T) {
 	clock := newTestClock()

@@ -25,14 +25,16 @@ const (
 
 var errBackendDown = errors.New("backend down")
 
-// switchableBackend is a memory backend whose Get, Put and Revoke can be made to fail. Get honours the
-// context like the Redis backend does.
+// switchableBackend is a memory backend whose Get, writes (Put, CompareAndSwap) and Revoke can be made to
+// fail, and whose CompareAndSwap can be preceded by another request's write. Get honours the context like
+// the Redis backend does.
 type switchableBackend struct {
 	*session.MemoryBackend
 	failGet    atomic.Bool
-	failPut    atomic.Bool
-	failPutKey string // Put of this key fails; set before the request, read by the handler's goroutine
+	failPut    atomic.Bool // fails Put and CompareAndSwap
+	failPutKey string      // Put of this key fails; set before the request, read by the handler's goroutine
 	failRevoke atomic.Bool
+	beforeSwap func() // runs before every CompareAndSwap; set before the request, read by the handler's goroutine
 }
 
 func (b *switchableBackend) Get(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
@@ -50,6 +52,16 @@ func (b *switchableBackend) Put(ctx context.Context, sessionID, key string, valu
 		return errBackendDown
 	}
 	return b.MemoryBackend.Put(ctx, sessionID, key, value, ttl)
+}
+
+func (b *switchableBackend) CompareAndSwap(ctx context.Context, sessionID, key string, previous, value []byte) (bool, error) {
+	if b.failPut.Load() {
+		return false, errBackendDown
+	}
+	if b.beforeSwap != nil {
+		b.beforeSwap()
+	}
+	return b.MemoryBackend.CompareAndSwap(ctx, sessionID, key, previous, value)
 }
 
 func (b *switchableBackend) Revoke(ctx context.Context, sessionID string, ttl time.Duration) error {
