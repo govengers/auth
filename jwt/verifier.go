@@ -258,7 +258,7 @@ func fetchKeySet(ctx context.Context, httpClient *http.Client, jwksURL string) (
 	if err != nil {
 		return nil, dependency.Error("fetch JWKS", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch JWKS %s: status %d", location, response.StatusCode)
 	}
