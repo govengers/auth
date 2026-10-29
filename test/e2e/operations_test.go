@@ -80,9 +80,11 @@ func TestTheWideEventsAreJSONLinesWithoutSecrets(t *testing.T) {
 
 	person.signIn(running, "/")
 
+	require.Eventually(t, func() bool { // the callback's event is written after its answer
+		return strings.Contains(running.output.String(), `"query":"code=redacted&state=redacted"`)
+	}, 5*time.Second, 20*time.Millisecond)
 	output := running.output.String()
 	require.Contains(t, output, `"auth":{`)
-	require.Contains(t, output, `"query":"code=redacted&state=redacted"`)
 	require.NotContains(t, output, fake.ClientSecret())
 	require.NotContains(t, output, "octocat@example.com", "no emails in the events")
 	require.Contains(t, output, `"http":{"github":{"calls":`, "the callback's event sums its GitHub calls")
