@@ -21,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/jwt"
@@ -490,7 +491,8 @@ func TestMethodLabelBoundsTheMethods(t *testing.T) {
 	require.Equal(t, "other", methodLabel("PROPFIND"))
 }
 
+// TestMain fails the package when a test leaves a goroutine behind, such as a listener of Run [TST-009].
 func TestMain(m *testing.M) {
 	gin.SetMode(gin.TestMode)
-	m.Run()
+	goleak.VerifyTestMain(m)
 }
