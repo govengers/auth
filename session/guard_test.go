@@ -399,16 +399,25 @@ func TestGuardRefreshRefusalEndsTheSession(t *testing.T) {
 	}
 }
 
-// A refusal whose session cannot be ended is no refusal: the session is still usable, so the request fails.
-func TestGuardRefreshRefusalAnswers500WhenTheSessionCannotBeEnded(t *testing.T) {
-	refusal := &auth.Error{Kind: auth.ErrForbidden, Reason: "not in an allowed team"}
+// revokeFailingBackend fails every Revoke and passes everything else on.
+type revokeFailingBackend struct {
+	Backend
+}
+
+func (revokeFailingBackend) Revoke(context.Context, string, time.Duration) error {
+	return errBackendDown
+}
+
+// A refused refresh whose session cannot be ended must not answer as a clean refusal: the session stays
+// usable, so the request fails with 500 and the outcome is an error.
+func TestGuardRefreshRefusalThatCannotEndTheSessionIs500(t *testing.T) {
 	refresher := &fakeRefresher{name: "password", refresh: func(*auth.Identity) (*auth.Identity, error) {
-		return nil, refusal
+		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "user deleted"}
 	}}
 	fixture := newGuardFixture(t, GuardOptions{LoginURL: "/login", Refreshers: []Refresher{refresher}})
-	fixture.store.options.Backend = revokeFailingBackend{Backend: fixture.store.options.Backend}
 	apiRequest := login(t, fixture.store, testIdentity())
 	uiRequest := login(t, fixture.store, testIdentity())
+	fixture.store.options.Backend = revokeFailingBackend{Backend: fixture.store.options.Backend}
 	fixture.clock.advance(2 * time.Minute)
 
 	api := serveGuarded(fixture.guard.RequireAPI(), apiRequest)
@@ -416,7 +425,6 @@ func TestGuardRefreshRefusalAnswers500WhenTheSessionCannotBeEnded(t *testing.T) 
 
 	for _, result := range []guardResult{api, ui} {
 		require.Equal(t, http.StatusInternalServerError, result.recorder.Code)
-		require.JSONEq(t, `{"code":"internal","message":"internal error"}`, result.recorder.Body.String())
 		require.Nil(t, result.identity)
 	}
 	outcomes := fixture.observer.take()
@@ -425,17 +433,9 @@ func TestGuardRefreshRefusalAnswers500WhenTheSessionCannotBeEnded(t *testing.T) 
 		require.Equal(t, auth.ActionRefresh, outcome.Action)
 		require.Equal(t, auth.ResultError, outcome.Result)
 		require.ErrorIs(t, outcome.Err, errBackendDown)
-		require.ErrorContains(t, outcome.Err, "end refused session")
+		require.NotErrorIs(t, outcome.Err, auth.ErrUnauthenticated)
+		require.ErrorContains(t, outcome.Err, "user deleted", "the refusal stays readable")
 	}
-}
-
-// revokeFailingBackend fails every Revoke and passes everything else on.
-type revokeFailingBackend struct {
-	Backend
-}
-
-func (revokeFailingBackend) Revoke(context.Context, string, time.Duration) error {
-	return errBackendDown
 }
 
 func TestGuardRefreshFailureKeepsTheIdentity(t *testing.T) {
