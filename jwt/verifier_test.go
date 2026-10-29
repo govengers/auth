@@ -224,6 +224,8 @@ func TestNewVerifierFailsWithoutAnRSASigningKey(t *testing.T) {
 	delete(keyWithEncryptionAlgorithm, "use")
 	keyWithECAlgorithm := maps.Clone(signerKey)
 	keyWithECAlgorithm["alg"] = "ES256"
+	keyWithoutKeyID := maps.Clone(signerKey)
+	delete(keyWithoutKeyID, "kid")
 	testCases := []struct {
 		name string
 		key  map[string]any
@@ -233,6 +235,7 @@ func TestNewVerifierFailsWithoutAnRSASigningKey(t *testing.T) {
 		{name: "key without alg", key: keyWithoutAlgorithm},
 		{name: "RSA key with an encryption alg and no use", key: keyWithEncryptionAlgorithm},
 		{name: "RSA key with an EC alg", key: keyWithECAlgorithm},
+		{name: "key without kid", key: keyWithoutKeyID},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -240,7 +243,7 @@ func TestNewVerifierFailsWithoutAnRSASigningKey(t *testing.T) {
 
 			verifier, err := NewVerifier(t.Context(), testVerifierOptions(keySets.server.URL))
 
-			require.ErrorContains(t, err, "JWKS has no RSA signing key with alg")
+			require.ErrorContains(t, err, "JWKS has no RSA signing key with alg and kid")
 			require.Nil(t, verifier)
 		})
 	}

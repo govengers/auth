@@ -36,7 +36,7 @@ const (
 
 // VerifierOptions configure a Verifier.
 type VerifierOptions struct {
-	JWKSURL         string        // required: absolute http(s) URL of the signer's JWKS (at most 1 MiB); only its RSA keys with an RSA signature alg (RS*, PS*) and use "sig" (or none) count
+	JWKSURL         string        // required: absolute http(s) URL of the signer's JWKS (at most 1 MiB); only its RSA keys with an RSA signature alg (RS*, PS*), a kid and use "sig" (or none) count
 	Issuer          string        // required: expected iss
 	Audience        string        // optional: when set, aud must contain it
 	RefreshInterval time.Duration // default 1 h, at least 1 min; an unknown kid triggers a refetch at most once per minute
@@ -279,15 +279,16 @@ func fetchKeySet(ctx context.Context, httpClient *http.Client, jwksURL string) (
 }
 
 // signingKeys returns the keys of keys a token may be verified with: RSA keys for signatures (use "sig"
-// or unset) that name an RSA signature algorithm. A JWKS is public, so a symmetric key in it would let
-// anyone sign tokens; a key without alg cannot bind the token's algorithm, and one with another alg
-// verifies no token.
+// or unset) that name an RSA signature algorithm and have a kid. A JWKS is public, so a symmetric key in
+// it would let anyone sign tokens; a key without alg cannot bind the token's algorithm, one with another
+// alg verifies no token, and one without kid is never selected (Verify looks keys up by the token's kid).
 func signingKeys(keys jwk.Set) (jwk.Set, error) {
 	usable := jwk.NewSet()
 	for index := range keys.Len() {
 		key, _ := keys.Key(index)
 		usage, _ := key.KeyUsage()
-		if key.KeyType() != jwa.RSA() || (usage != "" && usage != string(jwk.ForSignature)) || !hasRSASignatureAlgorithm(key) {
+		keyID, _ := key.KeyID()
+		if key.KeyType() != jwa.RSA() || (usage != "" && usage != string(jwk.ForSignature)) || !hasRSASignatureAlgorithm(key) || keyID == "" {
 			continue
 		}
 		if err := usable.AddKey(key); err != nil {
@@ -295,7 +296,7 @@ func signingKeys(keys jwk.Set) (jwk.Set, error) {
 		}
 	}
 	if usable.Len() == 0 {
-		return nil, errors.New("JWKS has no RSA signing key with alg")
+		return nil, errors.New("JWKS has no RSA signing key with alg and kid")
 	}
 	return usable, nil
 }
