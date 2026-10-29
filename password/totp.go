@@ -73,12 +73,10 @@ func (p *Provider) challengeFor(user *User) (Challenge, bool) {
 	return "", false
 }
 
-// startChallenge starts a fresh session that only holds the pending login and answers 202 with challenge.
+// startChallenge starts a fresh session that only holds the pending login and answers 202 with challenge. It
+// leaves the TOTP attempt counter alone: only a verified second factor resets it, so logging in again does not
+// buy more guesses.
 func (p *Provider) startChallenge(writer http.ResponseWriter, request *http.Request, user *User, challenge Challenge) reply {
-	ctx := request.Context()
-	if err := p.options.Storage.ResetTOTPAttempts(ctx, user.ID); err != nil {
-		return refused(fmt.Errorf("reset TOTP attempts of user %s: %w", user.ID, err))
-	}
 	purpose := purposeVerify
 	if challenge == ChallengeTOTPSetup {
 		purpose = purposeEnrollment

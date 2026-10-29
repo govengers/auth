@@ -40,7 +40,7 @@ type TOTPOptions struct {
 	Period             uint          // default 30 s; at most 3600
 	Digits             uint          // 6 or 8; default 6
 	Skew               uint          // periods accepted before and after the current one; default 1; at most 10
-	MaximumAttempts    int           // default 5 wrong codes per password login; must be > 0
+	MaximumAttempts    int           // default 5 wrong codes in a row, across logins; then the second factor stays locked until Storage.ResetTOTPAttempts
 	PendingTTL         time.Duration // default 5 min (password step to code step)
 	DisableBackupCodes bool
 	BackupCodeCount    int    // default 10; at most 20

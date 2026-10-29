@@ -264,6 +264,27 @@ func TestPendingLoginsShareTheAttemptBudget(t *testing.T) {
 	require.Equal(t, "attempts exhausted", refusal.Reason)
 }
 
+func TestFailedAttemptsOutliveTheLogin(t *testing.T) {
+	options := totpOptions()
+	options.TOTP.MaximumAttempts = 2
+	fixture := newFixture(t, options)
+	user, _ := fixture.createTOTPUser(t, "ada")
+	requireRefusal(t, fixture.pendingClient(t, "ada").post(verifyPath, map[string]any{"code": "000000"}), http.StatusUnauthorized, "invalid_totp_code")
+	requireRefusal(t, fixture.pendingClient(t, "ada").post(verifyPath, map[string]any{"code": "000000"}), http.StatusUnauthorized, "invalid_totp_code")
+	browser := fixture.pendingClient(t, "ada")
+
+	recorder := browser.post(verifyPath, map[string]any{"code": fixture.code(t, testSecret, 0)})
+
+	requireRefusal(t, recorder, http.StatusUnauthorized, "invalid_totp_code")
+	var refusal *auth.Error
+	require.ErrorAs(t, fixture.outcomes.last(t).Err, &refusal)
+	require.Equal(t, "attempts exhausted", refusal.Reason)
+
+	require.NoError(t, fixture.storage.ResetTOTPAttempts(t.Context(), user.ID))
+	recorder = fixture.pendingClient(t, "ada").post(verifyPath, map[string]any{"code": fixture.code(t, testSecret, 0)})
+	require.Equal(t, http.StatusOK, recorder.Code)
+}
+
 func TestVerifyRefusesWithoutAPendingLogin(t *testing.T) {
 	fixture := newFixture(t, totpOptions())
 	user, _ := fixture.createTOTPUser(t, "ada")
@@ -329,16 +350,6 @@ func TestVerifyStorageFailures(t *testing.T) {
 			require.ErrorIs(t, fixture.outcomes.last(t).Err, errStorageDown)
 		})
 	}
-}
-
-func TestLoginChallengeStorageFailure(t *testing.T) {
-	fixture := newFixture(t, totpOptions())
-	fixture.createTOTPUser(t, "ada")
-	fixture.failStorage("ResetTOTPAttempts")
-
-	recorder := fixture.newClient(t).login("ada")
-
-	requireRefusal(t, recorder, http.StatusInternalServerError, "internal")
 }
 
 // enroll runs setup and enable on browser and returns the secret and the backup codes.
