@@ -35,11 +35,14 @@ return 1
 
 	// popScript returns and deletes the value in one step. It keeps the value under a receipt named by the
 	// caller's random token, so a client retrying the script after a lost reply (go-redis does by default)
-	// gets the value again instead of "absent" (RES-004: the token is the idempotency key).
+	// gets the value again instead of "absent" (RES-004: the token is the idempotency key). The receipt is
+	// read first, so a retry never consumes a value written after the lost attempt.
 	// KEYS: value, index, receipt. ARGV: receipt ttl in ms.
 	popScript = redis.NewScript(`
+local popped = redis.call('GET', KEYS[3])
+if popped then return popped end
 local v = redis.call('GET', KEYS[1])
-if not v then return redis.call('GET', KEYS[3]) end
+if not v then return v end
 redis.call('DEL', KEYS[1])
 redis.call('SREM', KEYS[2], KEYS[1])
 redis.call('SET', KEYS[3], v, 'PX', ARGV[1])

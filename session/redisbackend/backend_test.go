@@ -23,7 +23,12 @@ import (
 // newRedis starts a miniredis server and returns a client on it; the client is closed with the test.
 func newRedis(t *testing.T) (*miniredis.Miniredis, *redis.Client) {
 	t.Helper()
-	server := miniredis.RunT(t)
+	return newRedisOn(t, miniredis.RunT(t))
+}
+
+// newRedisOn returns a client on server without retries; the client is closed with the test.
+func newRedisOn(t *testing.T, server *miniredis.Miniredis) (*miniredis.Miniredis, *redis.Client) {
+	t.Helper()
 	client := redis.NewClient(&redis.Options{Addr: server.Addr(), MaxRetries: -1, DialerRetries: 1})
 	t.Cleanup(func() { _ = client.Close() })
 	return server, client
@@ -176,21 +181,28 @@ func TestRevocationMarkerLivesAsLongAsTheRevokedValues(t *testing.T) {
 }
 
 // go-redis retries a command whose reply was lost (MaxRetries defaults to 3). The retried Pop must return
-// the value the lost attempt consumed, not report it absent.
+// the value the lost attempt consumed, not report it absent, and must not consume a value written between
+// the lost attempt and the retry.
 func TestPopSurvivesARetryAfterALostReply(t *testing.T) {
 	server := miniredis.RunT(t)
+	_, otherClient := newRedisOn(t, server)
+	other, err := redisbackend.New(&redisbackend.Options{Client: otherClient})
+	require.NoError(t, err)
+	ctx := t.Context()
 	var dropReply atomic.Bool
+	var replacementError error
 	client := redis.NewClient(&redis.Options{Addr: server.Addr(), Dialer: func(ctx context.Context, network, address string) (net.Conn, error) {
 		connection, err := (&net.Dialer{}).DialContext(ctx, network, address)
 		if err != nil {
 			return nil, err
 		}
-		return &replyDroppingConnection{Conn: connection, dropReply: &dropReply}, nil
+		return &replyDroppingConnection{Conn: connection, dropReply: &dropReply, onDrop: func() {
+			replacementError = other.Put(t.Context(), "s", "state", []byte("replacement"), time.Hour)
+		}}, nil
 	}})
 	t.Cleanup(func() { _ = client.Close() })
 	backend, err := redisbackend.New(&redisbackend.Options{Client: client})
 	require.NoError(t, err)
-	ctx := t.Context()
 	require.NoError(t, backend.Put(ctx, "s", "state", []byte("value"), time.Hour))
 	_, _, err = backend.Pop(ctx, "s", "warm-up") // loads the script, so the next Pop runs on its first EVALSHA
 	require.NoError(t, err)
@@ -199,19 +211,23 @@ func TestPopSurvivesARetryAfterALostReply(t *testing.T) {
 	value, found, err := backend.Pop(ctx, "s", "state")
 
 	require.False(t, dropReply.Load(), "a reply was dropped")
+	require.NoError(t, replacementError)
 	require.NoError(t, err)
 	require.True(t, found, "the retry returns what the lost attempt consumed")
 	require.Equal(t, "value", string(value))
-	_, found, err = backend.Pop(ctx, "s", "state")
+	value, found, err = backend.Get(ctx, "s", "state")
 	require.NoError(t, err)
-	require.False(t, found, "another Pop finds nothing")
+	require.True(t, found, "the retry left the value written after the lost attempt")
+	require.Equal(t, "replacement", string(value))
 }
 
 // replyDroppingConnection loses the reply to the next script call once dropReply is set: the server ran the
-// script, the client sees the connection end, as when the network drops a response.
+// script, the client sees the connection end, as when the network drops a response. onDrop runs between the
+// lost reply and the client's retry.
 type replyDroppingConnection struct {
 	net.Conn
 	dropReply *atomic.Bool
+	onDrop    func()
 	dropping  bool
 }
 
@@ -227,6 +243,7 @@ func (c *replyDroppingConnection) Read(buffer []byte) (int, error) {
 		c.dropping = false
 		_, _ = c.Conn.Read(buffer) // the reply arrived: the script ran
 		_ = c.Close()
+		c.onDrop()
 		return 0, io.EOF
 	}
 	return c.Conn.Read(buffer)
