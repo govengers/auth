@@ -62,7 +62,7 @@ type Provider struct {
 	endSessionEndpoint    string // "" when discovery has none
 	loginKey              string // session key of the login state
 	identityTokenKey      string // session key of the raw ID token (id_token_hint at logout)
-	reporter              failure.Reporter
+	reporter              *failure.Reporter
 }
 
 // providerMetadata are the discovery fields go-oidc does not expose.
@@ -82,6 +82,10 @@ func New(ctx context.Context, options *Options) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
+	reporter, err := failure.NewReporter(&failure.ReporterOptions{Provider: resolved.Name, Observer: resolved.Observer, ErrorURL: resolved.ErrorURL})
+	if err != nil {
+		return nil, fmt.Errorf("oidc provider %q: %w", resolved.Name, err)
+	}
 	discovered, metadata, err := discover(ctx, resolved)
 	if err != nil {
 		return nil, fmt.Errorf("oidc provider %q: %w", resolved.Name, err)
@@ -95,7 +99,7 @@ func New(ctx context.Context, options *Options) (*Provider, error) {
 		endSessionEndpoint:  metadata.EndSessionEndpoint,
 		loginKey:            resolved.Name + ".login",
 		identityTokenKey:    resolved.Name + ".id_token",
-		reporter:            failure.Reporter{Provider: resolved.Name, Observer: resolved.Observer, ErrorURL: resolved.ErrorURL},
+		reporter:            reporter,
 	}, nil
 }
 
