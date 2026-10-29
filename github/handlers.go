@@ -85,7 +85,7 @@ func (p *Provider) callback(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if err := p.startSession(ctx, writer, request, completed); err != nil {
-		p.refuse(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err, Identity: completed.identity})
+		p.refuseCallback(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err, Identity: completed.identity})
 		return
 	}
 	redirect.To(writer, p.options.ExternalURL+completed.returnPath)

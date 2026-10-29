@@ -286,22 +286,50 @@ func TestCallbackRefusesAWrongPKCEVerifier(t *testing.T) {
 }
 
 func TestCallbackRedirectsFailuresToTheErrorURL(t *testing.T) {
-	environment := newTestEnvironment(t, nil, func(options *Options) { options.ErrorURL = "/login?source=github" })
-	login := environment.startLogin(t, "")
+	testCases := []struct {
+		name       string
+		teams      []fakeprovider.GitHubTeam
+		prepare    func(environment *testEnvironment)
+		wantCode   string
+		wantResult auth.Result
+	}{
+		{name: "refusal", wantCode: "forbidden", wantResult: auth.ResultDenied},
+		{
+			name: "GitHub failure", teams: defaultTestTeams(),
+			prepare:  failing(fakeprovider.GitHubEndpointUser, http.StatusInternalServerError),
+			wantCode: "internal", wantResult: auth.ResultError,
+		},
+		{
+			name: "session rotation fails", teams: defaultTestTeams(),
+			prepare:  func(environment *testEnvironment) { environment.backend.failRevoke.Store(true) },
+			wantCode: "internal", wantResult: auth.ResultError,
+		},
+		{
+			name: "session store fails", teams: defaultTestTeams(),
+			prepare:  func(environment *testEnvironment) { environment.backend.failPut.Store(true) },
+			wantCode: "internal", wantResult: auth.ResultError,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			environment := newTestEnvironment(t, testCase.teams, func(options *Options) { options.ErrorURL = "/login?source=github" })
+			login := environment.startLogin(t, "")
+			if testCase.prepare != nil {
+				testCase.prepare(environment)
+			}
 
-	response := environment.callback(t, login, approve(t, login.Header().Get("Location")))
+			response := environment.callback(t, login, approve(t, login.Header().Get("Location")))
 
-	require.Equal(t, http.StatusFound, response.Code)
-	require.Equal(t, testExternalURL+"/login?source=github&code=forbidden", response.Header().Get("Location"))
-	require.Equal(t, "no-store", response.Header().Get("Cache-Control"))
-	require.Equal(t, auth.ResultDenied, environment.outcomes.last(t).Result)
-
-	environment.fake.FailWith(fakeprovider.GitHubEndpointUser, http.StatusInternalServerError)
-	login = environment.startLogin(t, "")
-	response = environment.callback(t, login, approve(t, login.Header().Get("Location")))
-	require.Equal(t, http.StatusFound, response.Code, "an internal failure goes to the ErrorURL too")
-	require.Equal(t, testExternalURL+"/login?source=github&code=internal", response.Header().Get("Location"))
-	require.Equal(t, auth.ResultError, environment.outcomes.last(t).Result)
+			require.Equal(t, http.StatusFound, response.Code, response.Body.String())
+			require.Equal(t, testExternalURL+"/login?source=github&code="+testCase.wantCode, response.Header().Get("Location"))
+			require.Equal(t, "no-store", response.Header().Get("Cache-Control"))
+			require.Len(t, environment.outcomes.outcomes, 2, "one login and one callback outcome")
+			outcome := environment.outcomes.last(t)
+			require.Equal(t, auth.ActionCallback, outcome.Action)
+			require.Equal(t, testCase.wantResult, outcome.Result)
+			require.Error(t, outcome.Err)
+		})
+	}
 }
 
 func TestCallbackRunsOnLogin(t *testing.T) {
