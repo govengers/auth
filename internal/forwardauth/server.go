@@ -163,9 +163,12 @@ func validPort(port int) bool {
 }
 
 // newEngine builds the gin engine: wide event outermost so it records the final status, then the HTTP
-// metrics, then the sums of the outbound calls, then the panic recovery, then the routes.
+// metrics, then the sums of the outbound calls, then the panic recovery, then the routes. A trailing
+// "/" is an unmatched route: gin's redirect would answer before the middleware, without event or
+// metric, and print the raw query in debug mode [LOG-009].
 func (s *Server) newEngine(metrics *httpMetrics) *gin.Engine {
 	engine := gin.New()
+	engine.RedirectTrailingSlash = false
 	engine.Use(
 		wideevent.Middleware(
 			wideevent.WithEmitter(latestValues(s.options.Emitter)),

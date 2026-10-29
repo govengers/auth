@@ -94,8 +94,12 @@ func TestTheDevEmitterPrintsNoQueryValues(t *testing.T) {
 	running := start(t, merged(gitHubEnvironment(t, fake), map[string]string{"DEV_MODE": "true", "WIDE_EVENT_SAMPLE_RATE": "1"}))
 
 	refused := newBrowser(t).get(running.baseURL+"/auth/github/callback?code=dev-mode-code&state=dev-mode-state", nil)
+	trailingSlash := newBrowser(t).get(running.baseURL+"/auth/github/callback/?code=dev-mode-slash-code&state=dev-mode-slash-state", nil)
 
 	require.GreaterOrEqual(t, refused.status, http.StatusBadRequest)
-	require.Eventually(t, func() bool { return strings.Contains(running.output.String(), "code=redacted&state=redacted") }, 5*time.Second, 20*time.Millisecond)
+	require.Equal(t, http.StatusNotFound, trailingSlash.status, "no redirect that prints the request in gin's debug mode")
+	require.Eventually(t, func() bool {
+		return strings.Count(running.output.String(), "code=redacted&state=redacted") == 2
+	}, 5*time.Second, 20*time.Millisecond)
 	require.NotContains(t, running.output.String(), "dev-mode-")
 }
