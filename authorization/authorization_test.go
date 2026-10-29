@@ -3,6 +3,7 @@ package authorization_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -164,6 +165,11 @@ func TestCombinators(t *testing.T) {
 func TestNot(t *testing.T) {
 	unauthenticated := &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "inner"}
 	internal := errors.New("membership lookup failed")
+	// Refusals of another kind whose cause is forbidden: the outermost Kind decides, as in auth.ResponseFor.
+	unauthenticatedForbidden := &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "session gone", Err: auth.ErrForbidden}
+	invalidForbidden := &auth.Error{Kind: auth.ErrInvalidRequest, Reason: "bad input", Err: &auth.Error{Kind: auth.ErrForbidden}}
+	conflictForbidden := &auth.Error{Kind: auth.ErrConflict, Reason: "taken", Err: auth.ErrForbidden}
+	wrappedUnauthenticatedForbidden := fmt.Errorf("lookup: %w", unauthenticatedForbidden)
 
 	testCases := []struct {
 		name     string
@@ -181,6 +187,13 @@ func TestNot(t *testing.T) {
 		{name: "Not of Not allows", check: authorization.Not(authorization.Not(allow())), identity: activeIdentity()},
 		{name: "does not invert Any with a failed check after a refusal", check: authorization.Not(authorization.Any(authorization.HasRole("blocked"), refuse(internal))), identity: activeIdentity(), want: internal},
 		{name: "does not invert Any with a failed check before a refusal", check: authorization.Not(authorization.Any(refuse(internal), authorization.HasRole("blocked"))), identity: activeIdentity(), want: internal},
+		{name: "allows when a wrapped sentinel forbids", check: authorization.Not(refuse(fmt.Errorf("lookup: %w", auth.ErrForbidden))), identity: activeIdentity()},
+		{name: "passes unauthenticated with a forbidden cause through", check: authorization.Not(refuse(unauthenticatedForbidden)), identity: activeIdentity(), want: unauthenticatedForbidden},
+		{name: "passes a wrapped unauthenticated with a forbidden cause through", check: authorization.Not(refuse(wrappedUnauthenticatedForbidden)), identity: activeIdentity(), want: unauthenticatedForbidden},
+		{name: "passes invalid request with a forbidden cause through", check: authorization.Not(refuse(invalidForbidden)), identity: activeIdentity(), want: invalidForbidden},
+		{name: "passes conflict with a forbidden cause through", check: authorization.Not(refuse(conflictForbidden)), identity: activeIdentity(), want: conflictForbidden},
+		{name: "does not invert Any refusing unauthenticated with a forbidden cause", check: authorization.Not(authorization.Any(refuse(unauthenticatedForbidden), authorization.HasRole("blocked"))), identity: activeIdentity(), want: unauthenticatedForbidden},
+		{name: "does not invert All refusing unauthenticated with a forbidden cause", check: authorization.Not(authorization.All(allow(), refuse(unauthenticatedForbidden))), identity: activeIdentity(), want: unauthenticatedForbidden},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

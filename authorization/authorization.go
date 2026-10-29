@@ -69,7 +69,7 @@ func Any(checks ...Check) Check {
 			switch {
 			case err == nil:
 				return nil
-			case failed(err):
+			case statusOf(err) == http.StatusInternalServerError:
 				firstFailure = cmp.Or(firstFailure, err)
 			default:
 				firstRefusal = cmp.Or(firstRefusal, err)
@@ -80,7 +80,9 @@ func Any(checks ...Check) Check {
 }
 
 // Not inverts check for an active identity: it passes when check refuses with ErrForbidden and refuses
-// with ErrForbidden when check passes; other errors pass through. Like the primitives it refuses a
+// with ErrForbidden when check passes; other errors pass through. The refusal is classified like
+// auth.ResponseFor does, by the Kind of the outermost *auth.Error, so an unauthenticated refusal with a
+// forbidden cause is no forbidden refusal. Like the primitives it refuses a
 // missing identity with ErrUnauthenticated and an inactive one with ErrForbidden before it evaluates
 // check, so Not(HasRole(role)) never admits an anonymous or deactivated identity.
 func Not(check Check) Check {
@@ -95,7 +97,7 @@ func Not(check Check) Check {
 		switch {
 		case err == nil:
 			return forbidden("negated check passed")
-		case errors.Is(err, auth.ErrForbidden):
+		case statusOf(err) == http.StatusForbidden:
 			return nil
 		default:
 			return err
@@ -215,10 +217,10 @@ func nilCheck(context.Context) error {
 	return errNilCheck
 }
 
-// failed reports whether err is a failure (answered 500) rather than a refusal.
-func failed(err error) bool {
+// statusOf is the status auth.ResponseFor answers err with: 500 for a failure, the refusal's status otherwise.
+func statusOf(err error) int {
 	status, _ := auth.ResponseFor(err)
-	return status == http.StatusInternalServerError
+	return status
 }
 
 // activeIdentityWith passes an active identity for which allowed holds and refuses others with reason.
