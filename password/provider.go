@@ -42,6 +42,7 @@ type Provider struct {
 	dummyHash          string // verified for unknown users, so a lookup costs the same either way
 	now                func() time.Time
 	verifyHash         func(password, encodedHash string) (bool, Parameters, error) // verifyHash; tests observe the calls
+	reporter           failure.Reporter
 }
 
 // New validates options, applies the defaults to a copy and precomputes the dummy hash used for unknown users
@@ -73,6 +74,7 @@ func newProvider(options Options) (*Provider, error) {
 		dummyHash:          dummyHash,
 		now:                time.Now,
 		verifyHash:         verifyHash,
+		reporter:           failure.Reporter{Provider: providerName, Observer: options.Observer},
 	}, nil
 }
 
@@ -139,9 +141,7 @@ func (p *Provider) route(method, path string, action auth.Action, handle func(wr
 	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		answer := handle(writer, request)
 		answer.write(writer)
-		p.report(request.Context(), auth.Outcome{
-			Provider: providerName, Action: action, Result: answer.result, Err: answer.err, Identity: answer.identity,
-		})
+		p.reporter.Report(request.Context(), auth.Outcome{Action: action, Result: answer.result, Err: answer.err, Identity: answer.identity})
 	})
 	return auth.Route{Method: method, Path: p.options.PathPrefix + path, Handler: handler}
 }
@@ -163,12 +163,6 @@ func (r reply) write(writer http.ResponseWriter) {
 		writer.WriteHeader(r.status)
 	default:
 		httpjson.Write(writer, r.status, r.body)
-	}
-}
-
-func (p *Provider) report(ctx context.Context, outcome auth.Outcome) {
-	if p.options.Observer != nil {
-		p.options.Observer(ctx, outcome)
 	}
 }
 

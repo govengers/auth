@@ -15,6 +15,7 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/dependency"
+	"github.com/govengers/auth/internal/failure"
 	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/session"
 )
@@ -57,6 +58,7 @@ type Provider struct {
 	endSessionEndpoint    string // "" when discovery has none
 	loginKey              string // session key of the login state
 	identityTokenKey      string // session key of the raw ID token (id_token_hint at logout)
+	reporter              failure.Reporter
 }
 
 // providerMetadata are the discovery fields go-oidc does not expose.
@@ -89,6 +91,7 @@ func New(ctx context.Context, options *Options) (*Provider, error) {
 		endSessionEndpoint:  metadata.EndSessionEndpoint,
 		loginKey:            resolved.Name + ".login",
 		identityTokenKey:    resolved.Name + ".id_token",
+		reporter:            failure.Reporter{Provider: resolved.Name, Observer: resolved.Observer, ErrorURL: resolved.ErrorURL},
 	}, nil
 }
 

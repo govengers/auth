@@ -6,14 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/dependency"
-	"github.com/govengers/auth/internal/failure"
 	"github.com/govengers/auth/internal/hook"
 	"github.com/govengers/auth/internal/oauthlogin"
 	"github.com/govengers/auth/internal/redirect"
@@ -33,11 +31,11 @@ func (p *Provider) handleLogin(writer http.ResponseWriter, request *http.Request
 	ctx := request.Context()
 	state, err := oauthlogin.Begin(ctx, p.options.Sessions, writer, request, p.loginKey)
 	if err != nil {
-		p.refuse(writer, request, auth.Outcome{Action: auth.ActionLogin, Err: fmt.Errorf("oidc: begin login: %w", err)})
+		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogin, Err: fmt.Errorf("oidc: begin login: %w", err)})
 		return
 	}
 	redirect.To(writer, p.oauth2Configuration.AuthCodeURL(state.State, gooidc.Nonce(state.Nonce), oauth2.S256ChallengeOption(state.Verifier)))
-	p.report(ctx, auth.Outcome{Action: auth.ActionLogin, Result: auth.ResultSuccess})
+	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionLogin, Result: auth.ResultSuccess})
 }
 
 // handleCallback finishes a login: state, code exchange, ID token, OnLogin, then a rotated session
@@ -46,26 +44,26 @@ func (p *Provider) handleCallback(writer http.ResponseWriter, request *http.Requ
 	ctx := request.Context()
 	state, err := oauthlogin.Complete(ctx, p.options.Sessions, request, p.loginKey)
 	if err != nil {
-		p.refuseCallback(writer, request, err, nil)
+		p.reporter.RefuseCallback(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err})
 		return
 	}
 	login, err := p.verifyLogin(ctx, request.URL.Query().Get("code"), state)
 	if err != nil {
-		p.refuseCallback(writer, request, err, nil)
+		p.reporter.RefuseCallback(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err})
 		return
 	}
 	authenticated := p.newIdentity(login)
 	identity, err := hook.RunOnLogin(ctx, p.options.OnLogin, authenticated)
 	if err != nil {
-		p.refuseCallback(writer, request, err, authenticated)
+		p.reporter.RefuseCallback(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err, Identity: authenticated})
 		return
 	}
 	if err := p.saveSession(ctx, writer, request, identity, login.rawIdentityToken); err != nil {
-		p.refuseCallback(writer, request, err, identity)
+		p.reporter.RefuseCallback(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err, Identity: identity})
 		return
 	}
 	redirect.To(writer, p.options.ExternalURL+state.ReturnPath)
-	p.report(ctx, auth.Outcome{Action: auth.ActionCallback, Result: auth.ResultSuccess, Identity: identity})
+	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionCallback, Result: auth.ResultSuccess, Identity: identity})
 }
 
 // verifyLogin exchanges code with the PKCE verifier, verifies the ID token and its nonce, checks the
@@ -170,39 +168,6 @@ func (p *Provider) saveSession(ctx context.Context, writer http.ResponseWriter, 
 		return fmt.Errorf("oidc: save ID token: %w", err)
 	}
 	return nil
-}
-
-// refuseCallback answers a failed callback: a redirect to ErrorURL?code=<code> when configured, JSON
-// otherwise.
-func (p *Provider) refuseCallback(writer http.ResponseWriter, request *http.Request, err error, identity *auth.Identity) {
-	outcome := auth.Outcome{Action: auth.ActionCallback, Err: err, Identity: identity}
-	if p.options.ErrorURL == "" {
-		p.refuse(writer, request, outcome)
-		return
-	}
-	_, response := auth.ResponseFor(err)
-	redirect.To(writer, redirect.WithQuery(p.options.ErrorURL, url.Values{"code": {response.Code}}))
-	p.reportFailure(request.Context(), outcome)
-}
-
-// refuse answers outcome.Err as JSON and reports the outcome.
-func (p *Provider) refuse(writer http.ResponseWriter, request *http.Request, outcome auth.Outcome) {
-	auth.WriteError(writer, outcome.Err)
-	p.reportFailure(request.Context(), outcome)
-}
-
-// reportFailure reports outcome as denied (a refusal) or error (answered with 500).
-func (p *Provider) reportFailure(ctx context.Context, outcome auth.Outcome) {
-	outcome.Result = failure.Result(outcome.Err)
-	p.report(ctx, outcome)
-}
-
-func (p *Provider) report(ctx context.Context, outcome auth.Outcome) {
-	if p.options.Observer == nil {
-		return
-	}
-	outcome.Provider = p.options.Name
-	p.options.Observer(ctx, outcome)
 }
 
 func loginFailed(reason string, cause error) error {

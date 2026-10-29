@@ -24,12 +24,12 @@ func (p *Provider) handleLogout(writer http.ResponseWriter, request *http.Reques
 	identity := p.sessionIdentity(ctx, request)
 	rawIdentityToken := p.ownIdentityToken(ctx, request, identity)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
-		p.refuse(writer, request, auth.Outcome{Action: auth.ActionLogout, Err: err, Identity: identity})
+		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: err, Identity: identity})
 		return
 	}
 	p.runOnLogout(ctx, identity)
 	redirect.To(writer, p.logoutLocation(rawIdentityToken))
-	p.report(ctx, auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity})
+	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity})
 }
 
 // handleFrontChannelLogout is OpenID Connect Front-Channel Logout 1.0: the IdP loads it in an iframe.
@@ -48,7 +48,7 @@ func (p *Provider) handleFrontChannelLogout(writer http.ResponseWriter, request 
 	}
 	if identity != nil && !p.owns(identity) {
 		writeLoggedOutPage(writer) // another provider's session: not ours to end
-		p.report(ctx, auth.Outcome{Action: auth.ActionFrontChannelLogout, Result: auth.ResultSuccess})
+		p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionFrontChannelLogout, Result: auth.ResultSuccess})
 		return
 	}
 	// without a readable identity this only expires the cookie (and drops what is left server-side)
@@ -58,7 +58,7 @@ func (p *Provider) handleFrontChannelLogout(writer http.ResponseWriter, request 
 	}
 	p.runOnLogout(ctx, identity)
 	writeLoggedOutPage(writer)
-	p.report(ctx, auth.Outcome{Action: auth.ActionFrontChannelLogout, Result: auth.ResultSuccess, Identity: identity})
+	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionFrontChannelLogout, Result: auth.ResultSuccess, Identity: identity})
 }
 
 func (p *Provider) isFrontChannelLogout(request *http.Request) bool {
@@ -106,7 +106,7 @@ func frontChannelInvalid(reason string) error {
 func (p *Provider) refuseFrontChannel(writer http.ResponseWriter, request *http.Request, err error) {
 	status, response := auth.ResponseFor(err)
 	http.Error(writer, response.Message, status)
-	p.reportFailure(request.Context(), auth.Outcome{Action: auth.ActionFrontChannelLogout, Err: err})
+	p.reporter.ReportFailure(request.Context(), auth.Outcome{Action: auth.ActionFrontChannelLogout, Err: err})
 }
 
 // sessionIdentity returns the identity of the request's session, or nil. A session that cannot be read

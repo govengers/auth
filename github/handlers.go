@@ -6,12 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
-	"github.com/govengers/auth/internal/failure"
 	"github.com/govengers/auth/internal/hook"
 	"github.com/govengers/auth/internal/httpjson"
 	"github.com/govengers/auth/internal/impersonation"
@@ -69,11 +67,11 @@ func (p *Provider) login(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
 	state, err := oauthlogin.Begin(ctx, p.options.Sessions, writer, request, loginKey)
 	if err != nil {
-		p.refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogin, Err: fmt.Errorf("github: begin login: %w", err)})
+		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogin, Err: fmt.Errorf("github: begin login: %w", err)})
 		return
 	}
 	redirect.To(writer, p.oauth.AuthCodeURL(state.State, oauth2.S256ChallengeOption(state.Verifier)))
-	p.report(ctx, auth.Outcome{Action: auth.ActionLogin, Result: auth.ResultSuccess})
+	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionLogin, Result: auth.ResultSuccess})
 }
 
 // callback verifies the login, starts the authenticated session and redirects to the return path.
@@ -81,15 +79,15 @@ func (p *Provider) callback(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
 	completed, err := p.completeLogin(ctx, request)
 	if err != nil {
-		p.refuseCallback(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err, Identity: completed.identity})
+		p.reporter.RefuseCallback(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err, Identity: completed.identity})
 		return
 	}
 	if err := p.startSession(ctx, writer, request, completed); err != nil {
-		p.refuseCallback(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err, Identity: completed.identity})
+		p.reporter.RefuseCallback(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err, Identity: completed.identity})
 		return
 	}
 	redirect.To(writer, p.options.ExternalURL+completed.returnPath)
-	p.report(ctx, auth.Outcome{Action: auth.ActionCallback, Result: auth.ResultSuccess, Identity: completed.identity})
+	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionCallback, Result: auth.ResultSuccess, Identity: completed.identity})
 }
 
 // completeLogin checks state and PKCE, reads the user and the teams and runs OnLogin. On a refusal
@@ -155,7 +153,7 @@ func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
 	identity, token, readError := p.sessionState(context.WithoutCancel(ctx), request)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
-		p.refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: fmt.Errorf("github: end session: %w", err), Identity: identity})
+		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: fmt.Errorf("github: end session: %w", err), Identity: identity})
 		return
 	}
 	outcome := auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity, Err: readError}
@@ -166,7 +164,7 @@ func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) {
 		p.options.OnLogout(ctx, identity)
 	}
 	redirect.To(writer, p.options.PostLogoutURL)
-	p.report(ctx, outcome)
+	p.reporter.Report(ctx, outcome)
 }
 
 // sessionState returns the identity and the GitHub token of the request's session, each nil when
@@ -195,11 +193,11 @@ func (p *Provider) refreshTeams(writer http.ResponseWriter, request *http.Reques
 	ctx := request.Context()
 	identity, err := p.refreshSession(ctx, writer, request)
 	if err != nil {
-		p.refuse(ctx, writer, auth.Outcome{Action: auth.ActionRefreshTeams, Err: err, Identity: identity})
+		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionRefreshTeams, Err: err, Identity: identity})
 		return
 	}
 	httpjson.Write(writer, http.StatusOK, auth.NewIdentityResponse(identity))
-	p.report(ctx, auth.Outcome{Action: auth.ActionRefreshTeams, Result: auth.ResultSuccess, Identity: identity})
+	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionRefreshTeams, Result: auth.ResultSuccess, Identity: identity})
 }
 
 // refreshSession refreshes and saves the real identity of the request's GitHub session. A refusal
@@ -242,36 +240,4 @@ func sessionToken(ctx context.Context, current session.Session) (*oauth2.Token, 
 		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "session has no GitHub token"}
 	}
 	return &token, nil
-}
-
-// refuse answers outcome.Err and reports it.
-func (p *Provider) refuse(ctx context.Context, writer http.ResponseWriter, outcome auth.Outcome) {
-	auth.WriteError(writer, outcome.Err)
-	p.reportFailure(ctx, outcome)
-}
-
-// refuseCallback is refuse, except that with ErrorURL set the failure (a refusal or code=internal)
-// redirects to ErrorURL?code=<code>.
-func (p *Provider) refuseCallback(ctx context.Context, writer http.ResponseWriter, outcome auth.Outcome) {
-	if p.options.ErrorURL == "" {
-		p.refuse(ctx, writer, outcome)
-		return
-	}
-	_, response := auth.ResponseFor(outcome.Err)
-	redirect.To(writer, redirect.WithQuery(p.options.ErrorURL, url.Values{"code": {response.Code}}))
-	p.reportFailure(ctx, outcome)
-}
-
-// reportFailure reports outcome as denied (a refusal) or error (answered with 500).
-func (p *Provider) reportFailure(ctx context.Context, outcome auth.Outcome) {
-	outcome.Result = failure.Result(outcome.Err)
-	p.report(ctx, outcome)
-}
-
-func (p *Provider) report(ctx context.Context, outcome auth.Outcome) {
-	if p.options.Observer == nil {
-		return
-	}
-	outcome.Provider = providerName
-	p.options.Observer(ctx, outcome)
 }
