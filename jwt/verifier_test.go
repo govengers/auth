@@ -772,6 +772,49 @@ func TestVerifyDoesNotWaitForARefetchWithAKnownKeyID(t *testing.T) {
 	require.Equal(t, int32(2), keySets.fetches.Load(), "one refetch for all")
 }
 
+func TestVerifyStopsWaitingForARefetchWhenTheRequestEnds(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	signer, rotated := newTestSigner(t, clock.now), newTestSigner(t, clock.now)
+	keySets := newKeySetServer(t, signer.JWKSHandler())
+	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
+	fetchStarted, releaseFetch := make(chan struct{}), make(chan struct{})
+	started, release := sync.OnceFunc(func() { close(fetchStarted) }), sync.OnceFunc(func() { close(releaseFetch) })
+	defer release()
+	rotatedKeys := rotated.JWKSHandler()
+	keySets.serve(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		started()
+		<-releaseFetch
+		rotatedKeys.ServeHTTP(writer, request)
+	}))
+	clock.advance(time.Minute)
+	token, err := rotated.Sign(&auth.Identity{Subject: "42", Active: true})
+	require.NoError(t, err)
+	fetching := make(chan error, 1)
+	go func() {
+		_, err := verifier.Verify(t.Context(), token)
+		fetching <- err
+	}()
+	<-fetchStarted
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	waited := make(chan error, 1)
+	go func() {
+		_, err := verifier.Verify(cancelled, token)
+		waited <- err
+	}()
+
+	select {
+	case err := <-waited:
+		require.ErrorIs(t, err, context.Canceled)
+		require.NotErrorIs(t, err, auth.ErrUnauthenticated)
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "a cancelled request waited for the JWKS fetch")
+	}
+	release()
+	require.NoError(t, <-fetching, "the fetch goes on for its own request")
+}
+
 func TestVerifyIsSafeForConcurrentUse(t *testing.T) {
 	clock := &testClock{instant: signedAt}
 	signer := newTestSigner(t, clock.now)
