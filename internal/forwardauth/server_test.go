@@ -411,6 +411,22 @@ func TestRunReturnsTheErrorOfAListenerThatCannotStart(t *testing.T) {
 	require.ErrorContains(t, err, "serve:")
 }
 
+func TestTheMetricsListenerServesOnlyGETMetrics(t *testing.T) {
+	testHarness := newHarness(t, harnessOptions{})
+	serveMetrics := func(method, target string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		testHarness.server.metricsServer.Handler.ServeHTTP(recorder, httptest.NewRequestWithContext(t.Context(), method, target, nil))
+		return recorder
+	}
+
+	metrics := serveMetrics(http.MethodGet, "/metrics")
+
+	require.Equal(t, http.StatusOK, metrics.Code)
+	require.Contains(t, metrics.Body.String(), "forwardauth_http_requests_in_flight")
+	require.Equal(t, http.StatusNotFound, serveMetrics(http.MethodGet, "/").Code)
+	require.Equal(t, http.StatusMethodNotAllowed, serveMetrics(http.MethodPost, "/metrics").Code)
+}
+
 func TestMethodLabelBoundsTheMethods(t *testing.T) {
 	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace} {
 		require.Equal(t, method, methodLabel(method))

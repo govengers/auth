@@ -98,9 +98,11 @@ func NewServer(options *ServerOptions) (*Server, error) {
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	metricsRoutes := http.NewServeMux()
+	metricsRoutes.Handle("GET /metrics", promhttp.HandlerFor(resolved.MetricsRegistry, promhttp.HandlerOpts{Registry: resolved.MetricsRegistry}))
 	server.metricsServer = &http.Server{
 		Addr:              ":" + strconv.Itoa(resolved.MetricsPort),
-		Handler:           promhttp.HandlerFor(resolved.MetricsRegistry, promhttp.HandlerOpts{Registry: resolved.MetricsRegistry}),
+		Handler:           metricsRoutes,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	return server, nil

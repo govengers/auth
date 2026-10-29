@@ -68,6 +68,7 @@ func TestTheMetricsPortServesRequestAndOutcomeMetrics(t *testing.T) {
 	require.Contains(t, metrics.body, "go_goroutines")
 	require.Contains(t, metrics.body, "go_build_info")
 	require.Equal(t, http.StatusNotFound, client.get(running.baseURL+"/metrics", nil).status, "metrics never on the public port")
+	require.Equal(t, http.StatusNotFound, client.get(running.metricsURL+"/", nil).status, "only /metrics on the metrics port")
 }
 
 func TestTheWideEventsAreJSONLinesWithoutSecrets(t *testing.T) {
