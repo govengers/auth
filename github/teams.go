@@ -70,7 +70,7 @@ func (p *Provider) membershipOf(userTeams []string) membership {
 // newIdentity is the identity of a GitHub user before the team lists are applied.
 func newIdentity(account user) *auth.Identity {
 	return &auth.Identity{
-		Provider: providerName,
+		Provider: auth.ProviderGitHub,
 		Subject:  strconv.FormatInt(account.ID, 10),
 		Username: account.Login,
 		Name:     account.Name,

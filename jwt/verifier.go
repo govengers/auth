@@ -30,7 +30,6 @@ const (
 	defaultHTTPTimeout     = 10 * time.Second
 	defaultHeaderName      = "Authorization"
 	maximumKeySetBytes     = 1 << 20
-	providerName           = "jwt" // Outcome.Provider of the verifier's outcomes
 	codeInvalidToken       = "invalid_token"
 )
 
@@ -432,7 +431,7 @@ func bearerToken(headerValue string) (string, bool) {
 // outcomeOf is the outcome of one authentication. A failed refresh is the Err of a success (degraded) and
 // joins the refusal or failure otherwise, so it is reported either way.
 func outcomeOf(identity *auth.Identity, refreshError, err error) auth.Outcome {
-	outcome := auth.Outcome{Provider: providerName, Action: auth.ActionAuthenticate, Result: auth.ResultSuccess, Err: refreshError, Identity: identity}
+	outcome := auth.Outcome{Provider: auth.ProviderJWT, Action: auth.ActionAuthenticate, Result: auth.ResultSuccess, Err: refreshError, Identity: identity}
 	if err != nil {
 		outcome.Result, outcome.Err = failure.Result(err), err
 		if refreshError != nil {

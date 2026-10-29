@@ -24,9 +24,14 @@ const (
 	randomTokenBytes = 32
 )
 
-// CodeLoginFailed is the refusal code of a callback whose code exchange or verification failed; the providers
-// using this package answer it, so a login page handles one code.
-const CodeLoginFailed = "login_failed"
+// The refusal codes of a redirect login; every provider using this package answers them, so a login page
+// handles one set of codes.
+const (
+	CodeLoginFailed   = "login_failed"   // the code exchange or the verification of its answer failed
+	CodeLoginDenied   = "login_denied"   // the provider sent error=... (the user or the provider refused)
+	CodeLoginExpired  = "login_expired"  // no, an expired or an unreadable login state
+	CodeStateMismatch = "state_mismatch" // the callback state does not match the stored one
+)
 
 // State is what a login start stores and its callback needs back.
 type State struct {
@@ -64,7 +69,7 @@ func Begin(ctx context.Context, store *session.Store, writer http.ResponseWriter
 func Complete(ctx context.Context, store *session.Store, request *http.Request, key string) (State, error) {
 	query := request.URL.Query()
 	if query.Get("error") != "" {
-		return State{}, &auth.Error{Kind: auth.ErrUnauthenticated, Code: "login_denied", Reason: "provider returned an error"}
+		return State{}, &auth.Error{Kind: auth.ErrUnauthenticated, Code: CodeLoginDenied, Reason: "provider returned an error"}
 	}
 	stored, err := popState(ctx, store, request, key)
 	if err != nil {
@@ -129,7 +134,7 @@ func popState(ctx context.Context, store *session.Store, request *http.Request, 
 
 func verifyCallback(query url.Values, stored State) error {
 	if subtle.ConstantTimeCompare([]byte(query.Get("state")), []byte(stored.State)) != 1 {
-		return &auth.Error{Kind: auth.ErrInvalidRequest, Code: "state_mismatch", Reason: "callback state does not match"}
+		return &auth.Error{Kind: auth.ErrInvalidRequest, Code: CodeStateMismatch, Reason: "callback state does not match"}
 	}
 	if query.Get("code") == "" {
 		return &auth.Error{Kind: auth.ErrInvalidRequest, Reason: "callback without code"}
@@ -138,5 +143,5 @@ func verifyCallback(query url.Values, stored State) error {
 }
 
 func loginExpired(reason string) error {
-	return &auth.Error{Kind: auth.ErrInvalidRequest, Code: "login_expired", Reason: reason}
+	return &auth.Error{Kind: auth.ErrInvalidRequest, Code: CodeLoginExpired, Reason: reason}
 }

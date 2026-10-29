@@ -19,9 +19,8 @@ import (
 )
 
 const (
-	providerName        = "github"
-	loginKey            = providerName + ".login"
-	tokenKey            = providerName + ".token"
+	loginKey            = auth.ProviderGitHub + ".login"
+	tokenKey            = auth.ProviderGitHub + ".token"
 	defaultPathPrefix   = "/auth/github"
 	defaultAuthorizeURL = "https://github.com/login/oauth/authorize"
 	defaultTokenURL     = "https://github.com/login/oauth/access_token" //nolint:gosec // G101: an endpoint URL, not a credential
@@ -73,7 +72,7 @@ func New(options *Options) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("github: APIURL: %w", err)
 	}
-	reporter, err := failure.NewReporter(&failure.ReporterOptions{Provider: providerName, Observer: resolved.Observer, ErrorURL: resolved.ErrorURL})
+	reporter, err := failure.NewReporter(&failure.ReporterOptions{Provider: auth.ProviderGitHub, Observer: resolved.Observer, ErrorURL: resolved.ErrorURL})
 	if err != nil {
 		return nil, fmt.Errorf("github: %w", err)
 	}
@@ -82,7 +81,7 @@ func New(options *Options) (*Provider, error) {
 
 // Name returns "github", the Identity.Provider of every identity this provider creates.
 func (p *Provider) Name() string {
-	return providerName
+	return auth.ProviderGitHub
 }
 
 // LoginURL returns ExternalURL + PathPrefix + "/login", the absolute URL that starts a login (use it as

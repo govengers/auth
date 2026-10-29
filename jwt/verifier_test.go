@@ -886,7 +886,7 @@ func TestMiddleware(t *testing.T) {
 				require.Empty(t, recorder.Header().Get("WWW-Authenticate"))
 			}
 			require.Len(t, outcomes, 1)
-			require.Equal(t, providerName, outcomes[0].Provider)
+			require.Equal(t, auth.ProviderJWT, outcomes[0].Provider)
 			require.Equal(t, auth.ActionAuthenticate, outcomes[0].Action)
 			require.Equal(t, testCase.wantResult, outcomes[0].Result)
 			if testCase.wantResult == auth.ResultSuccess {

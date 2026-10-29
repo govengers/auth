@@ -4,8 +4,10 @@
 package tokenendpoint
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -20,12 +22,14 @@ const maximumErrorCodeLength = 64
 
 // Error returns "<operation>: token endpoint answered HTTP <status> [<OAuth error code>]" for an error
 // answer of the endpoint (*oauth2.RetrieveError): its description, URI and body are the endpoint's free
-// text and stay out of errors and outcomes (LOG-009). Any other err goes through dependency.Error, so a
-// cancelled or expired context stays detectable.
+// text and stay out of errors and outcomes (LOG-009). A failed call (*url.Error) or a cancelled or
+// expired context goes through dependency.Error, so the context error stays detectable. Anything else
+// is an answer oauth2 could not read (a malformed token response, whose parse error quotes its values):
+// "<operation>: token endpoint answered an unreadable token response".
 func Error(operation string, err error) error {
 	var answer *oauth2.RetrieveError
 	if !errors.As(err, &answer) {
-		return dependency.Error(operation, err)
+		return nonAnswerError(operation, err)
 	}
 	message := operation + ": token endpoint answered"
 	if answer.Response != nil {
@@ -35,6 +39,15 @@ func Error(operation string, err error) error {
 		message += " " + answer.ErrorCode
 	}
 	return errors.New(message)
+}
+
+// nonAnswerError reduces an err that is no error answer of the endpoint (see Error).
+func nonAnswerError(operation string, err error) error {
+	var callError *url.Error
+	if errors.As(err, &callError) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return dependency.Error(operation, err)
+	}
+	return errors.New(operation + ": token endpoint answered an unreadable token response")
 }
 
 // Refused reports whether err is an error answer of the endpoint below 500: the endpoint refused the

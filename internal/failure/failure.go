@@ -12,6 +12,15 @@ import (
 	"github.com/govengers/auth/internal/redirect"
 )
 
+// UnlessAbsent returns err unless it only says that there is nothing (auth.ErrUnauthenticated), e.g. no
+// session or no identity in it.
+func UnlessAbsent(err error) error {
+	if errors.Is(err, auth.ErrUnauthenticated) {
+		return nil
+	}
+	return err
+}
+
 // Result is the Result of an action that failed with err (not nil): auth.ResultError when
 // auth.ResponseFor answers err with 500, auth.ResultDenied (a refusal) otherwise.
 func Result(err error) auth.Result {

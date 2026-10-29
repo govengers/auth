@@ -11,6 +11,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/failure"
 	"github.com/govengers/auth/internal/fetchmetadata"
 	"github.com/govengers/auth/internal/hook"
 	"github.com/govengers/auth/internal/httpjson"
@@ -194,19 +195,11 @@ func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) {
 func (p *Provider) sessionState(ctx context.Context, request *http.Request) (*auth.Identity, *oauth2.Token, error) {
 	current, err := p.options.Sessions.Open(request)
 	if err != nil {
-		return nil, nil, unlessAbsent(err)
+		return nil, nil, failure.UnlessAbsent(err)
 	}
 	identity, identityError := current.Identity(ctx)
 	token, tokenError := sessionToken(ctx, current)
-	return identity, token, errors.Join(unlessAbsent(identityError), unlessAbsent(tokenError))
-}
-
-// unlessAbsent returns err unless it only says that there is nothing (ErrUnauthenticated).
-func unlessAbsent(err error) error {
-	if errors.Is(err, auth.ErrUnauthenticated) {
-		return nil
-	}
-	return err
+	return identity, token, errors.Join(failure.UnlessAbsent(identityError), failure.UnlessAbsent(tokenError))
 }
 
 // refreshTeams refreshes the teams of the request's GitHub session and answers its IdentityResponse. A
@@ -239,7 +232,7 @@ func (p *Provider) refreshSession(ctx context.Context, writer http.ResponseWrite
 	if err != nil {
 		return nil, fmt.Errorf("github: refresh teams: %w", err)
 	}
-	if stored.Real().Provider != providerName {
+	if stored.Real().Provider != auth.ProviderGitHub {
 		return stored, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "not a GitHub session"}
 	}
 	userMembership, err := p.sessionMembership(ctx, current)

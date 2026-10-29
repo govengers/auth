@@ -16,7 +16,6 @@ import (
 )
 
 const (
-	provider          = "apikey"
 	defaultHeaderName = "X-API-Key"
 	minimumSecretSize = 16
 	bearerScheme      = "Bearer"
@@ -177,7 +176,7 @@ func (a *Authenticator) authenticate(ctx context.Context, key string) (*auth.Ide
 	}
 	identity := resolved.Clone()
 	if identity.Provider == "" {
-		identity.Provider = provider
+		identity.Provider = auth.ProviderAPIKey
 	}
 	return identity, nil
 }
@@ -196,7 +195,7 @@ func (a *Authenticator) findStatic(key string) *staticKey {
 
 func (k *staticKey) identity() *auth.Identity {
 	return &auth.Identity{
-		Provider:    provider,
+		Provider:    auth.ProviderAPIKey,
 		Subject:     k.name,
 		Username:    k.name,
 		Active:      true,
@@ -214,7 +213,7 @@ func (a *Authenticator) report(ctx context.Context, identity *auth.Identity, err
 		return
 	}
 	a.observer(ctx, auth.Outcome{
-		Provider: provider,
+		Provider: auth.ProviderAPIKey,
 		Action:   auth.ActionAuthenticate,
 		Result:   resultOf(err),
 		Err:      err,
