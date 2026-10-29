@@ -66,20 +66,28 @@ Users live in your database behind `password.Storage`; `password.NewMemoryStorag
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 
+	"github.com/google/uuid"
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/password"
 	"github.com/govengers/auth/session"
 )
 
 func main() {
+	storage := password.NewMemoryStorage() // seeded with one user; yours reads your database
+	hash := must(password.Hash("correct horse battery", password.DefaultParameters()))
+	if err := storage.CreateUser(context.Background(), &password.User{ID: uuid.New(), Username: new("alice"), PasswordHash: hash}); err != nil {
+		log.Fatal(err)
+	}
+
 	store := newStore(must(session.NewMemoryBackend(nil))) // one replica; Redis below
 	provider := must(password.New(&password.Options{
 		Sessions: store,
-		Storage:  password.NewMemoryStorage(),
+		Storage:  storage,
 		TOTP:     password.TOTPOptions{Enabled: true, Issuer: "Example"},
 	}))
 	guard := must(session.NewGuard(&session.GuardOptions{
@@ -98,7 +106,7 @@ func main() {
 ```
 
 ```bash
-curl -c jar -H 'Content-Type: application/json' -d '{"identifier":"alice","password":"..."}' localhost:8080/auth/password/login
+curl -c jar -H 'Content-Type: application/json' -d '{"identifier":"alice","password":"correct horse battery"}' localhost:8080/auth/password/login
 curl -b jar localhost:8080/api/hello
 ```
 
@@ -112,7 +120,7 @@ The provider reads sessions itself, so its routes need no Guard. All bodies are 
 | `POST /auth/password/totp/verify` `{"code","backupCode":false}` (this and the routes below only with `TOTP.Enabled`) | 200 identity; `"backupCode":true` checks the code against the backup codes only, `false` against the TOTP codes only |
 | `GET /auth/password/totp` | 200 `{"enabled"}` |
 | `POST /auth/password/totp/setup` `{}` | 200 `{"secret","otpauthUrl","issuer","accountName"}` |
-| `POST /auth/password/totp/enable` `{"code","password"}` | 200 `{"backupCodes":[...]}` |
+| `POST /auth/password/totp/enable` `{"code","password"}` | 200 `{"backupCodes":[...]}`; a wrong code can be retried with the same setup; 409 `totp_already_enabled` when a concurrent enrollment won |
 | `POST /auth/password/totp/disable` `{"password"}` | 204 |
 
 - `TOTP.Required` enrolls users without a second factor during login and registration (the 202 `totp_setup` challenge, then `/totp/setup` and `/totp/enable`) instead of failing every route. `TOTP.Digits` is 6 or 8, `Period` at most 3600 s, `Skew` at most 10, `BackupCodeCount` at most 20; backup codes are at most 128 bytes and the alphabet and length must give at least 1,000,000 distinct codes.
@@ -120,7 +128,7 @@ The provider reads sessions itself, so its routes need no Guard. All bodies are 
 - With `TOTP.Enabled` off, users who enrolled cannot log in (500): clear their TOTP in storage before switching it off.
 - `Policy.MinimumLength` (default 12) counts characters; passwords are at most 128 bytes. Stable client codes (see [Errors](#errors)) replace translated messages.
 - Existing Argon2id hashes verify unchanged; `LegacyVerifier: password.VerifyBcrypt` upgrades bcrypt hashes at the next login, and Argon2id hashes on other parameters than `HashParameters` are rehashed too (only login rehashes, not the password checks of the TOTP routes). A stored hash nothing can verify answers like a wrong password (401 `invalid_credentials`, same cost).
-- Your `Storage` matches usernames and emails ignoring case (unique indexes on `lower(...)`); [docs/migration.md](docs/migration.md) has the SQL for every method.
+- Your `Storage` matches usernames and emails ignoring case (unique indexes on `lower(...)`), and `SetTOTP` enables TOTP only while it is off, in one atomic step, reporting whether it did; [docs/migration.md](docs/migration.md) has the SQL for every method.
 - `PathPrefix` (default `/auth/password`) is made of `/`-separated segments of `A-Z a-z 0-9 . _ ~ -`, without a trailing `/`; the same rule applies to the OIDC and GitHub providers.
 
 ## OIDC with Keycloak
@@ -206,12 +214,12 @@ mux.Handle("GET /", guard.RequireUI()(http.HandlerFunc(index)))
 
 Imports are `github.com/govengers/auth/github` (package `github`) and the packages above. Register `https://app.example.com/auth/github/callback` as the OAuth app's callback URL.
 
-- Users outside `AllowedTeams` get 403 and no session; an `AdminTeams` membership alone is not enough. A user removed from every allowed team loses the session at the next refresh (or `POST /auth/github/refresh-teams`).
+- Users outside `AllowedTeams` get 403 and no session; an `AdminTeams` membership alone is not enough. A user removed from every allowed team loses the session at the next refresh (or `POST /auth/github/refresh-teams`; when that route cannot end the session it answers 500 instead of 401/403).
 - `Identity.Teams` holds only teams in the allowed, admin and relevant lists (`RelevantTeams`), lower-case, sorted. `Subject` is the numeric GitHub user ID, `Username` the login.
 - The GitHub token never leaves the server: call the GitHub API as the user with `provider.HTTPClient(ctx, current)` (`current` from `store.Open(request)`). That client sends the token only to the `APIURL` host; a redirect to another host (archive downloads, `uploads.github.com`) goes without it.
 - `Scopes` (default `read:org`) must include one that lists the user's teams: `read:org`, `write:org`, `admin:org`, `user` or `repo`; `github.New` refuses others.
 - `PostLogoutURL` and `ErrorURL` work as for OIDC. GitHub refusing the code is 401 `login_failed`; a GitHub outage is 500. Logout revokes the token at GitHub (a failure only shows in the outcome); like OIDC logout it refuses a cross-site request with 403.
-- GitHub Enterprise: set `AuthorizeURL`, `TokenURL` and `APIURL` (`https`, `http` only on loopback hosts).
+- GitHub Enterprise: set `AuthorizeURL`, `TokenURL` and `APIURL` (`https`, `http` only on loopback hosts; `APIURL` without query or fragment).
 
 Run it as a forward-auth proxy instead of a library with `PROVIDER=github` ([image](#forward-auth-image)).
 
@@ -234,15 +242,15 @@ ordersGroup.GET("", listOrders)
 ```
 
 - `Verify(ctx, token)` checks the signature (with the JWKS key the token's `kid` names, under that key's algorithm), `iss`, `aud`, `exp` (required), `nbf` and `iat` (30 s skew) and returns the identity: `sub` is `Subject`, `preferred_username` is `Username`, `provider`, `user_id`, `name`, `email`, `picture`, `roles`, `realm_roles`, `client_roles`, `groups`, `teams` fill the matching fields, `permissions` fills `Permissions` (entries that do not parse are dropped), and `Claims` holds all claims.
-- The middleware reads `Authorization: Bearer <token>` (scheme in any case) and answers a missing token with 401 `unauthenticated`, an invalid one with 401 `invalid_token`, both with `WWW-Authenticate: Bearer`. Why a token was refused (expired, issuer mismatch, ...) is in the outcome's Reason, never token content.
-- Only RSA keys with `alg` and use `sig` (or none) count from the JWKS; a JWKS without one fails `NewVerifier`. Errors name the JWKS URL without credentials and query.
-- The JWKS is refetched after `RefreshInterval` (default 1 h, at least 1 min) or for an unknown key ID, at most once a minute, detached from the request that triggered it and bounded by 10 s. A failed refetch keeps the previous keys; a token signed with an unknown key then gets 500. There is no token cache and no goroutine.
+- The middleware reads `Authorization: Bearer <token>` (scheme in any case, spaces around the token ignored) and answers a missing token with 401 `unauthenticated`, an invalid one with 401 `invalid_token`, both with `WWW-Authenticate: Bearer`. Why a token was refused (expired, issuer mismatch, ...) is in the outcome's Reason, never token content.
+- Only RSA keys with an RSA signature `alg` (RS256/384/512, PS256/384/512) and use `sig` (or none) count from the JWKS; other keys and entries that do not parse are ignored, and a JWKS without a usable key or larger than 1 MiB fails `NewVerifier`. Errors name the JWKS URL without credentials and query.
+- The JWKS is refetched after `RefreshInterval` (default 1 h, at least 1 min) or for an unknown key ID, at most once a minute, detached from the request that triggered it and bounded by 10 s. While it runs, tokens with a known key ID verify with the current keys; tokens with an unknown one wait for it. A failed refetch keeps the previous keys; a token signed with an unknown key then gets 500. There is no token cache and no goroutine.
 - `Signer.Sign` refuses an inactive identity (403 `forbidden`): a verified token always yields an active identity.
 - Do not put `apikey` middleware in front of the verifier: both read `Authorization: Bearer`.
 
 ## Authorization
 
-A `Check` allows with `nil` and refuses with an `*auth.Error` (401 without identity, 403 otherwise). `IsAuthenticated` passes any identity; the other primitives require an active one: `IsActive`, `IsUser`, `IsAdmin`, `HasRole`, `HasUserID`, `HasOIDCRole`, `HasOIDCGroup`, `HasGitHubTeam`, `HasPermission`. Combinators: `All` (first refusal), `Any`, `Not`, `Real` (evaluates against the real identity while someone impersonates another). `Not` refuses a missing or inactive identity before it inverts, so `Not(HasRole("x"))` never admits anonymous or deactivated users. A wiring mistake (a `nil` check, `All()` or `Any()` without checks, `HasPermission` with an invalid resource or access) answers every request with 500, and `Not` passes that through instead of inverting it. `Any` returns a failed check (500) in preference to a refusal for the same reason.
+A `Check` allows with `nil` and refuses with an `*auth.Error` (401 without identity, 403 otherwise). `IsAuthenticated` passes any identity; the other primitives require an active one: `IsActive`, `IsUser`, `IsAdmin`, `HasRole`, `HasUserID`, `HasOIDCRole`, `HasOIDCGroup`, `HasGitHubTeam`, `HasPermission`. Combinators: `All` (first refusal), `Any`, `Not`, `Real` (evaluates against the real identity while someone impersonates another). `Not` refuses a missing or inactive identity before it inverts, so `Not(HasRole("x"))` never admits anonymous or deactivated users, and it inverts only a refusal answered 403 (the kind of the outermost `*auth.Error`, as `auth.ResponseFor` decides), never a 401 that wraps a forbidden cause. A wiring mistake (a `nil` check, `All()` or `Any()` without checks, `HasPermission` with an invalid resource or access) answers every request with 500, and `Not` passes that through instead of inverting it. `Any` returns a failed check (500) in preference to a refusal for the same reason.
 
 ```go
 var editors = authorization.Any(
@@ -373,7 +381,7 @@ api.GET("/profile", func(c *gin.Context) {
 api.DELETE("/users/:id", ginadapter.Require(authorization.IsAdmin()), deleteUser)
 ```
 
-After `ginadapter.Middleware(...)` calls its next handler, `c.Request` is the enriched request, so later gin handlers and middleware see the identity. If the wrapped middleware refuses, the chain is aborted. `ginadapter.Require(nil)` answers every request with 500 (a wiring mistake fails closed). `IdentityResponse` never exposes `Claims`, `Attributes` or `Data`.
+After `ginadapter.Middleware(...)` calls its next handler, `c.Request` is the enriched request, so later gin handlers and middleware see the identity. If the wrapped middleware refuses, the chain is aborted. It wraps the middleware once, like a `net/http` chain, so state the middleware keeps across requests survives; pass the request on with a context derived from the one it got (`r.WithContext(context.WithValue(r.Context(), ...))`), else the request is answered 500. `ginadapter.Require(nil)` answers every request with 500 (a wiring mistake fails closed). `IdentityResponse` never exposes `Claims`, `Attributes` or `Data`.
 
 ## Your application user (replaces `UserTransformer`)
 
@@ -414,7 +422,7 @@ func UserFrom(ctx context.Context) *User {
 
 In `main`, run the Guard first, then `WithUser`: `guard.RequireAPI()(WithUser(users)(handler))`. In gin, use `ginadapter.Middleware(WithUser(users))` after `ginadapter.Middleware(guard.RequireAPI())`. A hook cannot add your user object to the context, which is why this is a middleware.
 
-The password provider sets `UserID` itself. For OIDC and GitHub, provision the user at login in `OnLogin` so the identity carries your user ID:
+The password provider sets `UserID` itself (the `Storage` user ID); its `OnLogin` hook must keep it, a hook that replaces it fails the login with 500. For OIDC and GitHub, provision the user at login in `OnLogin` so the identity carries your user ID:
 
 ```go
 onLogin := func(ctx context.Context, identity *auth.Identity) (*auth.Identity, error) {
@@ -432,7 +440,7 @@ onLogin := func(ctx context.Context, identity *auth.Identity) (*auth.Identity, e
 // oidc.Options{..., OnLogin: onLogin}
 ```
 
-An `*auth.Error` from a hook answers with its status (403 refuses the login), anything else with 500; no session is created either way.
+An `*auth.Error` from a hook answers with its status (403 refuses the login), anything else with 500; no session is created either way. `OnLogout` gets a context a disconnecting client cannot cancel (every provider); set your own deadline for slow work in it.
 
 ## API keys
 
@@ -454,7 +462,7 @@ mux.Handle("GET /api/hello", keys.Middleware()(guard.RequireAPI()(hello)))
 
 ## Several replicas
 
-The memory backend is correct for exactly one replica and forgets sessions on restart. For more, share one Redis and one `EncryptionKey`:
+The memory backend is correct for exactly one replica, forgets sessions on restart and is meant for non-production scale: when full (`MaximumSessions`, default 100000) it evicts the entries expiring soonest, revocation markers included. In production, and for more than one replica, share one Redis and one `EncryptionKey`:
 
 ```go
 client := redis.NewClient(&redis.Options{Addr: "redis:6379"}) // github.com/redis/go-redis/v9; you own and close it
@@ -464,7 +472,7 @@ backend := must(redisbackend.New(&redisbackend.Options{Client: client, KeyPrefix
 store := newStore(backend)
 ```
 
-`redisbackend` takes any `redis.UniversalClient` (client, sentinel, cluster; keys carry a hash tag, so `KeyPrefix` must not contain `{` or `}`). Logout and session rotation revoke on every replica, and a revoked session cannot be written again. To use another database, implement the five-method `session.Backend` (`Put`, `Get`, `Pop`, `CompareAndSwap`, `Revoke`). A Redis dump holds SHA-256 hashes of session IDs and AES-256-GCM ciphertext, not usable cookies.
+`redisbackend` takes any `redis.UniversalClient` (client, sentinel, cluster; keys carry a hash tag, so `KeyPrefix` must not contain `{` or `}`). Logout and session rotation revoke on every replica; a revoked session never regains an identity and refuses writes while its revocation marker lives (Redis may evict it under its own eviction policy, as a full memory backend does). To use another database, implement the five-method `session.Backend` (`Put`, `Get`, `Pop`, `CompareAndSwap`, `Revoke`). A Redis dump holds SHA-256 hashes of session IDs and AES-256-GCM ciphertext, not usable cookies.
 
 ## Forward-auth image
 
@@ -593,21 +601,21 @@ Set `GOMEMLIMIT` 5-10 % below the container memory limit in your manifests (limi
 | `GET {prefix}/ready` | readiness: 200 `{"status":"ok"}`, or 503 `{"code":"unavailable","message":"not ready"}` during shutdown or when the Redis ping (2 s) fails |
 | `GET {prefix}/oidc/<OIDC_NAME>/{login,callback,logout,frontchannel-logout}` | OIDC provider |
 | `GET {prefix}/github/{login,callback,logout}`, `POST {prefix}/github/refresh-teams` | GitHub provider |
-| any other path | 404 `{"code":"not_found","message":"not found"}` |
+| any other path | 404 `{"code":"not_found","message":"not found"}`, also a known route with a trailing `/` (no redirect) |
 | `GET /metrics` on `METRICS_PORT` | Prometheus, the only route of that listener; keep this port off Traefik |
 
 Route `{prefix}` to the service with its own Traefik router, minus the checks and probes, as in the labels above: the check endpoints do not dispatch login routes by `X-Forwarded-Uri`. Link users to `{prefix}/oidc/<name>/logout` or `{prefix}/github/logout` to log out; both are plain `GET` links, same-site only: a link from another site (`Sec-Fetch-Site: cross-site`, e.g. a portal on another domain) is refused with 403.
 
 ### Environment variables
 
-Values without a default are required. *not empty* marks values with a default that refuse an explicitly empty value. Lists are comma-separated. The process exits non-zero before it serves anything and lists every problem it can find: missing or invalid values, an unparsable `SESSION_ENCRYPTION_KEY`, `PORT` equal to `METRICS_PORT`, values the selected provider, Keycloak or JWT needs, `KEYCLOAK_ENABLED` without `PROVIDER=oidc`, a malformed `API_KEYS` entry (reported by position, never echoed), a secret that is too short or used twice, a bad `API_KEY_PERMISSIONS` entry. Then the components fail the boot on what only they can judge (team format, `GITHUB_SCOPES`, URLs, the JWT key, the issuer's discovery) and, with `SESSION_REDIS_ENABLED`, on a Redis that does not answer a `PING` within 5 s. Sensitive values are masked in the startup table. A `.env` file in the working directory is read if present (development only; the image has none).
+Values without a default are required. *not empty* marks values with a default that refuse an explicitly empty value. Lists are comma-separated. The process exits non-zero before it serves anything and lists every problem it can find: missing or invalid values, an `EXTERNAL_URL` with a path, an unparsable `SESSION_ENCRYPTION_KEY`, `PORT` equal to `METRICS_PORT`, values the selected provider, Keycloak or JWT needs, `KEYCLOAK_ENABLED` without `PROVIDER=oidc`, `API_KEYS_ENABLED` without keys, a malformed `API_KEYS` entry (reported by position, never echoed), a secret that is too short or used twice, a bad `API_KEY_PERMISSIONS` entry. Then the components fail the boot on what only they can judge (team format, `GITHUB_SCOPES`, URLs, the JWT key, the issuer's discovery) and, with `SESSION_REDIS_ENABLED`, on a Redis that does not answer a `PING` within 5 s. Sensitive values are masked in the startup table. A `.env` file in the working directory is read if present (development only; the image has none).
 
 **General**
 
 | Variable | Default | Required | Sensitive | Notes |
 |---|---|---|---|---|
 | `PROVIDER` | - | yes | | `oidc` or `github` |
-| `EXTERNAL_URL` | - | yes | | public base URL of the protected app, e.g. `https://app.example.com` |
+| `EXTERNAL_URL` | - | yes | | public origin of the protected app, scheme and host without a path, e.g. `https://app.example.com` |
 | `PATH_PREFIX` | `/auth` | not empty | | prefix of every route; starts with `/`, no trailing `/`, segments of `A-Z a-z 0-9 . _ ~ -`, no `.` or `..` segment |
 | `PORT` | `8080` | | | public listener, 1-65535 |
 | `METRICS_PORT` | `9090` | | | `/metrics` listener, 1-65535; must differ from `PORT` |
@@ -615,7 +623,8 @@ Values without a default are required. *not empty* marks values with a default t
 | `WIDE_EVENT_SAMPLE_RATE` | `10` | | | at least 1; keep every Nth successful event; failures, 401, 403 and degraded events are always kept |
 | `SHUTDOWN_DELAY_SECONDS` | `5` | | | readiness 503 this long before draining; 0-10, so delay plus the 20 s drain fit the 30 s default grace period |
 | `IDENTITY_ENDPOINT_ENABLED` | `false` | | | mounts `{prefix}/me` |
-| `API_KEYS` | empty | | yes | `name:secret` entries (split at the first `:`); names and secrets unique, secrets at least 16 bytes and without `,` |
+| `API_KEYS_ENABLED` | `false` | | | accept the keys of `API_KEYS` on both checks; while `false`, `API_KEYS` and `API_KEY_PERMISSIONS` are ignored |
+| `API_KEYS` | empty | when enabled (at least one) | yes | `name:secret` entries (split at the first `:`); names and secrets unique, secrets at least 16 bytes and without `,` |
 | `API_KEY_PERMISSIONS` | empty | | | `name=permission+permission` entries, e.g. `ci=builds:write+deployments:read,reader=*:read`; each name is a key of `API_KEYS` and appears once; a key without an entry has no permissions |
 
 **Session**
@@ -674,7 +683,7 @@ Values without a default are required. *not empty* marks values with a default t
 | `GITHUB_SCOPES` | `read:org` | not empty | | must include `read:org`, `write:org`, `admin:org`, `user` or `repo` (the team lookup needs one) |
 | `GITHUB_AUTHORIZE_URL` | `https://github.com/login/oauth/authorize` | not empty | | GitHub Enterprise |
 | `GITHUB_TOKEN_URL` | `https://github.com/login/oauth/access_token` | not empty | | GitHub Enterprise |
-| `GITHUB_API_URL` | `https://api.github.com` | not empty | | GitHub Enterprise, e.g. `https://ghe.example.com/api/v3` |
+| `GITHUB_API_URL` | `https://api.github.com` | not empty | | GitHub Enterprise, e.g. `https://ghe.example.com/api/v3`; no query or fragment |
 
 **JWT**
 
@@ -691,23 +700,24 @@ The token carries `iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`, `provider`, `
 
 ### Operations
 
-- Logs are wide events: one JSON line per request on stdout, none for health and readiness. Query values are redacted (callbacks carry `code` and `state`), also by the `DEV_MODE` emitter. Each event sums the request's outbound calls per dependency: `cache.calls`, `.failures`, `.duration_ms`, `.error` for Redis and `http.<oidc|keycloak|github>.calls`, `.failures`, `.duration_ms`, `.status`, `.error` for the provider. Unknown paths are recorded as failures (`no route`) and always kept by the sampler. Startup, shutdown and net/http's own error lines go through `log/slog` JSON.
+- Logs are wide events: one JSON line per request on stdout, none for health and readiness. Query values are redacted (callbacks carry `code` and `state`), also by the `DEV_MODE` emitter. Each event sums the request's outbound calls per dependency: `cache.calls`, `.failures`, `.duration_ms`, `.error` for Redis and `http.<oidc|keycloak|github>.calls`, `.failures`, `.duration_ms`, `.status`, `.error` for the provider (a transport error is recorded as cancellation, a dial error or its type, never with the URL or bytes the server sent). Unknown paths are recorded as failures (`no route`) and always kept by the sampler. Startup, shutdown and net/http's own error lines go through `log/slog` JSON.
 - Metrics on `METRICS_PORT`: `forwardauth_http_requests_total{route,method,status}`, `forwardauth_http_request_duration_seconds{route,method}`, `forwardauth_http_requests_in_flight`, `forwardauth_auth_outcomes_total{provider,action,result}`, `forwardauth_dependency_request_duration_seconds{dependency,operation,outcome}` (Redis and the provider's HTTP calls), Go, process and build-info collectors.
 - With `SESSION_REDIS_ENABLED` the boot fails when Redis does not answer within 5 s; the Redis client never retries a command.
-- API keys in `API_KEYS` are accepted on both check endpoints (not on `{prefix}/me`). Their identity carries the permissions from `API_KEY_PERMISSIONS` and no roles, so `authorization.IsAdmin` refuses them: check permissions in the backend (`HasPermission`, `RequireMethodPermission`). Once `API_KEYS` is set, a request whose `Authorization: Bearer` value is not a configured key is refused with 401 `invalid_api_key` on both checks, even with a valid session cookie: an SPA that sends its own bearer tokens through the proxy cannot use API keys.
+- With `API_KEYS_ENABLED=true` the keys in `API_KEYS` are accepted on both check endpoints (not on `{prefix}/me`). Their identity carries the permissions from `API_KEY_PERMISSIONS` and no roles, so `authorization.IsAdmin` refuses them: check permissions in the backend (`HasPermission`, `RequireMethodPermission`). With API keys enabled, a request whose `Authorization: Bearer` value is not a configured key is refused with 401 `invalid_api_key` on both checks, even with a valid session cookie: an SPA that sends its own bearer tokens through the proxy cannot use API keys.
 - With `JWT_ENABLED` an inactive identity is answered 403 (the token would come back active).
 - Failures answer the one JSON shape (a panic is 500 `internal`); check answers carry `Cache-Control: no-store`.
+- Both listeners bound every connection phase (read header 10 s, read 30 s, write 60 s, idle 120 s).
 
 ## Security notes
 
 - **Cookie:** `HttpOnly`, `Secure` (unless `InsecureCookie`), `SameSite=Lax` by default, `Path=/`, host-only unless `CookieDomain` is set. The value is 32 random bytes; the backend key is its SHA-256. Session values are AES-256-GCM sealed with a key derived per session (HKDF-SHA256) from `EncryptionKey`, bound to the session ID and key. There is no signing key to leak.
-- **Sessions:** the ID is rotated at every login (the previous session is revoked), logout and failed refreshes revoke server-side, the lifetime is absolute (`MaximumAge` from the login), a lifetime starts only on a session the store issued itself (a planted or expired cookie, or a handle kept past its expiry, cannot get one), a revoked session cannot be written again, and a refresh never overwrites a change saved while it ran. Revoking an unknown session ID stores nothing. Changing `EncryptionKey` logs everyone out; there is no key rotation list.
-- **OAuth flows:** `state`, `nonce` (OIDC) and the PKCE S256 verifier are random, stored server-side in the login session, valid for 10 minutes and single use. ID tokens are verified for signature, issuer, audience, expiry, nonce and subject. OIDC (including the endpoints discovery names), Keycloak and GitHub URLs must be `https` (loopback hosts excepted for tests). The GitHub token is sent to the GitHub API host only. A token endpoint's error answer is recorded by its HTTP status and OAuth error code only, never its description or body.
+- **Sessions:** the ID is rotated at every completed login (the previous session is revoked); starting an OIDC or GitHub login keeps a logged-in session, so a cross-site link to a login route ends nothing. Logout and failed refreshes revoke server-side, the lifetime is absolute (`MaximumAge` from the login), a lifetime starts only on a session the store issued itself (a planted or expired cookie, or a handle kept past its expiry, cannot get one), a revoked session never regains an identity and refuses writes while its revocation marker lives (a full memory backend may evict the marker), and a refresh never overwrites a change saved while it ran. Revoking an unknown session ID stores nothing. Changing `EncryptionKey` logs everyone out; there is no key rotation list.
+- **OAuth flows:** `state`, `nonce` (OIDC) and the PKCE S256 verifier are random, stored server-side in the login session, valid for 10 minutes and single use. ID tokens are verified for signature, issuer, audience, expiry, nonce and subject. OIDC (including the endpoints discovery names), Keycloak and GitHub URLs must be `https` (loopback hosts excepted for tests). The GitHub token is sent to the GitHub API host only. A token endpoint's error answer is recorded by its HTTP status and OAuth error code only, never its description or body; failed OIDC discovery and JWKS requests and Keycloak Admin API answers by their status code only.
 - **Open redirects:** `return_to` is accepted only as a same-origin relative path (starts with `/`, not `//` or `/\`, no control characters, at most 2048 bytes); anything else becomes `/`. Redirects after login always go to `ExternalURL` plus that path. Configured targets (`LoginURL`, `ErrorURL`, `PostLogoutURL`) are validated at startup.
 - **Errors:** responses carry fixed messages and stable codes. Required role, team and domain names, causes and tokens stay in server-side `Reason`s and are never sent or put into outcomes, wide events or metric labels.
 - **Credentials:** unknown users cost the same Argon2id verification as real ones, and a stored hash nothing can verify answers like a wrong password at the same cost; API keys are compared as SHA-256 hashes in constant time without early exit; passwords are 1-128 bytes, default minimum length 12 characters. Each TOTP code is accepted once; wrong codes lock the second factor after `MaximumAttempts` in a row.
-- **JWT:** RS512 only, key ID is the RFC 7638 thumbprint, default lifetime 5 minutes, minted per request, never cached, `exp` required, never for an inactive identity. The verifier ignores JWKS keys that are not RSA signing keys with `alg`. Backends must verify the signature and issuer; do not trust headers a client could set (see the Traefik settings above).
-- **Known limits:** no rate limiting (do it at Traefik, at least on the password login and TOTP routes), no retries, no idle timeout. Logout CSRF is refused only by browsers that send `Sec-Fetch-Site` (all current ones); OIDC front-channel logout stays callable cross-site by design. A stale `SaveIdentity` from your own code (impersonation) racing a Guard refresh still overwrites it.
+- **JWT:** RS512 only, key ID is the RFC 7638 thumbprint, default lifetime 5 minutes, minted per request, never cached, `exp` required, never for an inactive identity. The verifier ignores JWKS keys that are not RSA signing keys with an RS*/PS* `alg`. Backends must verify the signature and issuer; do not trust headers a client could set (see the Traefik settings above).
+- **Known limits:** no rate limiting (do it at Traefik, at least on the password login and TOTP routes), no retries, no idle timeout. The memory backend is for one replica at non-production scale; use Redis in production. Logout CSRF is refused only by browsers that send `Sec-Fetch-Site` (all current ones); OIDC front-channel logout stays callable cross-site by design. A stale `SaveIdentity` from your own code (impersonation) racing a Guard refresh still overwrites it.
 
 ## Release notes
 
@@ -723,11 +733,11 @@ Breaking changes against all three predecessors:
 - Route prefixes: `/auth/password/*`, `/auth/oidc/<name>/*`, `/auth/github/*`, each a `PathPrefix` of plain segments without a trailing `/`. Redirect URIs are derived from `ExternalURL`; register the new callback URLs at your IdP and GitHub. `ErrorURL` and `PostLogoutURL` become absolute and refuse fragments.
 - One error body `{"code","message"}` with stable codes (`tfa_*` became `totp_*`, `unauthorized` became `unauthenticated`); translated `Messages` are gone.
 - Hooks are `auth.Hook` (`OnLogin`) and `auth.LogoutHook`; `UserTransformer` is an application middleware after the Guard. Libraries no longer log; they call an optional `auth.Observer`.
-- `password`: default minimum length 12 characters without composition rules; `Storage` takes a `context.Context`, gains `UpdatePasswordHash` (compare-and-swap), `ConsumeTOTPStep` (a `totp_step` column; every TOTP code is accepted once) and `ErrUserExists`, and matches usernames and emails ignoring case; `TOTP.Required` enrolls during login and registration; TOTP routes exist only with `TOTP.Enabled`, and enrolled users cannot log in while it is off; backup codes are checked only with `"backupCode": true` (no fallthrough from a wrong TOTP code); `MaximumAttempts` is a lockout across logins until a verified code or `ResetTOTPAttempts`, with no unlimited mode; new limits `Period` <= 3600, `Skew` <= 10, `BackupCodeCount` <= 20, backup codes <= 128 bytes and >= 1,000,000 distinct codes; Argon2id hashes on outdated parameters are rehashed at login.
+- `password`: default minimum length 12 characters without composition rules; `Storage` takes a `context.Context`, gains `UpdatePasswordHash` (compare-and-swap), `ConsumeTOTPStep` (a `totp_step` column; every TOTP code is accepted once) and `ErrUserExists`, matches usernames and emails ignoring case, and `SetTOTP` returns `(bool, error)`: it enables TOTP only while it is off, atomically (`... WHERE id = $1 AND NOT totp_enabled`); `OnLogin` must keep `UserID`; `TOTP.Required` enrolls during login and registration; TOTP routes exist only with `TOTP.Enabled`, and enrolled users cannot log in while it is off; backup codes are checked only with `"backupCode": true` (no fallthrough from a wrong TOTP code); `MaximumAttempts` is a lockout across logins until a verified code or `ResetTOTPAttempts`, with no unlimited mode; new limits `Period` <= 3600, `Skew` <= 10, `BackupCodeCount` <= 20, backup codes <= 128 bytes and >= 1,000,000 distinct codes; Argon2id hashes on outdated parameters are rehashed at login.
 - OIDC and GitHub: PKCE (and nonce) always on, GitHub logout is `GET`, logout (also password logout) refuses `Sec-Fetch-Site: cross-site` with 403, so logout links must live on the app's own site, GitHub `AllowedTeams` is required (an empty list no longer admits everyone), GitHub `Scopes` must include one that lists teams (`read:org`, `write:org`, `admin:org`, `user`, `repo`), the endpoints OIDC discovery names must be `https` (or loopback `http`), Keycloak enrichment moved from gocloak to `oidc/keycloak` and defaults to client credentials, GitHub `UserProfile` and friends are gone (`Identity.Teams`, `HTTPClient`).
 - API keys are named, at least 16 bytes, unique, and grant only the roles and permissions you give them (the old "API key bypasses admin" behaviour needs `Roles: []string{auth.RoleAdmin}`). `Authorization: Bearer` is matched in any case, so a foreign bearer token on a route behind `apikey` is 401.
-- JWT: RS512 only, jwx v3, `exp` required, default lifetime 5 minutes (was 30), issuer defaults to `EXTERNAL_URL`, GitHub `sub` is the numeric user ID and the login is `preferred_username` (`uid` is gone), JWKS at `/auth/jwks`, no generated signing key, `Sign` refuses an inactive identity, the verifier uses only RSA JWKS keys with `alg` and answers 401 with `WWW-Authenticate: Bearer`.
-- Forward-auth: one image `ghcr.io/govengers/forwardauth` selected by `PROVIDER` replaces `oidc-fwd-auth` and `github-fwd-auth`; renamed environment variables, new routes (`/auth/ui`, `/auth/api`, `/auth/jwks`), an explicit Traefik router for `/auth` (without the checks and probes) is required, Google multi-provider mode is removed, `JWT_PRIVATE_KEY` is required when JWT is on, API keys carry permissions (`API_KEY_PERMISSIONS`) but no roles. `SESSION_SAME_SITE` takes `lax` or `none`, `SHUTDOWN_DELAY_SECONDS` at most 10, the boot fails when Redis does not answer.
+- JWT: RS512 only, jwx v3, `exp` required, default lifetime 5 minutes (was 30), issuer defaults to `EXTERNAL_URL`, GitHub `sub` is the numeric user ID and the login is `preferred_username` (`uid` is gone), JWKS at `/auth/jwks`, no generated signing key, `Sign` refuses an inactive identity, the verifier uses only RSA JWKS keys with an RS*/PS* `alg` and answers 401 with `WWW-Authenticate: Bearer`.
+- Forward-auth: one image `ghcr.io/govengers/forwardauth` selected by `PROVIDER` replaces `oidc-fwd-auth` and `github-fwd-auth`; renamed environment variables, new routes (`/auth/ui`, `/auth/api`, `/auth/jwks`), an explicit Traefik router for `/auth` (without the checks and probes) is required, Google multi-provider mode is removed, `JWT_PRIVATE_KEY` is required when JWT is on, API keys need `API_KEYS_ENABLED=true` (`API_KEYS` alone is ignored) and carry permissions (`API_KEY_PERMISSIONS`) but no roles. `EXTERNAL_URL` is an origin without a path, a route with a trailing `/` is 404 (no redirect), `SESSION_SAME_SITE` takes `lax` or `none`, `SHUTDOWN_DELAY_SECONDS` at most 10, the boot fails when Redis does not answer.
 
 New: `authorization` (incl. `HasPermission`), resource permissions (`auth.Permission`, `ginadapter.RequireMethodPermission`, the JWT `permissions` claim), `apikey`, `ginadapter`, `prometheusadapter`, `session/redisbackend`, TOTP enrollment during login, `Refresher`s that re-check teams and users every minute, `IdentityHandler`, wide-event and Prometheus reporting in the image.
 
