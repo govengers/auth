@@ -1,6 +1,11 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
 	"net/http"
 	"strings"
 	"testing"
@@ -185,6 +190,25 @@ func TestAPIKeysFollowTheirFlag(t *testing.T) {
 	enabled, err := newAPIKeys(configuration, nil)
 	require.NoError(t, err)
 	require.NotNil(t, enabled)
+}
+
+func TestNewSignerIssuesForTheExternalURLByDefault(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	configuration := validOIDCConfiguration()
+	configuration.ExternalURL = "https://app.example.com/"
+	configuration.JWTPrivateKey = string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)}))
+	signer, err := newSigner(configuration)
+	require.NoError(t, err)
+
+	token, err := signer.Sign(&auth.Identity{Subject: "user-1", Provider: "oidc", Active: true})
+
+	require.NoError(t, err)
+	parts := strings.Split(token, ".")
+	require.Len(t, parts, 3)
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	require.Contains(t, string(payload), `"iss":"https://app.example.com"`)
 }
 
 func TestAPIKeysParsesKeysAndTheirPermissions(t *testing.T) {
