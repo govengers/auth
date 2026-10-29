@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/google/uuid"
+
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/httpjson"
 	"github.com/govengers/auth/session"
@@ -172,10 +174,7 @@ func (p *Provider) enableTOTP(writer http.ResponseWriter, request *http.Request)
 	if err != nil {
 		return refused(err)
 	}
-	if err := p.options.Storage.SetTOTP(ctx, account.user.ID, secret, hashes); err != nil {
-		return refused(fmt.Errorf("enable TOTP of user %s: %w", account.user.ID, err))
-	}
-	identity, err := p.finishEnable(writer, request, account)
+	identity, err := p.storeTOTP(writer, request, account, secret, hashes)
 	if err != nil {
 		return refused(err)
 	}
@@ -195,15 +194,36 @@ func popSetupSecret(ctx context.Context, current session.Session) (string, error
 	return setup.Secret, nil
 }
 
-// finishEnable saves a full session's identity again and turns a login pending enrollment into a session.
-func (p *Provider) finishEnable(writer http.ResponseWriter, request *http.Request, account totpAccount) (*auth.Identity, error) {
-	if account.identity == nil {
-		return p.signIn(writer, request, account.user)
+// storeTOTP enables TOTP for the account and returns the identity to answer with. A login pending enrollment
+// becomes a session: OnLogin decides and the new session starts before SetTOTP, so a refused or failed login
+// leaves the account unchanged, and the identity is saved after it, so no full session exists without the second
+// factor.
+func (p *Provider) storeTOTP(writer http.ResponseWriter, request *http.Request, account totpAccount, secret string, hashes []string) (*auth.Identity, error) {
+	ctx := request.Context()
+	if account.identity != nil {
+		if err := p.setTOTP(ctx, account.user.ID, secret, hashes); err != nil {
+			return nil, err
+		}
+		return account.identity, nil
 	}
-	if err := account.session.SaveIdentity(request.Context(), account.identity); err != nil {
+	current, identity, err := p.admit(writer, request, account.user)
+	if err != nil {
 		return nil, err
 	}
-	return account.identity, nil
+	if err := p.setTOTP(ctx, account.user.ID, secret, hashes); err != nil {
+		return nil, err
+	}
+	if err := current.SaveIdentity(ctx, identity); err != nil {
+		return nil, err
+	}
+	return identity, nil
+}
+
+func (p *Provider) setTOTP(ctx context.Context, id uuid.UUID, secret string, hashes []string) error {
+	if err := p.options.Storage.SetTOTP(ctx, id, secret, hashes); err != nil {
+		return fmt.Errorf("enable TOTP of user %s: %w", id, err)
+	}
+	return nil
 }
 
 // disableTOTP turns TOTP off for the user of a full session after confirming the password.

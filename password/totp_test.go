@@ -1,6 +1,7 @@
 package password
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"sync"
@@ -391,6 +392,60 @@ func TestEnableWithoutBackupCodes(t *testing.T) {
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.JSONEq(t, `{"backupCodes":[]}`, recorder.Body.String())
 	require.Empty(t, fixture.storedUser(t, user.ID).BackupCodeHashes)
+}
+
+func TestEnrollmentChangesNothingWhenTheLoginFails(t *testing.T) {
+	testCases := []struct {
+		name       string
+		onLogin    auth.Hook
+		failing    []string // session backend operations that fail during enable
+		wantStatus int
+	}{
+		{
+			name: "refused by OnLogin",
+			onLogin: func(context.Context, *auth.Identity) (*auth.Identity, error) {
+				return nil, &auth.Error{Kind: auth.ErrForbidden, Reason: "inactive user"}
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{name: "session start fails", failing: []string{"Revoke"}, wantStatus: http.StatusInternalServerError},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			options := totpOptions()
+			options.TOTP.Required = true
+			options.OnLogin = testCase.onLogin
+			fixture := newFixture(t, options)
+			user := fixture.createUser(t, "ada", "")
+			browser := fixture.newClient(t)
+			require.Equal(t, http.StatusAccepted, browser.login("ada").Code)
+			secret := decodeBody[setupResponse](t, browser.post(setupPath, map[string]any{})).Secret
+			if testCase.failing != nil {
+				fixture.failSessions(t, testCase.failing...)
+			}
+
+			recorder := browser.post(enablePath, map[string]any{"code": fixture.code(t, secret, 0), "password": testPassword})
+
+			require.Equal(t, testCase.wantStatus, recorder.Code, recorder.Body.String())
+			stored := fixture.storedUser(t, user.ID)
+			require.False(t, stored.TOTPEnabled)
+			require.Empty(t, stored.BackupCodeHashes)
+		})
+	}
+}
+
+func TestEnableOnAFullSessionWritesNoSession(t *testing.T) {
+	fixture := newFixture(t, totpOptions())
+	user := fixture.createUser(t, "ada", "")
+	browser := loggedInClient(t, fixture)
+	secret := decodeBody[setupResponse](t, browser.post(setupPath, map[string]any{})).Secret
+	fixture.failSessions(t, "Put")
+
+	recorder := browser.post(enablePath, map[string]any{"code": fixture.code(t, secret, 0), "password": testPassword})
+
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	require.Len(t, decodeBody[enableResponse](t, recorder).BackupCodes, 10)
+	require.True(t, fixture.storedUser(t, user.ID).TOTPEnabled)
 }
 
 func TestBackupCodesUseTheConfiguredAlphabet(t *testing.T) {

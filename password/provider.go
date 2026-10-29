@@ -176,19 +176,29 @@ func (p *Provider) report(ctx context.Context, outcome auth.Outcome) {
 // signIn runs OnLogin for user, starts a fresh session (revoking the request's current one) and saves the
 // identity in it.
 func (p *Provider) signIn(writer http.ResponseWriter, request *http.Request, user *User) (*auth.Identity, error) {
-	ctx := request.Context()
-	identity, err := hook.RunOnLogin(ctx, p.options.OnLogin, identityOf(user))
+	current, identity, err := p.admit(writer, request, user)
 	if err != nil {
 		return nil, err
 	}
-	current, err := p.options.Sessions.Start(ctx, writer, request)
-	if err != nil {
-		return nil, err
-	}
-	if err := current.SaveIdentity(ctx, identity); err != nil {
+	if err := current.SaveIdentity(request.Context(), identity); err != nil {
 		return nil, err
 	}
 	return identity, nil
+}
+
+// admit runs OnLogin for user and starts a fresh session (revoking the request's current one) for the identity
+// it returns; saving the identity there completes the login.
+func (p *Provider) admit(writer http.ResponseWriter, request *http.Request, user *User) (session.Session, *auth.Identity, error) {
+	ctx := request.Context()
+	identity, err := hook.RunOnLogin(ctx, p.options.OnLogin, identityOf(user))
+	if err != nil {
+		return session.Session{}, nil, err
+	}
+	current, err := p.options.Sessions.Start(ctx, writer, request)
+	if err != nil {
+		return session.Session{}, nil, err
+	}
+	return current, identity, nil
 }
 
 func identityOf(user *User) *auth.Identity {
