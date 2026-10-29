@@ -207,6 +207,37 @@ func TestVerifyFailsOnAnUndecodableSecret(t *testing.T) {
 	requireRefusal(t, recorder, http.StatusUnauthorized, "invalid_totp_code") // a code of the wrong length is just wrong
 }
 
+func TestVerifyFailsOnACorruptBackupCodeHash(t *testing.T) {
+	fixture := newFixture(t, totpOptions())
+	user := fixture.createUser(t, "ada", "")
+	requireSetTOTP(t, fixture.storage, user.ID, testSecret, []string{"corrupt"})
+
+	recorder := fixture.pendingClient(t, "ada").post(verifyPath, map[string]any{"code": "1111111111", "backupCode": true})
+
+	requireRefusal(t, recorder, http.StatusInternalServerError, "internal")
+	outcome := fixture.outcomes.last(t)
+	require.ErrorIs(t, outcome.Err, ErrInvalidHash)
+	require.ErrorContains(t, outcome.Err, "verify backup code of user "+user.ID.String())
+}
+
+func TestEnableFailsOnACorruptSetup(t *testing.T) {
+	testCases := map[string]string{"undecodable": "not json", "without a secret": `{}`}
+	for name, stored := range testCases {
+		t.Run(name, func(t *testing.T) {
+			fixture := newFixture(t, totpOptions())
+			fixture.createUser(t, "ada", "")
+			browser := loggedInClient(t, fixture)
+			fixture.putSessionValue(t, browser, totpSetupKey, stored)
+			fixture.outcomes.take()
+
+			recorder := browser.post(enablePath, map[string]any{"code": "000000", "password": testPassword})
+
+			requireRefusal(t, recorder, http.StatusInternalServerError, "internal")
+			require.ErrorContains(t, fixture.outcomes.last(t).Err, "decode TOTP setup")
+		})
+	}
+}
+
 func TestTOTPCodeIsSingleUse(t *testing.T) {
 	fixture := newFixture(t, totpOptions())
 	fixture.createTOTPUser(t, "ada")
@@ -642,7 +673,8 @@ func TestConcurrentEnrollmentsEnableOnce(t *testing.T) {
 			stored := fixture.storedUser(t, user.ID)
 			require.Equal(t, winnerSecret, *stored.TOTPSecret)
 			require.Len(t, stored.BackupCodeHashes, len(winnerCodes))
-			_, found := matchingBackupCode(stored.BackupCodeHashes, winnerCodes[0])
+			_, found, err := matchingBackupCode(stored.BackupCodeHashes, winnerCodes[0])
+			require.NoError(t, err)
 			require.True(t, found, "the winner's backup codes stay")
 			if testCase.required {
 				_, err := fixture.sessionIdentity(t, loser)

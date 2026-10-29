@@ -196,17 +196,23 @@ func (p *Provider) enableTOTP(writer http.ResponseWriter, request *http.Request)
 	return succeeded(http.StatusOK, enableResponse{BackupCodes: codes}, identity)
 }
 
-// setupSecret returns the secret of the session's pending TOTP setup; none is totp_setup_missing. It stays for a
-// retry after a mistyped code (the client holds the secret anyway): the session that enabling a pending enrollment
-// starts drops it, in a full session disable drops it or it expires.
+// setupSecret returns the secret of the session's pending TOTP setup; none is totp_setup_missing, an unreadable
+// one an error. It stays for a retry after a mistyped code (the client holds the secret anyway): the session that
+// enabling a pending enrollment starts drops it, in a full session disable drops it or it expires.
 func setupSecret(ctx context.Context, current session.Session) (string, error) {
 	encoded, found, err := current.Get(ctx, totpSetupKey)
 	if err != nil {
 		return "", fmt.Errorf("read TOTP setup: %w", err)
 	}
-	var setup totpSetup
-	if !found || json.Unmarshal(encoded, &setup) != nil || setup.Secret == "" {
+	if !found {
 		return "", &auth.Error{Kind: auth.ErrInvalidRequest, Code: codeTOTPSetupMissing, Reason: "no pending TOTP setup"}
+	}
+	var setup totpSetup
+	if err := json.Unmarshal(encoded, &setup); err != nil {
+		return "", fmt.Errorf("decode TOTP setup: %w", err)
+	}
+	if setup.Secret == "" {
+		return "", errors.New("decode TOTP setup: no secret")
 	}
 	return setup.Secret, nil
 }

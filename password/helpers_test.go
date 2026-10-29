@@ -313,6 +313,18 @@ func (f *fixture) sessionIdentity(t *testing.T, browser *client) (*auth.Identity
 	return current.Identity(t.Context())
 }
 
+// putSessionValue stores value under key in the client's session, e.g. a corrupt one.
+func (f *fixture) putSessionValue(t *testing.T, browser *client, key, value string) {
+	t.Helper()
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody)
+	for _, cookie := range browser.cookies {
+		request.AddCookie(cookie)
+	}
+	current, err := f.sessions.Open(request)
+	require.NoError(t, err)
+	require.NoError(t, current.Put(t.Context(), key, []byte(value), time.Minute))
+}
+
 // failingStorage fails the operation named in failing and delegates everything else.
 type failingStorage struct {
 	*MemoryStorage
