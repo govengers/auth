@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -171,6 +172,9 @@ func TestKeycloakRefusesALoginWithoutARequiredRealmRoleWithoutNamingIt(t *testin
 	require.JSONEq(t, `{"code":"forbidden","message":"access denied"}`, callback.body)
 	require.NotContains(t, callback.body, "superuser")
 	require.Equal(t, http.StatusUnauthorized, person.get(running.baseURL+"/auth/api", nil).status, "no session")
+	require.Eventually(t, func() bool { // the operator learns the reason from the wide event, written after the answer
+		return strings.Contains(running.output.String(), `"reason":"missing realm role superuser"`)
+	}, 5*time.Second, 20*time.Millisecond)
 }
 
 func TestBootFailsWhenTheIssuerIsUnreachable(t *testing.T) {
