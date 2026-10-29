@@ -172,7 +172,7 @@ func validateBackupCodes(alphabet string, length int) error {
 		return errors.New("BackupCodeAlphabet contains white space")
 	case len(characters) < 2:
 		return errors.New("BackupCodeAlphabet needs at least 2 distinct characters")
-	case length*widest > maximumPasswordLength:
+	case length > maximumPasswordLength/widest: // length*widest > maximumPasswordLength, without the overflow
 		return fmt.Errorf("BackupCodeLength %d makes codes longer than %d bytes", length, maximumPasswordLength)
 	case math.Pow(float64(len(characters)), float64(length)) < minimumBackupCodeSpace:
 		return fmt.Errorf("BackupCodeLength %d over %d characters makes fewer than %d codes", length, len(characters), minimumBackupCodeSpace)
