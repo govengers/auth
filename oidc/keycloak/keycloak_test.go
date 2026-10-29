@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -283,6 +285,40 @@ func TestEnrichFailuresArePlainErrors(t *testing.T) {
 			require.Equal(t, http.StatusInternalServerError, status)
 			require.NotContains(t, err.Error(), serviceSecret)
 			require.NotContains(t, err.Error(), "wrong")
+		})
+	}
+}
+
+func TestTokenEndpointErrorsCarryOnlyTheirStatus(t *testing.T) {
+	const marker = "alice@example.com"
+	testCases := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+	}{
+		{name: "refusal with a description", status: http.StatusUnauthorized, contentType: "application/json", body: `{"error":"invalid_client","error_description":"` + marker + `"}`},
+		{name: "outage as a page", status: http.StatusBadGateway, contentType: "text/html", body: "<p>" + marker + "</p>"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			answer := func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+					if !strings.HasSuffix(request.URL.Path, "/protocol/openid-connect/token") {
+						next.ServeHTTP(writer, request)
+						return
+					}
+					writer.Header().Set("Content-Type", testCase.contentType)
+					writer.WriteHeader(testCase.status)
+					_, _ = writer.Write([]byte(testCase.body)) // the test reads the outcome from Enrich
+				})
+			}
+			client := newClient(t, startKeycloak(t, nil, answer), nil)
+
+			_, err := client.Enrich(t.Context(), loginIdentity())
+
+			require.ErrorContains(t, err, "token endpoint answered HTTP "+strconv.Itoa(testCase.status))
+			require.NotContains(t, err.Error(), marker, "the IdP's free text stays out of outcomes and events")
 		})
 	}
 }

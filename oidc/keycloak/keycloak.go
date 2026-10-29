@@ -216,6 +216,11 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 		return c.adminToken, nil
 	}
 	token, err := c.requestToken(context.WithValue(ctx, oauth2.HTTPClient, c.options.HTTPClient))
+	var retrieveError *oauth2.RetrieveError
+	if errors.As(err, &retrieveError) {
+		// the status only: the answer's description and body are Keycloak's free text (LOG-009)
+		return "", fmt.Errorf("request admin token: token endpoint answered HTTP %d", retrieveError.Response.StatusCode)
+	}
 	if err != nil {
 		return "", dependency.Error("request admin token", err)
 	}
