@@ -65,6 +65,19 @@ func ExternalURL(raw string) (string, error) {
 	return strings.TrimSuffix(raw, "/"), nil
 }
 
+// IsTarget reports whether raw is a valid redirect target: a same-origin path (SafeReturnPath) or an
+// absolute http(s) URL with a host.
+func IsTarget(raw string) bool {
+	_, ok := SafeReturnPath(raw)
+	return ok || IsAbsoluteHTTPURL(raw)
+}
+
+// IsAbsoluteHTTPURL reports whether raw parses as an http or https URL with a host.
+func IsAbsoluteHTTPURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
+}
+
 // IsSecureURL reports whether raw is an absolute https URL, or an http URL on a loopback host (localhost,
 // 127.0.0.0/8, ::1), without user info: credentials never travel in clear text, tests run on 127.0.0.1
 // (design D16).

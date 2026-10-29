@@ -132,22 +132,13 @@ func validateURLs(options Options) error {
 	if !pathPrefixPattern.MatchString(options.PathPrefix) {
 		return errors.New("PathPrefix must be a path like \"/auth/github\" without a trailing \"/\"")
 	}
-	if !isRedirectTarget(options.PostLogoutURL) {
+	if !redirect.IsTarget(options.PostLogoutURL) {
 		return errors.New("PostLogoutURL must be an absolute http(s) URL or a path starting with \"/\"")
 	}
-	if options.ErrorURL != "" && !isRedirectTarget(options.ErrorURL) {
+	if options.ErrorURL != "" && !redirect.IsTarget(options.ErrorURL) {
 		return errors.New("ErrorURL must be an absolute http(s) URL or a path starting with \"/\"")
 	}
 	return nil
-}
-
-// isRedirectTarget accepts a same-origin path or an absolute http(s) URL with a host.
-func isRedirectTarget(target string) bool {
-	if _, ok := redirect.SafeReturnPath(target); ok {
-		return true
-	}
-	parsed, err := url.Parse(target)
-	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
 // withParsedTeams replaces the three team lists by validated, lower-cased copies.

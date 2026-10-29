@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -123,7 +122,7 @@ func discover(ctx context.Context, options Options) (*gooidc.Provider, providerM
 	if err := discovered.Claims(&metadata); err != nil {
 		return nil, providerMetadata{}, dependencyError("read provider metadata", err)
 	}
-	if metadata.EndSessionEndpoint != "" && !isAbsoluteHTTPURL(metadata.EndSessionEndpoint) {
+	if metadata.EndSessionEndpoint != "" && !redirect.IsAbsoluteHTTPURL(metadata.EndSessionEndpoint) {
 		return nil, providerMetadata{}, errors.New("discovered end_session_endpoint is not an absolute http(s) URL")
 	}
 	return discovered, metadata, nil
@@ -216,7 +215,7 @@ func withURLs(resolved Options) (Options, error) {
 	if resolved.PostLogoutURL == "" {
 		resolved.PostLogoutURL = external + "/"
 	}
-	if !isAbsoluteHTTPURL(resolved.PostLogoutURL) {
+	if !redirect.IsAbsoluteHTTPURL(resolved.PostLogoutURL) {
 		return Options{}, errors.New("post-logout URL must be an absolute http(s) URL")
 	}
 	if resolved.ErrorURL, err = absoluteErrorURL(resolved.ErrorURL, external); err != nil {
@@ -237,7 +236,7 @@ func absoluteErrorURL(errorURL, external string) (string, error) {
 	if path, ok := redirect.SafeReturnPath(errorURL); ok {
 		return external + path, nil
 	}
-	if !isAbsoluteHTTPURL(errorURL) {
+	if !redirect.IsAbsoluteHTTPURL(errorURL) {
 		return "", errors.New("error URL must be an absolute http(s) URL or a path starting with \"/\"")
 	}
 	return errorURL, nil
@@ -275,11 +274,6 @@ func lowerCaseDomains(domains []string) ([]string, error) {
 
 func isSpaceOrControl(character rune) bool {
 	return character <= ' ' || character == 0x7f
-}
-
-func isAbsoluteHTTPURL(raw string) bool {
-	parsed, err := url.Parse(raw)
-	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
 // dependencyError keeps the message of a go-oidc or oauth2 error and drops its chain, so callers cannot

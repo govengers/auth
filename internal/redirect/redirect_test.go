@@ -202,3 +202,47 @@ func TestIsSecureURL(t *testing.T) {
 		})
 	}
 }
+
+func TestIsTarget(t *testing.T) {
+	testCases := []struct {
+		raw  string
+		want bool
+	}{
+		{raw: "/", want: true},
+		{raw: "/login?lang=de", want: true},
+		{raw: "https://app.example/login", want: true},
+		{raw: "http://app.example", want: true},
+		{raw: "", want: false},
+		{raw: "login", want: false},
+		{raw: "//evil.example", want: false},
+		{raw: "/\\evil.example", want: false},
+		{raw: "https://", want: false},
+		{raw: "https:app.example", want: false},
+		{raw: "javascript:alert(1)", want: false},
+		{raw: "ftp://app.example", want: false},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.raw, func(t *testing.T) {
+			require.Equal(t, testCase.want, IsTarget(testCase.raw))
+		})
+	}
+}
+
+func TestIsAbsoluteHTTPURL(t *testing.T) {
+	testCases := []struct {
+		raw  string
+		want bool
+	}{
+		{raw: "https://idp.example/logout?x=1", want: true},
+		{raw: "http://127.0.0.1:8080", want: true},
+		{raw: "/logout", want: false},
+		{raw: "https://", want: false},
+		{raw: "ftp://idp.example", want: false},
+		{raw: "https://idp.example/%zz", want: false},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.raw, func(t *testing.T) {
+			require.Equal(t, testCase.want, IsAbsoluteHTTPURL(testCase.raw))
+		})
+	}
+}

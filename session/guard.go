@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/govengers/auth"
@@ -57,7 +56,7 @@ func NewGuard(options *GuardOptions) (*Guard, error) {
 	if resolved.LoginURL == "" {
 		resolved.LoginURL = "/"
 	}
-	if !isLoginURL(resolved.LoginURL) {
+	if !redirect.IsTarget(resolved.LoginURL) {
 		return nil, errors.New("session guard: LoginURL must be an absolute http(s) URL or a path starting with \"/\"")
 	}
 	if resolved.RefreshInterval == 0 {
@@ -72,14 +71,6 @@ func NewGuard(options *GuardOptions) (*Guard, error) {
 	}
 	resolved.Refreshers = nil
 	return &Guard{options: resolved, refreshers: refreshers, now: time.Now}, nil
-}
-
-func isLoginURL(loginURL string) bool {
-	if _, ok := redirect.SafeReturnPath(loginURL); ok {
-		return true
-	}
-	parsed, err := url.Parse(loginURL)
-	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
 func refreshersByName(refreshers []Refresher) (map[string]Refresher, error) {
