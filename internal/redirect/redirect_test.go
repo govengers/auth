@@ -191,6 +191,9 @@ func TestIsSecureURL(t *testing.T) {
 		{raw: "http://[::1%25lo0]:8080", want: false},
 		{raw: "ftp://idp.example.com", want: false},
 		{raw: "https://", want: false},
+		{raw: "https://:443", want: false},
+		{raw: "https://:443/realms/x", want: false},
+		{raw: "http://:8080", want: false},
 		{raw: "https://user@idp.example.com", want: false},
 		{raw: "http://user:secret@127.0.0.1", want: false},
 		{raw: "/realms/x", want: false},
@@ -237,6 +240,7 @@ func TestIsAbsoluteHTTPURL(t *testing.T) {
 		{raw: "http://127.0.0.1:8080", want: true},
 		{raw: "/logout", want: false},
 		{raw: "https://", want: false},
+		{raw: "https://:443/logout", want: false},
 		{raw: "ftp://idp.example", want: false},
 		{raw: "https://idp.example/%zz", want: false},
 	}

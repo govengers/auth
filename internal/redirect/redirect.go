@@ -115,18 +115,18 @@ func IsTarget(raw string) bool {
 	return ok || IsAbsoluteHTTPURL(raw)
 }
 
-// IsAbsoluteHTTPURL reports whether raw parses as an http or https URL with a host.
+// IsAbsoluteHTTPURL reports whether raw parses as an http or https URL with a host name.
 func IsAbsoluteHTTPURL(raw string) bool {
 	parsed, err := url.Parse(raw)
-	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Hostname() != ""
 }
 
-// IsSecureURL reports whether raw is an absolute https URL, or an http URL on a loopback host (localhost,
-// 127.0.0.0/8, ::1), without user info: credentials never travel in clear text, tests run on 127.0.0.1
-// (design D16).
+// IsSecureURL reports whether raw is an absolute https URL with a host name, or an http URL on a loopback
+// host (localhost, 127.0.0.0/8, ::1), without user info: credentials never travel in clear text, tests run
+// on 127.0.0.1 (design D16).
 func IsSecureURL(raw string) bool {
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" || parsed.User != nil {
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil {
 		return false
 	}
 	return parsed.Scheme == "https" || (parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname()))
