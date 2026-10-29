@@ -83,7 +83,7 @@ func TestTheRedisClientHonoursTheContextDeadline(t *testing.T) {
 }
 
 func TestNewSessionsFailsWhenRedisDoesNotAnswer(t *testing.T) {
-	address, _ := fakeRedis(t, func(connection net.Conn) { _ = connection.Close() })
+	address, _ := fakeRedis(t, func(connection net.Conn) { _ = connection.Close() }) // the fake drops the connection on purpose
 
 	created, err := newSessionStore(t.Context(), redisConfiguration(address), testDependencies(t))
 
