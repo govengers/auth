@@ -8,10 +8,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -461,7 +463,7 @@ func answer(status int, contentType, body string) http.HandlerFunc {
 }
 
 // answeringTransport answers requests to path itself and passes the others on. The reason phrase of its
-// status line defaults to the standard one; withoutBody answers with a nil Body.
+// status line defaults to the standard one; withoutBody answers with a nil Body, endless with endless's.
 type answeringTransport struct {
 	path        string
 	status      int
@@ -469,6 +471,7 @@ type answeringTransport struct {
 	contentType string
 	body        string
 	withoutBody bool
+	endless     *endlessBody
 }
 
 func (a *answeringTransport) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -482,5 +485,57 @@ func (a *answeringTransport) RoundTrip(request *http.Request) (*http.Response, e
 	if a.withoutBody {
 		response.Body = nil
 	}
+	if a.endless != nil {
+		response.Body = a.endless
+	}
 	return response, nil
+}
+
+// endlessBody is an answer body of 4 MiB spaces, far beyond any limit, that counts the bytes read from it.
+// It ends so that a missing limit fails the test instead of filling the memory.
+type endlessBody struct {
+	read atomic.Int64
+}
+
+func (e *endlessBody) Read(buffer []byte) (int, error) {
+	remaining := 4<<20 - e.read.Load()
+	if remaining <= 0 {
+		return 0, io.EOF
+	}
+	buffer = buffer[:min(int64(len(buffer)), remaining)]
+	for index := range buffer {
+		buffer[index] = ' '
+	}
+	e.read.Add(int64(len(buffer)))
+	return len(buffer), nil
+}
+
+func (*endlessBody) Close() error { return nil }
+
+// redirectToSink starts a sink and returns a handler that redirects every request with status to the
+// sink, and a function counting the sink's requests.
+func redirectToSink(t *testing.T, status int) (http.Handler, func() int) {
+	t.Helper()
+	var reached atomic.Int32
+	sink := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached.Add(1) }))
+	t.Cleanup(sink.Close)
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, sink.URL+"/token", status)
+	}), func() int { return int(reached.Load()) }
+}
+
+func TestCallbackFollowsNoRedirectOfTheTokenEndpoint(t *testing.T) {
+	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			redirecting, sinkRequests := redirectToSink(t, status)
+			issuer := startIssuer(t, func(options *fakeprovider.OIDCOptions) { options.TokenAnswer = redirecting })
+			application := newApplication(t, issuer, nil)
+
+			response := newBrowser(t).signIn(application, prefix+"/login")
+
+			require.Equal(t, http.StatusInternalServerError, response.Code, "a redirecting token endpoint is an outage, not a refusal")
+			require.ErrorContains(t, application.outcomes.last(t).Err, "redirect refused")
+			require.Zero(t, sinkRequests(), "the client secret, code and verifier never reach the redirect's target")
+		})
+	}
 }

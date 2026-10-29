@@ -94,7 +94,7 @@ func (a *apiTransport) RoundTrip(request *http.Request) (*http.Response, error) 
 // exchange trades the authorization code for a token, proving the PKCE verifier. GitHub refusing the
 // code (an error answer below 500) is a refusal (login_failed); a GitHub outage is a plain error.
 func (p *Provider) exchange(ctx context.Context, code, verifier string) (*oauth2.Token, error) {
-	token, err := p.oauth.Exchange(context.WithValue(ctx, oauth2.HTTPClient, p.options.HTTPClient), code, oauth2.VerifierOption(verifier))
+	token, err := p.oauth.Exchange(context.WithValue(ctx, oauth2.HTTPClient, p.upstream), code, oauth2.VerifierOption(verifier))
 	switch {
 	case tokenendpoint.Refused(err):
 		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Code: oauthlogin.CodeLoginFailed, Reason: "token exchange", Err: tokenendpoint.Error("github: exchange code", err)}
@@ -190,7 +190,7 @@ func (p *Provider) revokeToken(ctx context.Context, token *oauth2.Token) error {
 	request.Header.Set("Accept", apiMediaType)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-GitHub-Api-Version", apiVersion)
-	response, err := p.options.HTTPClient.Do(request)
+	response, err := p.upstream.Do(request)
 	if err != nil {
 		return dependency.Error("github: revoke token", err)
 	}

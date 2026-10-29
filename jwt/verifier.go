@@ -39,7 +39,7 @@ type VerifierOptions struct {
 	Issuer          string        // required: expected iss
 	Audience        string        // optional: when set, aud must contain it
 	RefreshInterval time.Duration // default 1 h, at least 1 min; an unknown kid triggers a refetch at most once per minute
-	HTTPClient      *http.Client  // default 10 s timeout
+	HTTPClient      *http.Client  // default 10 s timeout; a redirect fails the JWKS fetch
 	HeaderName      string        // default "Authorization", value "Bearer <token>"
 	Observer        auth.Observer // optional; Middleware reports one ActionAuthenticate outcome per request
 }
@@ -93,6 +93,7 @@ func resolveVerifierOptions(options *VerifierOptions) (VerifierOptions, error) {
 	if resolved.HTTPClient == nil {
 		resolved.HTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
+	resolved.HTTPClient = dependency.WithoutRedirects(resolved.HTTPClient)
 	if resolved.HeaderName == "" {
 		resolved.HeaderName = defaultHeaderName
 	}

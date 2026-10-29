@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,5 +133,32 @@ func rawAnswer(answer string) http.HandlerFunc {
 		}
 		_, _ = connection.Write([]byte(answer)) // the client may already have given up
 		_ = connection.Close()                  // nothing to flush
+	}
+}
+
+func TestWithoutRedirectsSendsNothingToTheRedirectsTarget(t *testing.T) {
+	for _, status := range []int{http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			reached := false
+			target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
+			t.Cleanup(target.Close)
+			endpoint := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				http.Redirect(writer, request, target.URL+"/token", status)
+			}))
+			t.Cleanup(endpoint.Close)
+			caller := &http.Client{Timeout: time.Second}
+			request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, endpoint.URL+"/token", strings.NewReader("client_secret="+canary))
+			require.NoError(t, err)
+
+			response, err := WithoutRedirects(caller).Do(request)
+			if response != nil {
+				_ = response.Body.Close() // net/http has closed it already when CheckRedirect fails
+			}
+
+			require.Error(t, err)
+			require.False(t, reached, "the redirect's target gets no request")
+			require.EqualError(t, Error("exchange code", err), `exchange code: Post "`+target.URL+`": redirect refused`)
+			require.Nil(t, caller.CheckRedirect, "the caller's client is unchanged")
+		})
 	}
 }

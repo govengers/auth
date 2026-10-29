@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -423,4 +424,46 @@ func (f *failFirst) wrap(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(writer, request)
 	})
+}
+
+func TestEnrichFollowsNoRedirect(t *testing.T) {
+	testCases := []struct {
+		name      string
+		path      string // suffix of the redirected request's path
+		grantType GrantType
+	}{
+		{name: "client credentials token", path: "/protocol/openid-connect/token", grantType: GrantTypeClientCredentials},
+		{name: "password token", path: "/protocol/openid-connect/token", grantType: GrantTypePassword},
+		{name: "admin API", path: "/role-mappings/realm/composite", grantType: GrantTypeClientCredentials},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var sinkRequests atomic.Int32
+			sink := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { sinkRequests.Add(1) }))
+			t.Cleanup(sink.Close)
+			redirect := func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+					if !strings.HasSuffix(request.URL.Path, testCase.path) {
+						next.ServeHTTP(writer, request)
+						return
+					}
+					http.Redirect(writer, request, sink.URL+"/token", http.StatusTemporaryRedirect)
+				})
+			}
+			keycloak := startKeycloak(t, func(options *fakeprovider.OIDCOptions) {
+				options.KeycloakUsername, options.KeycloakPassword = "admin", "admin-password"
+			}, redirect)
+			client := newClient(t, keycloak, func(options *Options) {
+				if testCase.grantType == GrantTypePassword {
+					options.GrantType, options.Username, options.Password = GrantTypePassword, "admin", "admin-password"
+					options.ClientID, options.ClientSecret = "", ""
+				}
+			})
+
+			_, err := client.Enrich(t.Context(), loginIdentity())
+
+			require.ErrorContains(t, err, "redirect refused")
+			require.Zero(t, sinkRequests.Load(), "neither the service account's credentials nor the admin token reach the redirect's target")
+		})
+	}
 }

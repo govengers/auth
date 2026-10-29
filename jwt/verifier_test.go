@@ -171,6 +171,7 @@ func TestNewVerifierFailsWhenTheJWKSCannotBeFetched(t *testing.T) {
 		{name: "larger than 1 MiB", jwksURL: newKeySetServer(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 			_, _ = writer.Write([]byte(`{"keys":[],"padding":"` + strings.Repeat("x", 1<<20) + `"}`)) // a lost write fails the test
 		})).server.URL, wantError: "is larger than 1 MiB"},
+		{name: "redirect", jwksURL: newKeySetServer(t, http.RedirectHandler(newKeySetServer(t, truncatedKeySet).server.URL, http.StatusFound)).server.URL, wantError: "redirect refused"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

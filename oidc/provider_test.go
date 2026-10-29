@@ -139,6 +139,53 @@ func TestDiscoveryErrorsCarryNoAnswerText(t *testing.T) {
 	}
 }
 
+func TestDiscoveryReadsNoBodyBeyondTheDocumentLimit(t *testing.T) {
+	testCases := []struct {
+		status      int
+		wantMaximum int64
+	}{
+		{status: http.StatusOK, wantMaximum: 1<<20 + 1},
+		{status: http.StatusServiceUnavailable, wantMaximum: 0},
+	}
+	for _, testCase := range testCases {
+		t.Run(http.StatusText(testCase.status), func(t *testing.T) {
+			body := &endlessBody{}
+			options := discoveryOptions(t, startIssuer(t, nil).IssuerURL())
+			options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: &answeringTransport{
+				path: "/.well-known/openid-configuration", status: testCase.status, contentType: "application/json", endless: body,
+			}}
+
+			_, err := oidc.New(t.Context(), options)
+
+			require.Error(t, err)
+			require.LessOrEqual(t, body.read.Load(), testCase.wantMaximum)
+		})
+	}
+}
+
+func TestDiscoveryDropsAnOversizedDocument(t *testing.T) {
+	document := `{"issuer":"` + strings.Repeat("a", 1<<20) + `"}`
+	options := discoveryOptions(t, startIssuer(t, nil).IssuerURL())
+	options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: &answeringTransport{
+		path: "/.well-known/openid-configuration", status: http.StatusOK, contentType: "application/json", body: document,
+	}}
+
+	_, err := oidc.New(t.Context(), options)
+
+	require.ErrorContains(t, err, `failed to decode provider discovery object: expected Content-Type = application/json, got ""`)
+}
+
+func TestDiscoveryFollowsNoRedirect(t *testing.T) {
+	redirecting, sinkRequests := redirectToSink(t, http.StatusFound)
+	issuer := httptest.NewServer(redirecting)
+	t.Cleanup(issuer.Close)
+
+	_, err := oidc.New(t.Context(), discoveryOptions(t, issuer.URL))
+
+	require.ErrorContains(t, err, "redirect refused")
+	require.Zero(t, sinkRequests(), "the discovery document comes from the issuer, never from where it points")
+}
+
 func discoveryOptions(t *testing.T, issuer string) *oidc.Options {
 	t.Helper()
 	return &oidc.Options{Name: "test", Issuer: issuer, ClientID: clientID, ClientSecret: clientSecret, ExternalURL: externalURL, Sessions: newStore(t)}

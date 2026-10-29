@@ -13,6 +13,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/internal/failure"
 	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/session"
@@ -43,7 +44,7 @@ type Options struct {
 	AdminTeams             []string        // members get auth.RoleAdmin (they still need an AllowedTeams membership)
 	RelevantTeams          []string        // extra teams kept in Identity.Teams
 	Sessions               *session.Store  // required
-	HTTPClient             *http.Client    // default 10 s timeout; token exchange, GitHub API, revocation
+	HTTPClient             *http.Client    // default 10 s timeout; token exchange, GitHub API, revocation (a redirect fails the exchange and the revocation)
 	OnLogin                auth.Hook       // optional: maps or refuses the identity before the session exists
 	OnLogout               auth.LogoutHook // optional
 	Observer               auth.Observer   // optional
@@ -54,7 +55,8 @@ type Options struct {
 type Provider struct {
 	options  Options // resolved copy: defaults applied, slices cloned, team lists lower-cased
 	oauth    *oauth2.Config
-	api      *url.URL // parsed APIURL: the only scheme and host the session's token is sent to
+	api      *url.URL     // parsed APIURL: the only scheme and host the session's token is sent to
+	upstream *http.Client // HTTPClient without redirects, for the calls carrying the client secret
 	reporter *failure.Reporter
 }
 
@@ -76,7 +78,7 @@ func New(options *Options) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("github: %w", err)
 	}
-	return &Provider{options: resolved, oauth: oauthConfiguration(resolved), api: api, reporter: reporter}, nil
+	return &Provider{options: resolved, oauth: oauthConfiguration(resolved), api: api, upstream: dependency.WithoutRedirects(resolved.HTTPClient), reporter: reporter}, nil
 }
 
 // Name returns "github", the Identity.Provider of every identity this provider creates.

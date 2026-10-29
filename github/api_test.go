@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -242,4 +243,39 @@ func TestExchangeKeepsACancelledContextDetectable(t *testing.T) {
 	_, err = provider.exchange(cancelled, "the-code", "the-verifier")
 
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+// redirectToSink starts a sink and an endpoint that answers every request with a redirect of status to the
+// sink; it returns the endpoint's URL and a function counting the sink's requests.
+func redirectToSink(t *testing.T, status int) (string, func() int) {
+	t.Helper()
+	var reached atomic.Int32
+	sink := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached.Add(1) }))
+	t.Cleanup(sink.Close)
+	endpoint := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, sink.URL+"/token", status)
+	}))
+	t.Cleanup(endpoint.Close)
+	return endpoint.URL, func() int { return int(reached.Load()) }
+}
+
+func TestExchangeAndRevocationFollowNoRedirect(t *testing.T) {
+	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			endpoint, sinkRequests := redirectToSink(t, status)
+			options := validOptions(t)
+			options.TokenURL, options.APIURL = endpoint+"/login/oauth/access_token", endpoint
+			provider, err := New(options)
+			require.NoError(t, err)
+
+			_, exchangeError := provider.exchange(t.Context(), "the-code", "the-verifier")
+			revokeError := provider.revokeToken(t.Context(), &oauth2.Token{AccessToken: "gho_secret"})
+
+			require.ErrorContains(t, exchangeError, "redirect refused")
+			status, _ := auth.ResponseFor(exchangeError)
+			require.Equal(t, http.StatusInternalServerError, status, "a redirecting token endpoint is an outage, not a refusal")
+			require.ErrorContains(t, revokeError, "redirect refused")
+			require.Zero(t, sinkRequests(), "the client secret, code and verifier never reach the redirect's target")
+		})
+	}
 }

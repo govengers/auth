@@ -59,9 +59,9 @@ type Options struct {
 	Username, Password  string    // required for the password grant
 	ClientRolesClientID string    // optional: clientId whose client roles become OIDCClientRoles
 	RequiredRealmRoles  []string
-	RequiredClientRoles []string // needs ClientRolesClientID
-	RequiredGroups      []string // group paths ("/parent/child")
-	HTTPClient          *http.Client
+	RequiredClientRoles []string     // needs ClientRolesClientID
+	RequiredGroups      []string     // group paths ("/parent/child")
+	HTTPClient          *http.Client // default 10 s timeout; a redirect fails the call
 }
 
 // Client reads users' authorization from the Keycloak Admin API. It caches its access token until 30 s
@@ -114,6 +114,7 @@ func resolveOptions(options *Options) (Options, error) {
 	if resolved.HTTPClient == nil {
 		resolved.HTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
+	resolved.HTTPClient = dependency.WithoutRedirects(resolved.HTTPClient)
 	if err := validate(resolved); err != nil {
 		return Options{}, fmt.Errorf("keycloak: %w", err)
 	}

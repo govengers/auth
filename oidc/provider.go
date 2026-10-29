@@ -24,7 +24,11 @@ import (
 	"github.com/govengers/auth/session"
 )
 
-const defaultHTTPTimeout = 10 * time.Second
+const (
+	defaultHTTPTimeout = 10 * time.Second
+	// maximumDocumentBytes bounds a discovery document or JWKS; real ones are a few KiB.
+	maximumDocumentBytes = 1 << 20
+)
 
 var (
 	namePattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
@@ -47,7 +51,7 @@ type Options struct {
 	AllowedEmailDomains          []string        // optional: requires email_verified=true and a matching domain (case-insensitive, exact)
 	DisableIframeLogoutDetection bool            // stop treating Sec-Fetch-Dest: iframe on /logout as front-channel; a cross-site iframe load of /logout is then refused (403)
 	Sessions                     *session.Store  // required
-	HTTPClient                   *http.Client    // default 10 s timeout; used for discovery, token exchange, JWKS
+	HTTPClient                   *http.Client    // default 10 s timeout; used for discovery, token exchange, JWKS; a redirect fails the call
 	OnLogin                      auth.Hook       // e.g. keycloak.Client.Enrich, or an app closure calling it and then provisioning
 	OnLogout                     auth.LogoutHook // runs after a session was ended by /logout or /frontchannel-logout
 	Observer                     auth.Observer   // optional; one outcome per request
@@ -160,10 +164,11 @@ func insecureEndpoint(endpoint oauth2.Endpoint, metadata providerMetadata) strin
 }
 
 // withoutFreeText returns a copy of client for go-oidc's discovery and JWKS requests that rebuilds every
-// answer's status line from its code and keeps the body only of a 200 answer holding JSON, and otherwise
-// also its Content-Type: go-oidc copies the status line, body and Content-Type of a failed request into
-// its errors, and all are the server's free text (LOG-009). The token exchange keeps the plain client:
-// oauth2 needs the body's error code.
+// answer's status line from its code and keeps the body only of a 200 answer holding JSON of at most
+// maximumDocumentBytes, and otherwise also its Content-Type: go-oidc copies the status line, body and
+// Content-Type of a failed request into its errors, and all are the server's free text (LOG-009). The body
+// of another answer is never read, and a 200 body only up to the limit, so an IdP cannot fill the memory.
+// The token exchange keeps the plain client: oauth2 needs the body's error code.
 func withoutFreeText(client *http.Client) *http.Client {
 	next := client.Transport
 	if next == nil {
@@ -188,12 +193,15 @@ func (f freeTextFilter) RoundTrip(request *http.Request) (*http.Response, error)
 	if response.Body == nil {
 		response.Body = http.NoBody // http.Client accepts a RoundTripper's answer without one
 	}
-	body, err := io.ReadAll(response.Body)
-	_ = response.Body.Close() // fully read: a close error loses nothing
+	var body []byte
+	if response.StatusCode == http.StatusOK {
+		body, err = io.ReadAll(io.LimitReader(response.Body, maximumDocumentBytes+1))
+	}
+	_ = response.Body.Close() // read as far as needed: a close error loses nothing
 	if err != nil {
 		return nil, fmt.Errorf("read answer of %s: %w", request.URL.Path, err)
 	}
-	if response.StatusCode != http.StatusOK || !json.Valid(body) {
+	if len(body) > maximumDocumentBytes || !json.Valid(body) {
 		body = nil
 		response.Header.Del("Content-Type")
 	}
@@ -272,6 +280,7 @@ func withDefaults(resolved Options) (Options, error) {
 	if resolved.HTTPClient == nil {
 		resolved.HTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
+	resolved.HTTPClient = dependency.WithoutRedirects(resolved.HTTPClient)
 	return resolved, nil
 }
 
