@@ -105,7 +105,7 @@ func (s *Store) Start(ctx context.Context, writer http.ResponseWriter, request *
 		return Session{}, fmt.Errorf("start session: %w", err)
 	}
 	http.SetCookie(writer, sessionCookie(s.options, cookieValue, int(s.options.MaxAge/time.Second)))
-	return Session{store: s, id: sessionIDOf(cookieValue), started: true}, nil
+	return Session{store: s, id: sessionIDOf(cookieValue), startedAt: s.now()}, nil
 }
 
 // Open returns the handle of the request's session from its cookie (no I/O). No or malformed cookie: *auth.Error ErrUnauthenticated.

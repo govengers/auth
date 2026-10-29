@@ -17,9 +17,9 @@ const identityKey = "identity"
 // a value that does not decrypt (moved, tampered, other key) counts as absent. A Session is safe for
 // concurrent use; the zero value is not usable.
 type Session struct {
-	store   *Store
-	id      string
-	started bool // returned by Start: SaveIdentity may begin the absolute lifetime
+	store     *Store
+	id        string
+	startedAt time.Time // set by Start: the first SaveIdentity begins the absolute lifetime here; zero when opened
 }
 
 // identityEnvelope is the persistence format of the "identity" key; never rename the tags.
@@ -68,11 +68,12 @@ func (s Session) Pop(ctx context.Context, key string) ([]byte, bool, error) {
 	return value, found, nil
 }
 
-// SaveIdentity stores identity under key "identity". The first save of a session sets authenticatedAt=now;
-// later saves (refresh, TOTP enable, impersonation) keep it. refreshedAt=now. TTL = authenticatedAt + MaxAge - now.
-// Only a session returned by Start may have a first save: on a session opened from a cookie without an
-// identity (never authenticated, expired, revoked) it refuses with ErrUnauthenticated, so neither a
-// planted cookie nor a save racing the expiry gets a fresh lifetime.
+// SaveIdentity stores identity under key "identity". The first save of a session sets authenticatedAt to
+// the time Start issued it; later saves (refresh, TOTP enable, impersonation) keep it. refreshedAt=now.
+// TTL = authenticatedAt + MaxAge - now. Only a session returned by Start may have a first save: on a
+// session opened from a cookie without an identity (never authenticated, expired, revoked) it refuses with
+// ErrUnauthenticated, so neither a planted cookie, a save racing the expiry nor a retained Start handle
+// gets a fresh lifetime.
 func (s Session) SaveIdentity(ctx context.Context, identity *auth.Identity) error {
 	if identity == nil {
 		return errors.New("save session identity: identity is nil")
@@ -100,14 +101,14 @@ func (s Session) open(key string, sealed []byte, found bool) ([]byte, bool) {
 	return open(s.store.options.EncryptionKey, s.id, key, sealed)
 }
 
-// authenticatedAt is when the session's identity was first saved: now for a started session without one.
+// authenticatedAt is when the session's lifetime began: its start for a started session without identity.
 func (s Session) authenticatedAt(ctx context.Context) (time.Time, error) {
 	envelope, err := s.envelope(ctx)
 	if err == nil {
 		return envelope.AuthenticatedAt, nil
 	}
-	if s.started && errors.Is(err, auth.ErrUnauthenticated) {
-		return s.store.now(), nil
+	if !s.startedAt.IsZero() && errors.Is(err, auth.ErrUnauthenticated) {
+		return s.startedAt, nil
 	}
 	return time.Time{}, err
 }

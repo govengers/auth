@@ -247,7 +247,7 @@ func TestOpen(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.Equal(t, sessionIDOf(validValue), current.id)
-			require.False(t, current.started)
+			require.Zero(t, current.startedAt)
 		})
 	}
 }

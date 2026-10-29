@@ -197,6 +197,25 @@ func TestIdentityExpiresAbsolutely(t *testing.T) {
 	require.ErrorIs(t, current.SaveIdentity(ctx, updated), auth.ErrUnauthenticated, "an expired session gets no fresh lifetime")
 }
 
+// A handle returned by Start, retained or copied past the absolute expiry, must not begin a second lifetime.
+func TestStartedHandleCannotRestartAnExpiredLifetime(t *testing.T) {
+	clock := newTestClock()
+	store := newTestStore(t, clock)
+	ctx := t.Context()
+	current, request := startSession(t, store)
+	copied := current
+	require.NoError(t, current.SaveIdentity(ctx, testIdentity()))
+
+	clock.advance(24*time.Hour + time.Second)
+
+	require.ErrorIs(t, current.SaveIdentity(ctx, testIdentity()), auth.ErrUnauthenticated, "retained handle")
+	require.ErrorIs(t, copied.SaveIdentity(ctx, testIdentity()), auth.ErrUnauthenticated, "copied handle")
+	opened, err := store.Open(request)
+	require.NoError(t, err)
+	_, err = opened.Identity(ctx)
+	require.ErrorIs(t, err, auth.ErrUnauthenticated, "the original cookie stays logged out")
+}
+
 func TestIdentityChecksTheEnvelopeExpiry(t *testing.T) {
 	clock := newTestClock()
 	store := newTestStore(t, clock)
