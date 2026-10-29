@@ -125,7 +125,8 @@ type reply struct {
 	body     any // nil: no body
 	result   auth.Result
 	identity *auth.Identity
-	err      error // the refusal or failure; with success or challenge a handled failure (degraded)
+	err      error // the refusal or failure; decides the response
+	degraded error // handled failures; reported with err, they never change the response
 }
 
 // refused answers err: a refusal with its status, anything else with 500.
@@ -141,16 +142,16 @@ func (p *Provider) route(method, path string, action auth.Action, handle func(wr
 	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		answer := handle(writer, request)
 		answer.write(writer)
-		p.reporter.Report(request.Context(), auth.Outcome{Action: action, Result: answer.result, Err: answer.err, Identity: answer.identity})
+		outcome := auth.Outcome{Action: action, Result: answer.result, Err: errors.Join(answer.err, answer.degraded), Identity: answer.identity}
+		p.reporter.Report(request.Context(), outcome)
 	})
 	return auth.Route{Method: method, Path: p.options.PathPrefix + path, Handler: handler}
 }
 
-// degradedBy returns the reply with err as its handled failure, unless it already carries an error.
+// degradedBy returns the reply with err as one more handled failure: the outcome of a success or challenge is
+// degraded, a refusal or failure reports it next to its own error.
 func (r reply) degradedBy(err error) reply {
-	if r.err == nil {
-		r.err = err
-	}
+	r.degraded = errors.Join(r.degraded, err)
 	return r
 }
 
