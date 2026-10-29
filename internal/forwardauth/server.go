@@ -171,7 +171,7 @@ func (s *Server) newEngine(metrics *httpMetrics) *gin.Engine {
 	engine := gin.New()
 	engine.Use(
 		wideevent.Middleware(
-			wideevent.WithEmitter(s.options.Emitter),
+			wideevent.WithEmitter(latestValues(s.options.Emitter)),
 			wideevent.WithSampler(sampler(s.options.SampleRate)),
 			wideevent.WithPreEnricher(s.recordRequest),
 			wideevent.WithSkipPaths(s.path("/health"), s.path("/ready")),

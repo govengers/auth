@@ -1,9 +1,11 @@
 package forwardauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"maps"
 	"net"
@@ -323,6 +325,30 @@ func TestTheWideEventCarriesARedactedQueryAndTheVersion(t *testing.T) {
 	encoded, err := json.Marshal(event)
 	require.NoError(t, err)
 	require.NotContains(t, string(encoded), "secret-")
+}
+
+func TestNeitherEmitterPrintsTheRawQuery(t *testing.T) {
+	callback := auth.Route{Method: http.MethodGet, Path: testRoutePath, Handler: http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusFound)
+	})}
+	testCases := []struct {
+		name       string
+		newEmitter func(writer io.Writer) wideevent.Emitter
+	}{
+		{name: "dev", newEmitter: func(writer io.Writer) wideevent.Emitter { return wideevent.DevWriterEmitter(writer) }},
+		{name: "json", newEmitter: wideevent.JSONWriterEmitter},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			output := &bytes.Buffer{}
+			testHarness := newHarness(t, harnessOptions{routes: []auth.Route{callback}, emitter: testCase.newEmitter(output)})
+
+			testHarness.serve(t, http.MethodGet, testRoutePath+"?code=secret-code&state=secret-state", nil)
+
+			require.Contains(t, output.String(), "code=redacted&state=redacted")
+			require.NotContains(t, output.String(), "secret-")
+		})
+	}
 }
 
 func TestTheSamplerKeepsFailuresRefusalsAndDegradedEvents(t *testing.T) {

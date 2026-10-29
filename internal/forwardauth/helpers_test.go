@@ -77,6 +77,7 @@ type harnessOptions struct {
 	sampleRate       int
 	routes           []auth.Route
 	readinessCheck   func(ctx context.Context) error
+	emitter          wideevent.Emitter // replaces the event recorder
 }
 
 func newHarness(t *testing.T, options harnessOptions) *harness {
@@ -103,6 +104,9 @@ func newHarness(t *testing.T, options harnessOptions) *harness {
 		SampleRate:       1,
 		MetricsRegistry:  registry,
 		ReadinessCheck:   options.readinessCheck,
+	}
+	if options.emitter != nil {
+		serverOptions.Emitter = options.emitter
 	}
 	if options.sampleRate != 0 {
 		serverOptions.SampleRate = options.sampleRate

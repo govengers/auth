@@ -5,6 +5,7 @@ package e2e
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,4 +84,15 @@ func TestTheWideEventsAreJSONLinesWithoutSecrets(t *testing.T) {
 	require.Contains(t, output, `"query":"code=redacted&state=redacted"`)
 	require.NotContains(t, output, fake.ClientSecret())
 	require.NotContains(t, output, "octocat@example.com", "no emails in the events")
+}
+
+func TestTheDevEmitterPrintsNoQueryValues(t *testing.T) {
+	fake := fakeprovider.StartGitHub(t, fakeprovider.GitHubOptions{})
+	running := start(t, merged(gitHubEnvironment(t, fake), map[string]string{"DEV_MODE": "true", "WIDE_EVENT_SAMPLE_RATE": "1"}))
+
+	refused := newBrowser(t).get(running.baseURL+"/auth/github/callback?code=dev-mode-code&state=dev-mode-state", nil)
+
+	require.GreaterOrEqual(t, refused.status, http.StatusBadRequest)
+	require.Eventually(t, func() bool { return strings.Contains(running.output.String(), "code=redacted&state=redacted") }, 5*time.Second, 20*time.Millisecond)
+	require.NotContains(t, running.output.String(), "dev-mode-")
 }
