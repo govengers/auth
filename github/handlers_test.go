@@ -944,11 +944,13 @@ func TestRefresh(t *testing.T) {
 		require.ErrorIs(t, err, auth.ErrUnauthenticated)
 	})
 	t.Run("unreadable token", func(t *testing.T) {
-		other := environment.sessionOf(t, startSessionWith(t, environment, identity))
-		require.NoError(t, other.Put(t.Context(), tokenKey, []byte("not json"), time.Minute))
-		_, err := environment.provider.Refresh(t.Context(), other, identity)
-		require.ErrorIs(t, err, auth.ErrUnauthenticated)
-		require.ErrorContains(t, err, "GitHub token does not decode", "a corrupt token is told apart from a missing one")
+		for stored, want := range map[string]string{"not json": "GitHub token does not decode", "{}": "session has no GitHub token"} {
+			other := environment.sessionOf(t, startSessionWith(t, environment, identity))
+			require.NoError(t, other.Put(t.Context(), tokenKey, []byte(stored), time.Minute))
+			_, err := environment.provider.Refresh(t.Context(), other, identity)
+			require.ErrorIs(t, err, auth.ErrUnauthenticated, stored)
+			require.ErrorContains(t, err, want, stored)
+		}
 	})
 	t.Run("nil identity", func(t *testing.T) {
 		_, err := environment.provider.Refresh(t.Context(), current, nil)
