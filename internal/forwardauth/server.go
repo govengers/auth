@@ -36,6 +36,10 @@ const (
 	readinessCheckTimeout = 2 * time.Second
 	shutdownTimeout       = 20 * time.Second // below the 30 s default termination grace period [LAY-003]
 	maximumPort           = 65535
+
+	// MaximumShutdownDelay keeps ShutdownDelay plus the 20 s drain within the 30 s default termination
+	// grace period of a pod [LAY-003].
+	MaximumShutdownDelay = 10 * time.Second
 )
 
 // pathPattern is an absolute path of one or more non-empty segments without a trailing "/" and without
@@ -65,7 +69,7 @@ type ServerOptions struct {
 	SampleRate        int                             // required, >= 1: keep every Nth successful event
 	MetricsRegistry   *prometheus.Registry            // required; runtime collectors registered by main [MET-002]
 	ReadinessCheck    func(ctx context.Context) error // optional (Redis ping)
-	ShutdownDelay     time.Duration                   // readiness answers 503 this long before the listeners drain
+	ShutdownDelay     time.Duration                   // 0..MaximumShutdownDelay; readiness answers 503 this long before the listeners drain
 }
 
 // Server serves the forward-auth routes and the metrics endpoint. Build it with NewServer and call Run once.
@@ -135,8 +139,8 @@ func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
 	if resolved.SampleRate < 1 {
 		problems = append(problems, fmt.Errorf("SampleRate %d must be at least 1", resolved.SampleRate))
 	}
-	if resolved.ShutdownDelay < 0 {
-		problems = append(problems, fmt.Errorf("ShutdownDelay %s must not be negative", resolved.ShutdownDelay))
+	if resolved.ShutdownDelay < 0 || resolved.ShutdownDelay > MaximumShutdownDelay {
+		problems = append(problems, fmt.Errorf("ShutdownDelay %s must be between 0 and %s", resolved.ShutdownDelay, MaximumShutdownDelay))
 	}
 	if len(problems) > 0 {
 		return ServerOptions{}, fmt.Errorf("forwardauth server: %w", errors.Join(problems...))

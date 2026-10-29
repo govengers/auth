@@ -92,6 +92,7 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 			configuration.SessionMaxAgeSeconds, configuration.SessionRefreshIntervalSeconds, configuration.JWTLifetimeSeconds = 0, 0, 0
 			configuration.SessionRedisDatabase = -1
 		}, problems: []string{"WIDE_EVENT_SAMPLE_RATE", "SHUTDOWN_DELAY_SECONDS", "SESSION_MAX_AGE_SECONDS", "SESSION_REFRESH_INTERVAL_SECONDS", "JWT_LIFETIME_SECONDS", "SESSION_REDIS_DATABASE"}},
+		{name: "shutdown delay beyond the grace period", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.ShutdownDelaySeconds = 11 }, problems: []string{"SHUTDOWN_DELAY_SECONDS 11 must be between 0 and 10"}},
 		{name: "session key not base64", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionEncryptionKey = "not base64!" }, problems: []string{"SESSION_ENCRYPTION_KEY"}},
 		{name: "session key too short", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionEncryptionKey = "c2hvcnQ=" }, problems: []string{"SESSION_ENCRYPTION_KEY"}},
 		{name: "unknown same site", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionSameSite = "Lax" }, problems: []string{"SESSION_SAME_SITE \"Lax\""}},

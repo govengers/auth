@@ -55,6 +55,7 @@ func TestNewServerValidatesOptions(t *testing.T) {
 		{name: "metrics port out of range", change: func(options *ServerOptions) { options.MetricsPort = 65536 }},
 		{name: "sample rate zero", change: func(options *ServerOptions) { options.SampleRate = 0 }},
 		{name: "negative shutdown delay", change: func(options *ServerOptions) { options.ShutdownDelay = -time.Second }},
+		{name: "shutdown delay beyond the grace period", change: func(options *ServerOptions) { options.ShutdownDelay = 11 * time.Second }},
 		{name: "jwt header with a space", change: func(options *ServerOptions) { options.JWTHeader = "X Auth" }},
 		{name: "jwt header the check answer sets", change: func(options *ServerOptions) { options.JWTHeader = "cache-control" }},
 	}

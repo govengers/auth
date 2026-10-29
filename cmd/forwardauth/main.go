@@ -580,10 +580,10 @@ func validateServer(configuration *Configuration) error {
 		problems = append(problems, fmt.Errorf("PATH_PREFIX %q must start with \"/\" and must not end with \"/\"", configuration.PathPrefix))
 	}
 	problems = append(problems,
-		portProblem("PORT", configuration.Port),
-		portProblem("METRICS_PORT", configuration.MetricsPort),
+		rangeProblem("PORT", configuration.Port, 1, maximumPort),
+		rangeProblem("METRICS_PORT", configuration.MetricsPort, 1, maximumPort),
 		minimumProblem("WIDE_EVENT_SAMPLE_RATE", configuration.WideEventSampleRate, 1),
-		minimumProblem("SHUTDOWN_DELAY_SECONDS", configuration.ShutdownDelaySeconds, 0),
+		rangeProblem("SHUTDOWN_DELAY_SECONDS", configuration.ShutdownDelaySeconds, 0, int(forwardauth.MaximumShutdownDelay/time.Second)),
 	)
 	if configuration.Port == configuration.MetricsPort {
 		problems = append(problems, fmt.Errorf("PORT and METRICS_PORT must differ, both are %d", configuration.Port))
@@ -712,9 +712,9 @@ func requireValues(condition string, values ...namedValue) error {
 	return errors.Join(problems...)
 }
 
-func portProblem(name string, port int) error {
-	if port < 1 || port > maximumPort {
-		return fmt.Errorf("%s %d must be between 1 and %d", name, port, maximumPort)
+func rangeProblem(name string, value, minimum, maximum int) error {
+	if value < minimum || value > maximum {
+		return fmt.Errorf("%s %d must be between %d and %d", name, value, minimum, maximum)
 	}
 	return nil
 }
