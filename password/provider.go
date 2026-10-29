@@ -10,6 +10,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/failure"
+	"github.com/govengers/auth/internal/hook"
 	"github.com/govengers/auth/internal/httpjson"
 	"github.com/govengers/auth/internal/random"
 	"github.com/govengers/auth/session"
@@ -91,7 +93,7 @@ func (p *Provider) Routes() []auth.Route {
 	if p.options.TOTP.Enabled {
 		routes = append(routes,
 			p.route(http.MethodPost, "/totp/verify", auth.ActionTOTPVerify, p.verifyTOTP),
-			p.route(http.MethodGet, "/totp", auth.ActionAuthenticate, p.totpStatus),
+			p.route(http.MethodGet, "/totp", auth.ActionTOTPStatus, p.totpStatus),
 			p.route(http.MethodPost, "/totp/setup", auth.ActionTOTPSetup, p.setupTOTP),
 			p.route(http.MethodPost, "/totp/enable", auth.ActionTOTPEnable, p.enableTOTP),
 			p.route(http.MethodPost, "/totp/disable", auth.ActionTOTPDisable, p.disableTOTP),
@@ -127,10 +129,7 @@ type reply struct {
 
 // refused answers err: a refusal with its status, anything else with 500.
 func refused(err error) reply {
-	if status, _ := auth.ResponseFor(err); status == http.StatusInternalServerError {
-		return reply{result: auth.ResultError, err: err}
-	}
-	return reply{result: auth.ResultDenied, err: err}
+	return reply{result: failure.Result(err), err: err}
 }
 
 func succeeded(status int, body any, identity *auth.Identity) reply {
@@ -178,7 +177,7 @@ func (p *Provider) report(ctx context.Context, outcome auth.Outcome) {
 // identity in it.
 func (p *Provider) signIn(writer http.ResponseWriter, request *http.Request, user *User) (*auth.Identity, error) {
 	ctx := request.Context()
-	identity, err := p.loginIdentity(ctx, user)
+	identity, err := hook.RunOnLogin(ctx, p.options.OnLogin, identityOf(user))
 	if err != nil {
 		return nil, err
 	}
@@ -190,22 +189,6 @@ func (p *Provider) signIn(writer http.ResponseWriter, request *http.Request, use
 		return nil, err
 	}
 	return identity, nil
-}
-
-// loginIdentity returns the identity of user as OnLogin maps it.
-func (p *Provider) loginIdentity(ctx context.Context, user *User) (*auth.Identity, error) {
-	identity := identityOf(user)
-	if p.options.OnLogin == nil {
-		return identity, nil
-	}
-	mapped, err := p.options.OnLogin(ctx, identity)
-	if err != nil {
-		return nil, fmt.Errorf("password login hook: %w", err)
-	}
-	if mapped == nil {
-		return nil, errors.New("password login hook returned no identity")
-	}
-	return mapped, nil
 }
 
 func identityOf(user *User) *auth.Identity {

@@ -1,6 +1,7 @@
 package keycloak
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -284,6 +285,18 @@ func TestEnrichFailuresArePlainErrors(t *testing.T) {
 			require.NotContains(t, err.Error(), "wrong")
 		})
 	}
+}
+
+func TestEnrichKeepsTheCancellationOfAnAdminAPICall(t *testing.T) {
+	client := newClient(t, startKeycloak(t, nil, nil), nil)
+	_, err := client.Enrich(t.Context(), loginIdentity())
+	require.NoError(t, err, "caches the admin token, so the next call goes straight to the admin API")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err = client.Enrich(ctx, loginIdentity())
+
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestEnrichIsSafeForConcurrentUse(t *testing.T) {

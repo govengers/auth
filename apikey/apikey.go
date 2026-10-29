@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/failure"
 )
 
 const (
@@ -216,12 +217,8 @@ func (a *Authenticator) report(ctx context.Context, identity *auth.Identity, err
 }
 
 func resultOf(err error) auth.Result {
-	switch {
-	case err == nil:
+	if err == nil {
 		return auth.ResultSuccess
-	case errors.Is(err, auth.ErrUnauthenticated):
-		return auth.ResultDenied
-	default:
-		return auth.ResultError
 	}
+	return failure.Result(err)
 }

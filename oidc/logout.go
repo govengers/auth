@@ -6,6 +6,7 @@ import (
 	"net/url"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/redirect"
 )
 
 const loggedOutPage = "<!doctype html><html><head><title>Logged out</title></head><body></body></html>"
@@ -27,7 +28,7 @@ func (p *Provider) handleLogout(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	p.runOnLogout(ctx, identity)
-	redirectTo(writer, p.logoutLocation(rawIdentityToken))
+	redirect.To(writer, p.logoutLocation(rawIdentityToken))
 	p.report(ctx, auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity})
 }
 
@@ -141,7 +142,7 @@ func (p *Provider) logoutLocation(rawIdentityToken string) string {
 	if p.endSessionEndpoint == "" || rawIdentityToken == "" {
 		return p.options.PostLogoutURL
 	}
-	return withQuery(p.endSessionEndpoint, url.Values{
+	return redirect.WithQuery(p.endSessionEndpoint, url.Values{
 		"client_id":                {p.options.ClientID},
 		"id_token_hint":            {rawIdentityToken},
 		"post_logout_redirect_uri": {p.options.PostLogoutURL},

@@ -15,6 +15,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/session"
 )
 
@@ -94,10 +95,10 @@ func (p *Provider) exchange(ctx context.Context, code, verifier string) (*oauth2
 	token, err := p.oauth.Exchange(context.WithValue(ctx, oauth2.HTTPClient, p.options.HTTPClient), code, oauth2.VerifierOption(verifier))
 	var retrieveError *oauth2.RetrieveError
 	if errors.As(err, &retrieveError) && retrieveError.Response != nil && retrieveError.Response.StatusCode < http.StatusInternalServerError {
-		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Code: "login_failed", Reason: "token exchange", Err: dependencyError("exchange code", err)}
+		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Code: "login_failed", Reason: "token exchange", Err: dependency.Error("exchange code", err)}
 	}
 	if err != nil {
-		return nil, dependencyError("github: exchange code", err)
+		return nil, dependency.Error("github: exchange code", err)
 	}
 	return token, nil
 }
@@ -197,10 +198,4 @@ func (p *Provider) revokeToken(ctx context.Context, token *oauth2.Token) error {
 		return fmt.Errorf("github: revoke token: GitHub answered %d", response.StatusCode)
 	}
 	return nil
-}
-
-// dependencyError keeps the message of an oauth2 error and drops its chain, so callers cannot start
-// matching on the dependency's errors (LIB-010).
-func dependencyError(operation string, err error) error {
-	return fmt.Errorf("%s: %v", operation, err) //nolint:errorlint // LIB-010: the dependency's errors are not part of this package's API
 }

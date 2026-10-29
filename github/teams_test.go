@@ -121,22 +121,3 @@ func TestWithMembership(t *testing.T) {
 		})
 	}
 }
-
-func TestWithRealIdentity(t *testing.T) {
-	refreshed := &auth.Identity{Provider: providerName, Subject: "1", Teams: []string{"acme/new"}}
-
-	t.Run("not impersonating", func(t *testing.T) {
-		stored := &auth.Identity{Provider: providerName, Subject: "1"}
-		require.Same(t, refreshed, withRealIdentity(stored, refreshed))
-	})
-	t.Run("impersonating", func(t *testing.T) {
-		stored := &auth.Identity{Provider: "password", Subject: "user", Impersonator: &auth.Identity{Provider: providerName, Subject: "1"}}
-		before := stored.Clone()
-
-		updated := withRealIdentity(stored, refreshed)
-
-		require.Equal(t, "user", updated.Subject)
-		require.Same(t, refreshed, updated.Impersonator)
-		require.Equal(t, before, stored)
-	})
-}

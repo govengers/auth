@@ -16,6 +16,7 @@ import (
 	"github.com/pquerna/otp/totp"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/session"
 )
 
@@ -151,7 +152,7 @@ func (p *Provider) generateKey(user *User) (*otp.Key, error) {
 		Digits:      otp.Digits(p.options.TOTP.Digits),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("generate TOTP key: %v", err) //nolint:errorlint // LIB-010: otp errors are not part of this package's API
+		return nil, dependency.Error("generate TOTP key", err)
 	}
 	return key, nil
 }

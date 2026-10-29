@@ -5,10 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/failure"
+	"github.com/govengers/auth/internal/impersonation"
 	"github.com/govengers/auth/internal/redirect"
 )
 
@@ -57,7 +58,7 @@ func NewGuard(options *GuardOptions) (*Guard, error) {
 	if resolved.LoginURL == "" {
 		resolved.LoginURL = "/"
 	}
-	if !isLoginURL(resolved.LoginURL) {
+	if !redirect.IsTarget(resolved.LoginURL) {
 		return nil, errors.New("session guard: LoginURL must be an absolute http(s) URL or a path starting with \"/\"")
 	}
 	if resolved.RefreshInterval == 0 {
@@ -72,14 +73,6 @@ func NewGuard(options *GuardOptions) (*Guard, error) {
 	}
 	resolved.Refreshers = nil
 	return &Guard{options: resolved, refreshers: refreshers, now: time.Now}, nil
-}
-
-func isLoginURL(loginURL string) bool {
-	if _, ok := redirect.SafeReturnPath(loginURL); ok {
-		return true
-	}
-	parsed, err := url.Parse(loginURL)
-	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
 func refreshersByName(refreshers []Refresher) (map[string]Refresher, error) {
@@ -132,9 +125,7 @@ func (g *Guard) redirectToLogin(writer http.ResponseWriter, request *http.Reques
 		auth.WriteError(writer, err)
 		return
 	}
-	writer.Header().Set("Cache-Control", "no-store")
-	writer.Header().Set("Location", redirect.LoginLocation(g.options.LoginURL, g.returnPath(request)))
-	writer.WriteHeader(http.StatusFound)
+	redirect.To(writer, redirect.LoginLocation(g.options.LoginURL, g.returnPath(request)))
 }
 
 // returnPath is the safe original request path, or "" when it is not safe.
@@ -189,7 +180,7 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 	case refreshed == nil:
 		outcome.Err = fmt.Errorf("refresher %q returned no identity", realIdentity.Provider)
 	default:
-		stored.Identity = withRealIdentity(stored.Identity, refreshed)
+		stored.Identity = impersonation.WithReal(stored.Identity, refreshed)
 	}
 	stored.RefreshedAt = g.now()
 	if err := current.saveEnvelope(ctx, stored); err != nil {
@@ -201,22 +192,9 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 	return stored.Identity, nil
 }
 
-// withRealIdentity returns identity with its real identity (the impersonator, or itself) replaced by refreshed.
-func withRealIdentity(identity, refreshed *auth.Identity) *auth.Identity {
-	if identity.Impersonator == nil {
-		return refreshed
-	}
-	impersonated := identity.Clone()
-	impersonated.Impersonator = refreshed
-	return impersonated
-}
-
 // reportFailure reports outcome as denied (a refusal) or error (anything answered with 500) and returns its Err.
 func (g *Guard) reportFailure(ctx context.Context, outcome auth.Outcome) error {
-	outcome.Result = auth.ResultDenied
-	if status, _ := auth.ResponseFor(outcome.Err); status == http.StatusInternalServerError {
-		outcome.Result = auth.ResultError
-	}
+	outcome.Result = failure.Result(outcome.Err)
 	g.report(ctx, outcome)
 	return outcome.Err
 }

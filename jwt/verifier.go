@@ -17,6 +17,8 @@ import (
 	jwxjwt "github.com/lestrrat-go/jwx/v3/jwt"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/dependency"
+	"github.com/govengers/auth/internal/failure"
 )
 
 const (
@@ -141,7 +143,7 @@ func (v *Verifier) verify(ctx context.Context, token string) (identity *auth.Ide
 func keyIDOf(token string) (string, error) {
 	message, err := jws.ParseString(token, jws.WithCompact())
 	if err != nil {
-		return "", dependencyError("parse token", err)
+		return "", dependency.Error("parse token", err)
 	}
 	signatures := message.Signatures()
 	if len(signatures) != 1 {
@@ -215,7 +217,7 @@ func fetchKeySet(ctx context.Context, httpClient *http.Client, jwksURL string) (
 	}
 	keys, err := jwk.Parse(body)
 	if err != nil {
-		return nil, dependencyError("parse JWKS "+jwksURL, err)
+		return nil, dependency.Error("parse JWKS "+jwksURL, err)
 	}
 	return keys, nil
 }
@@ -238,7 +240,7 @@ func (v *Verifier) parseOptions(keys jwk.Set) []jwxjwt.ParseOption {
 func claimsOf(token jwxjwt.Token) (map[string]any, error) {
 	payload, err := json.Marshal(token)
 	if err != nil {
-		return nil, dependencyError("encode verified claims", err)
+		return nil, dependency.Error("encode verified claims", err)
 	}
 	var claims map[string]any
 	if err := json.Unmarshal(payload, &claims); err != nil {
@@ -289,12 +291,8 @@ func bearerToken(headerValue string) (string, bool) {
 
 func outcomeOf(identity *auth.Identity, refreshError, err error) auth.Outcome {
 	outcome := auth.Outcome{Provider: providerName, Action: auth.ActionAuthenticate, Result: auth.ResultSuccess, Err: refreshError, Identity: identity}
-	var refusal *auth.Error
-	switch {
-	case errors.As(err, &refusal):
-		outcome.Result, outcome.Err = auth.ResultDenied, err
-	case err != nil:
-		outcome.Result, outcome.Err = auth.ResultError, err
+	if err != nil {
+		outcome.Result, outcome.Err = failure.Result(err), err
 	}
 	return outcome
 }

@@ -337,7 +337,9 @@ func TestTOTPManagement(t *testing.T) {
 	before, err := fixture.sessionIdentity(t, browser)
 	require.NoError(t, err)
 
+	fixture.outcomes.take()
 	require.JSONEq(t, `{"enabled":false}`, browser.get(statusPath).Body.String())
+	require.Equal(t, auth.Outcome{Provider: "password", Action: auth.ActionTOTPStatus, Result: auth.ResultSuccess, Identity: before}, fixture.outcomes.last(t))
 	requireRefusal(t, browser.post(enablePath, map[string]any{"code": "000000", "password": testPassword}), http.StatusBadRequest, "totp_setup_missing")
 
 	setup := browser.post(setupPath, map[string]any{})

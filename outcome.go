@@ -13,6 +13,7 @@ const (
 	ActionFrontChannelLogout Action = "frontchannel_logout"
 	ActionRegister           Action = "register"
 	ActionTOTPVerify         Action = "totp_verify"
+	ActionTOTPStatus         Action = "totp_status" // password GET {prefix}/totp
 	ActionTOTPSetup          Action = "totp_setup"
 	ActionTOTPEnable         Action = "totp_enable"
 	ActionTOTPDisable        Action = "totp_disable"

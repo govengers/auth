@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/dependency"
+	"github.com/govengers/auth/internal/failure"
+	"github.com/govengers/auth/internal/hook"
 	"github.com/govengers/auth/internal/oauthlogin"
+	"github.com/govengers/auth/internal/redirect"
 )
 
 // verifiedLogin is what a callback learned from the IdP before any hook ran.
@@ -33,7 +36,7 @@ func (p *Provider) handleLogin(writer http.ResponseWriter, request *http.Request
 		p.refuse(writer, request, auth.Outcome{Action: auth.ActionLogin, Err: fmt.Errorf("oidc: begin login: %w", err)})
 		return
 	}
-	redirectTo(writer, p.oauth2Config.AuthCodeURL(state.State, gooidc.Nonce(state.Nonce), oauth2.S256ChallengeOption(state.Verifier)))
+	redirect.To(writer, p.oauth2Config.AuthCodeURL(state.State, gooidc.Nonce(state.Nonce), oauth2.S256ChallengeOption(state.Verifier)))
 	p.report(ctx, auth.Outcome{Action: auth.ActionLogin, Result: auth.ResultSuccess})
 }
 
@@ -52,7 +55,7 @@ func (p *Provider) handleCallback(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	authenticated := p.newIdentity(login)
-	identity, err := p.runOnLogin(ctx, authenticated)
+	identity, err := hook.RunOnLogin(ctx, p.options.OnLogin, authenticated)
 	if err != nil {
 		p.refuseCallback(writer, request, err, authenticated)
 		return
@@ -61,7 +64,7 @@ func (p *Provider) handleCallback(writer http.ResponseWriter, request *http.Requ
 		p.refuseCallback(writer, request, err, identity)
 		return
 	}
-	redirectTo(writer, p.options.ExternalURL+state.ReturnPath)
+	redirect.To(writer, p.options.ExternalURL+state.ReturnPath)
 	p.report(ctx, auth.Outcome{Action: auth.ActionCallback, Result: auth.ResultSuccess, Identity: identity})
 }
 
@@ -90,9 +93,9 @@ func (p *Provider) exchange(ctx context.Context, code, verifier string) (*oauth2
 	var retrieveError *oauth2.RetrieveError
 	switch {
 	case errors.As(err, &retrieveError):
-		return nil, loginFailed("token exchange", dependencyError("exchange code", err))
+		return nil, loginFailed("token exchange", dependency.Error("exchange code", err))
 	case err != nil:
-		return nil, dependencyError("oidc: exchange code", err)
+		return nil, dependency.Error("oidc: exchange code", err)
 	}
 	return token, nil
 }
@@ -104,7 +107,7 @@ func (p *Provider) verifyIdentityToken(ctx context.Context, token *oauth2.Token,
 	}
 	identityToken, err := p.identityTokenVerifier.Verify(ctx, rawIdentityToken)
 	if err != nil {
-		return verifiedLogin{}, loginFailed("ID token verification", dependencyError("verify ID token", err))
+		return verifiedLogin{}, loginFailed("ID token verification", dependency.Error("verify ID token", err))
 	}
 	if subtle.ConstantTimeCompare([]byte(identityToken.Nonce), []byte(nonce)) != 1 {
 		return verifiedLogin{}, loginFailed("nonce mismatch", nil)
@@ -114,7 +117,7 @@ func (p *Provider) verifyIdentityToken(ctx context.Context, token *oauth2.Token,
 	}
 	var claims map[string]any
 	if err := identityToken.Claims(&claims); err != nil {
-		return verifiedLogin{}, loginFailed("ID token claims", dependencyError("decode ID token claims", err))
+		return verifiedLogin{}, loginFailed("ID token claims", dependency.Error("decode ID token claims", err))
 	}
 	return verifiedLogin{rawIdentityToken: rawIdentityToken, subject: identityToken.Subject, identityClaims: claims}, nil
 }
@@ -151,21 +154,6 @@ func (p *Provider) newIdentity(login verifiedLogin) *auth.Identity {
 	}
 }
 
-// runOnLogin returns the identity OnLogin made of identity. Its refusals keep their kind (status).
-func (p *Provider) runOnLogin(ctx context.Context, identity *auth.Identity) (*auth.Identity, error) {
-	if p.options.OnLogin == nil {
-		return identity, nil
-	}
-	mapped, err := p.options.OnLogin(ctx, identity)
-	if err != nil {
-		return nil, fmt.Errorf("oidc: OnLogin: %w", err)
-	}
-	if mapped == nil {
-		return nil, errors.New("oidc: OnLogin returned no identity")
-	}
-	return mapped, nil
-}
-
 // saveSession rotates the session (fixation defense) and stores the identity and the raw ID token in it.
 func (p *Provider) saveSession(ctx context.Context, writer http.ResponseWriter, request *http.Request, identity *auth.Identity, rawIdentityToken string) error {
 	current, err := p.options.Sessions.Start(ctx, writer, request)
@@ -190,7 +178,7 @@ func (p *Provider) refuseCallback(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	_, response := auth.ResponseFor(err)
-	redirectTo(writer, withQuery(p.options.ErrorURL, url.Values{"code": {response.Code}}))
+	redirect.To(writer, redirect.WithQuery(p.options.ErrorURL, url.Values{"code": {response.Code}}))
 	p.reportFailure(request.Context(), outcome)
 }
 
@@ -202,10 +190,7 @@ func (p *Provider) refuse(writer http.ResponseWriter, request *http.Request, out
 
 // reportFailure reports outcome as denied (a refusal) or error (answered with 500).
 func (p *Provider) reportFailure(ctx context.Context, outcome auth.Outcome) {
-	outcome.Result = auth.ResultDenied
-	if status, _ := auth.ResponseFor(outcome.Err); status >= http.StatusInternalServerError {
-		outcome.Result = auth.ResultError
-	}
+	outcome.Result = failure.Result(outcome.Err)
 	p.report(ctx, outcome)
 }
 
@@ -219,19 +204,4 @@ func (p *Provider) report(ctx context.Context, outcome auth.Outcome) {
 
 func loginFailed(reason string, cause error) error {
 	return &auth.Error{Kind: auth.ErrUnauthenticated, Code: "login_failed", Reason: reason, Err: cause}
-}
-
-func redirectTo(writer http.ResponseWriter, location string) {
-	writer.Header().Set("Cache-Control", "no-store")
-	writer.Header().Set("Location", location)
-	writer.WriteHeader(http.StatusFound)
-}
-
-// withQuery appends values to target, keeping a query target already has.
-func withQuery(target string, values url.Values) string {
-	separator := "?"
-	if strings.Contains(target, "?") {
-		separator = "&"
-	}
-	return target + separator + values.Encode()
 }

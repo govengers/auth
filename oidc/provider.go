@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -16,6 +14,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/session"
 )
@@ -23,8 +22,7 @@ import (
 const defaultHTTPTimeout = 10 * time.Second
 
 var (
-	namePattern       = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
-	pathPrefixPattern = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
+	namePattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 	// reservedNames are other providers' Identity.Provider or Outcome.Provider values.
 	reservedNames = []string{"password", "github", "apikey", "session", "jwt"}
 	defaultScopes = []string{gooidc.ScopeOpenID, "profile", "email"}
@@ -37,9 +35,9 @@ type Options struct {
 	ClientID, ClientSecret       string          // required (confidential client)
 	Scopes                       []string        // default ["openid","profile","email"]; "openid" added first when missing; order kept, duplicates dropped
 	ExternalURL                  string          // required: absolute public base URL; redirect URI = ExternalURL + PathPrefix + "/callback"
-	PathPrefix                   string          // default "/auth/oidc/" + Name
-	PostLogoutURL                string          // default ExternalURL + "/"; absolute http(s) URL
-	ErrorURL                     string          // optional: callback failures redirect to ErrorURL?code=<code> instead of answering JSON; absolute http(s) URL or path
+	PathPrefix                   string          // default "/auth/oidc/" + Name; segments of A-Z a-z 0-9 . _ ~ -, no trailing "/", no "." or ".." segment
+	PostLogoutURL                string          // default ExternalURL + "/"; path or absolute http(s) URL, no fragment; a path is made absolute with ExternalURL
+	ErrorURL                     string          // optional: callback failures (refusals and code=internal) redirect to ErrorURL?code=<code> instead of answering JSON; same rules as PostLogoutURL
 	ClaimMapper                  ClaimMapper     // default DefaultClaimMapper
 	AllowedEmailDomains          []string        // optional: requires email_verified=true and a matching domain (case-insensitive, exact)
 	DisableIframeLogoutDetection bool            // stop treating Sec-Fetch-Dest: iframe on /logout as front-channel
@@ -118,13 +116,13 @@ func discover(ctx context.Context, options Options) (*gooidc.Provider, providerM
 	// ClientContext: discovery uses HTTPClient, and the provider's remote key set keeps it after ctx ends.
 	discovered, err := gooidc.NewProvider(gooidc.ClientContext(ctx, options.HTTPClient), options.Issuer)
 	if err != nil {
-		return nil, providerMetadata{}, dependencyError("discover issuer", err)
+		return nil, providerMetadata{}, dependency.Error("discover issuer", err)
 	}
 	var metadata providerMetadata
 	if err := discovered.Claims(&metadata); err != nil {
-		return nil, providerMetadata{}, dependencyError("read provider metadata", err)
+		return nil, providerMetadata{}, dependency.Error("read provider metadata", err)
 	}
-	if metadata.EndSessionEndpoint != "" && !isAbsoluteHTTPURL(metadata.EndSessionEndpoint) {
+	if metadata.EndSessionEndpoint != "" && !redirect.IsAbsoluteHTTPURL(metadata.EndSessionEndpoint) {
 		return nil, providerMetadata{}, errors.New("discovered end_session_endpoint is not an absolute http(s) URL")
 	}
 	return discovered, metadata, nil
@@ -175,7 +173,7 @@ func validateRequired(options *Options) error {
 		return errors.New("client ID and client secret are required")
 	case options.Sessions == nil:
 		return errors.New("sessions are required")
-	case !isSecureURL(options.Issuer):
+	case !redirect.IsSecureURL(options.Issuer):
 		return errors.New("issuer must be an https URL, or http on a loopback host")
 	}
 	return nil
@@ -211,37 +209,22 @@ func withURLs(resolved Options) (Options, error) {
 	if resolved.PathPrefix == "" {
 		resolved.PathPrefix = "/auth/oidc/" + resolved.Name
 	}
-	if !pathPrefixPattern.MatchString(resolved.PathPrefix) {
+	if !redirect.IsPathPrefix(resolved.PathPrefix) {
 		return Options{}, errors.New("path prefix must start with \"/\", have no trailing \"/\" and only unreserved URL characters")
 	}
 	if resolved.PostLogoutURL == "" {
-		resolved.PostLogoutURL = external + "/"
+		resolved.PostLogoutURL = "/"
 	}
-	if !isAbsoluteHTTPURL(resolved.PostLogoutURL) {
-		return Options{}, errors.New("post-logout URL must be an absolute http(s) URL")
+	if resolved.PostLogoutURL, err = redirect.AbsoluteTarget(resolved.PostLogoutURL, external); err != nil {
+		return Options{}, fmt.Errorf("post-logout URL %w", err)
 	}
-	if resolved.ErrorURL, err = absoluteErrorURL(resolved.ErrorURL, external); err != nil {
-		return Options{}, err
+	if resolved.ErrorURL == "" {
+		return resolved, nil
+	}
+	if resolved.ErrorURL, err = redirect.AbsoluteTarget(resolved.ErrorURL, external); err != nil {
+		return Options{}, fmt.Errorf("error URL %w", err)
 	}
 	return resolved, nil
-}
-
-// absoluteErrorURL accepts "", an absolute http(s) URL or a safe path (made absolute with external), all
-// without a fragment, so the appended code stays in the query.
-func absoluteErrorURL(errorURL, external string) (string, error) {
-	if errorURL == "" {
-		return "", nil
-	}
-	if strings.Contains(errorURL, "#") {
-		return "", errors.New("error URL must not have a fragment")
-	}
-	if path, ok := redirect.SafeReturnPath(errorURL); ok {
-		return external + path, nil
-	}
-	if !isAbsoluteHTTPURL(errorURL) {
-		return "", errors.New("error URL must be an absolute http(s) URL or a path starting with \"/\"")
-	}
-	return errorURL, nil
 }
 
 func scopesWithOpenID(scopes []string) ([]string, error) {
@@ -276,33 +259,4 @@ func lowerCaseDomains(domains []string) ([]string, error) {
 
 func isSpaceOrControl(character rune) bool {
 	return character <= ' ' || character == 0x7f
-}
-
-// isSecureURL reports whether raw is an absolute https URL, or an http URL on a loopback host (design D16:
-// credentials never travel in clear text, tests run on 127.0.0.1).
-func isSecureURL(raw string) bool {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" || parsed.User != nil {
-		return false
-	}
-	return parsed.Scheme == "https" || (parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname()))
-}
-
-func isLoopbackHost(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	address := net.ParseIP(host)
-	return address != nil && address.IsLoopback()
-}
-
-func isAbsoluteHTTPURL(raw string) bool {
-	parsed, err := url.Parse(raw)
-	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
-}
-
-// dependencyError keeps the message of a go-oidc or oauth2 error and drops its chain, so callers cannot
-// start matching on the dependency's errors (LIB-010).
-func dependencyError(operation string, err error) error {
-	return fmt.Errorf("%s: %v", operation, err) //nolint:errorlint // LIB-010: the dependency's errors are not part of this package's API
 }

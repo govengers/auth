@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/failure"
+	"github.com/govengers/auth/internal/hook"
 	"github.com/govengers/auth/internal/httpjson"
+	"github.com/govengers/auth/internal/impersonation"
 	"github.com/govengers/auth/internal/oauthlogin"
+	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/session"
 )
 
@@ -69,7 +72,7 @@ func (p *Provider) login(writer http.ResponseWriter, request *http.Request) {
 		p.refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogin, Err: err})
 		return
 	}
-	redirectTo(writer, p.oauth.AuthCodeURL(state.State, oauth2.S256ChallengeOption(state.Verifier)))
+	redirect.To(writer, p.oauth.AuthCodeURL(state.State, oauth2.S256ChallengeOption(state.Verifier)))
 	p.report(ctx, auth.Outcome{Action: auth.ActionLogin, Result: auth.ResultSuccess})
 }
 
@@ -85,7 +88,7 @@ func (p *Provider) callback(writer http.ResponseWriter, request *http.Request) {
 		p.refuse(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err, Identity: completed.identity})
 		return
 	}
-	redirectTo(writer, p.options.ExternalURL+completed.returnPath)
+	redirect.To(writer, p.options.ExternalURL+completed.returnPath)
 	p.report(ctx, auth.Outcome{Action: auth.ActionCallback, Result: auth.ResultSuccess, Identity: completed.identity})
 }
 
@@ -104,7 +107,7 @@ func (p *Provider) completeLogin(ctx context.Context, request *http.Request) (co
 	if err != nil {
 		return completedLogin{identity: identity}, err
 	}
-	mapped, err := p.runOnLogin(ctx, identity)
+	mapped, err := hook.RunOnLogin(ctx, p.options.OnLogin, identity)
 	if err != nil {
 		return completedLogin{identity: identity}, err
 	}
@@ -128,20 +131,6 @@ func (p *Provider) identityOf(ctx context.Context, client *http.Client) (*auth.I
 		return identity, notAllowed()
 	}
 	return identity, nil
-}
-
-func (p *Provider) runOnLogin(ctx context.Context, identity *auth.Identity) (*auth.Identity, error) {
-	if p.options.OnLogin == nil {
-		return identity, nil
-	}
-	mapped, err := p.options.OnLogin(ctx, identity)
-	if err != nil {
-		return nil, fmt.Errorf("github: OnLogin: %w", err)
-	}
-	if mapped == nil {
-		return nil, errors.New("github: OnLogin returned no identity")
-	}
-	return mapped, nil
 }
 
 // startSession rotates the session (Store.Start revokes the login session) and stores token and identity.
@@ -176,7 +165,7 @@ func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) {
 	if identity != nil && p.options.OnLogout != nil {
 		p.options.OnLogout(ctx, identity)
 	}
-	redirectTo(writer, p.options.PostLogoutURL)
+	redirect.To(writer, p.options.PostLogoutURL)
 	p.report(ctx, outcome)
 }
 
@@ -227,7 +216,7 @@ func (p *Provider) refreshSession(ctx context.Context, writer http.ResponseWrite
 	if err != nil {
 		return stored, err
 	}
-	updated := withRealIdentity(stored, refreshed)
+	updated := impersonation.WithReal(stored, refreshed)
 	if err := current.SaveIdentity(ctx, updated); err != nil {
 		return stored, err
 	}
@@ -253,24 +242,21 @@ func (p *Provider) refuse(ctx context.Context, writer http.ResponseWriter, outco
 	p.reportFailure(ctx, outcome)
 }
 
-// refuseCallback is refuse, except that with ErrorURL set a refusal (not a 500) redirects to
-// ErrorURL?code=<code>.
+// refuseCallback is refuse, except that with ErrorURL set the failure (a refusal or code=internal)
+// redirects to ErrorURL?code=<code>.
 func (p *Provider) refuseCallback(ctx context.Context, writer http.ResponseWriter, outcome auth.Outcome) {
-	status, response := auth.ResponseFor(outcome.Err)
-	if p.options.ErrorURL == "" || status == http.StatusInternalServerError {
+	if p.options.ErrorURL == "" {
 		p.refuse(ctx, writer, outcome)
 		return
 	}
-	redirectTo(writer, errorLocation(p.options.ErrorURL, response.Code))
+	_, response := auth.ResponseFor(outcome.Err)
+	redirect.To(writer, redirect.WithQuery(p.options.ErrorURL, url.Values{"code": {response.Code}}))
 	p.reportFailure(ctx, outcome)
 }
 
 // reportFailure reports outcome as denied (a refusal) or error (answered with 500).
 func (p *Provider) reportFailure(ctx context.Context, outcome auth.Outcome) {
-	outcome.Result = auth.ResultDenied
-	if status, _ := auth.ResponseFor(outcome.Err); status == http.StatusInternalServerError {
-		outcome.Result = auth.ResultError
-	}
+	outcome.Result = failure.Result(outcome.Err)
 	p.report(ctx, outcome)
 }
 
@@ -280,19 +266,4 @@ func (p *Provider) report(ctx context.Context, outcome auth.Outcome) {
 	}
 	outcome.Provider = providerName
 	p.options.Observer(ctx, outcome)
-}
-
-func redirectTo(writer http.ResponseWriter, location string) {
-	writer.Header().Set("Cache-Control", "no-store")
-	writer.Header().Set("Location", location)
-	writer.WriteHeader(http.StatusFound)
-}
-
-// errorLocation appends code=<code> to errorURL, keeping an existing query.
-func errorLocation(errorURL, code string) string {
-	separator := "?"
-	if strings.Contains(errorURL, "?") {
-		separator = "&"
-	}
-	return errorURL + separator + "code=" + url.QueryEscape(code)
 }

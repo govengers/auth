@@ -9,6 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/session"
 )
 
@@ -90,7 +91,7 @@ func (b *Backend) Put(ctx context.Context, sessionID, key string, value []byte, 
 	keys := []string{b.markerKey(sessionID), b.valueKey(sessionID, key), b.indexKey(sessionID)}
 	stored, err := putScript.Run(ctx, b.client, keys, value, milliseconds(ttl)).Int()
 	if err != nil {
-		return dependencyError("store session value", err)
+		return dependency.Error("redis session backend: store session value", err)
 	}
 	if stored == 0 {
 		return session.ErrSessionRevoked
@@ -123,7 +124,7 @@ func (b *Backend) Revoke(ctx context.Context, sessionID string, ttl time.Duratio
 	}
 	err := revokeScript.Run(ctx, b.client, []string{b.markerKey(sessionID), b.indexKey(sessionID)}, milliseconds(ttl)).Err()
 	if err != nil {
-		return dependencyError("revoke session", err)
+		return dependency.Error("redis session backend: revoke session", err)
 	}
 	return nil
 }
@@ -161,13 +162,7 @@ func valueOrAbsent(value []byte, err error, operation string) ([]byte, bool, err
 		return nil, false, nil
 	}
 	if err != nil {
-		return nil, false, dependencyError(operation, err)
+		return nil, false, dependency.Error("redis session backend: "+operation, err)
 	}
 	return value, true, nil
-}
-
-// dependencyError keeps the message of a go-redis error and drops its chain, so callers cannot
-// start matching on the dependency's errors (LIB-010).
-func dependencyError(operation string, err error) error {
-	return fmt.Errorf("redis session backend: %s: %v", operation, err) //nolint:errorlint // LIB-010: go-redis errors are not part of this package's API
 }

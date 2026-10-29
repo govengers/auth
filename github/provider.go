@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/netip"
 	"net/url"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -30,9 +28,6 @@ const (
 	defaultTimeout      = 10 * time.Second
 )
 
-// pathPrefixPattern keeps the prefix a plain path: no trailing "/", no query, no ServeMux wildcards.
-var pathPrefixPattern = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
-
 // Options configure a Provider.
 type Options struct {
 	ClientID, ClientSecret string          // required: the GitHub OAuth app
@@ -41,9 +36,9 @@ type Options struct {
 	TokenURL               string          // default "https://github.com/login/oauth/access_token"
 	APIURL                 string          // default "https://api.github.com"; GHE e.g. https://ghe.example.com/api/v3
 	ExternalURL            string          // required: absolute public base URL; redirect URI = ExternalURL + PathPrefix + "/callback"
-	PathPrefix             string          // default "/auth/github"
-	PostLogoutURL          string          // absolute http(s) URL or path; default ExternalURL + "/"
-	ErrorURL               string          // optional: callback refusals redirect to ErrorURL?code=<code> instead of answering JSON
+	PathPrefix             string          // default "/auth/github"; segments of A-Z a-z 0-9 . _ ~ -, no trailing "/", no "." or ".." segment
+	PostLogoutURL          string          // default ExternalURL + "/"; path or absolute http(s) URL, no fragment; a path is made absolute with ExternalURL
+	ErrorURL               string          // optional: callback failures (refusals and code=internal) redirect to ErrorURL?code=<code> instead of answering JSON; same rules as PostLogoutURL
 	AllowedTeams           []string        // required, at least one, "org/team-slug", case-insensitive
 	AdminTeams             []string        // members get auth.RoleAdmin (they still need an AllowedTeams membership)
 	RelevantTeams          []string        // extra teams kept in Identity.Teams
@@ -99,8 +94,8 @@ func resolveOptions(options Options) (Options, error) {
 		return Options{}, fmt.Errorf("ExternalURL: %w", err)
 	}
 	options.ExternalURL = externalURL
-	options = withDefaults(options)
-	if err := validateURLs(options); err != nil {
+	options, err = withURLs(withDefaults(options))
+	if err != nil {
 		return Options{}, err
 	}
 	return withParsedTeams(options)
@@ -115,61 +110,36 @@ func withDefaults(options Options) Options {
 	options.TokenURL = cmp.Or(options.TokenURL, defaultTokenURL)
 	options.APIURL = strings.TrimSuffix(cmp.Or(options.APIURL, defaultAPIURL), "/")
 	options.PathPrefix = cmp.Or(options.PathPrefix, defaultPathPrefix)
-	options.PostLogoutURL = cmp.Or(options.PostLogoutURL, options.ExternalURL+"/")
+	options.PostLogoutURL = cmp.Or(options.PostLogoutURL, "/")
 	if options.HTTPClient == nil {
 		options.HTTPClient = &http.Client{Timeout: defaultTimeout}
 	}
 	return options
 }
 
-func validateURLs(options Options) error {
+// withURLs validates the endpoints and the path prefix and makes PostLogoutURL and ErrorURL absolute.
+func withURLs(options Options) (Options, error) {
 	for _, endpoint := range []struct{ field, value string }{
 		{"AuthorizeURL", options.AuthorizeURL}, {"TokenURL", options.TokenURL}, {"APIURL", options.APIURL},
 	} {
-		if err := validateEndpoint(endpoint.field, endpoint.value); err != nil {
-			return err
+		if !redirect.IsSecureURL(endpoint.value) {
+			return Options{}, fmt.Errorf("%s must be an absolute https URL without user info (http only on a loopback host)", endpoint.field)
 		}
 	}
-	if !pathPrefixPattern.MatchString(options.PathPrefix) {
-		return errors.New("PathPrefix must be a path like \"/auth/github\" without a trailing \"/\"")
+	if !redirect.IsPathPrefix(options.PathPrefix) {
+		return Options{}, errors.New("PathPrefix must be a path like \"/auth/github\" without a trailing \"/\"")
 	}
-	if !isRedirectTarget(options.PostLogoutURL) {
-		return errors.New("PostLogoutURL must be an absolute http(s) URL or a path starting with \"/\"")
+	var err error
+	if options.PostLogoutURL, err = redirect.AbsoluteTarget(options.PostLogoutURL, options.ExternalURL); err != nil {
+		return Options{}, fmt.Errorf("PostLogoutURL %w", err)
 	}
-	if options.ErrorURL != "" && !isRedirectTarget(options.ErrorURL) {
-		return errors.New("ErrorURL must be an absolute http(s) URL or a path starting with \"/\"")
+	if options.ErrorURL == "" {
+		return options, nil
 	}
-	return nil
-}
-
-// validateEndpoint requires an absolute https URL, or http on a loopback host (tests and e2e). The
-// error never repeats the value, so a misplaced credential does not end up in a log.
-func validateEndpoint(field, raw string) error {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" || parsed.User != nil {
-		return fmt.Errorf("%s must be an absolute URL without user info", field)
+	if options.ErrorURL, err = redirect.AbsoluteTarget(options.ErrorURL, options.ExternalURL); err != nil {
+		return Options{}, fmt.Errorf("ErrorURL %w", err)
 	}
-	if parsed.Scheme == "https" || (parsed.Scheme == "http" && isLoopback(parsed.Hostname())) {
-		return nil
-	}
-	return fmt.Errorf("%s must use https (http only on a loopback host)", field)
-}
-
-func isLoopback(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	address, err := netip.ParseAddr(host)
-	return err == nil && address.IsLoopback()
-}
-
-// isRedirectTarget accepts a same-origin path or an absolute http(s) URL with a host.
-func isRedirectTarget(target string) bool {
-	if _, ok := redirect.SafeReturnPath(target); ok {
-		return true
-	}
-	parsed, err := url.Parse(target)
-	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
+	return options, nil
 }
 
 // withParsedTeams replaces the three team lists by validated, lower-cased copies.

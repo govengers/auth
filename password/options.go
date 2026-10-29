@@ -3,12 +3,12 @@ package password
 import (
 	"errors"
 	"fmt"
-	"path"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/session"
 )
 
@@ -45,7 +45,7 @@ type TOTPOptions struct {
 type Options struct {
 	Sessions             *session.Store // required
 	Storage              Storage        // required
-	PathPrefix           string         // default "/auth/password"
+	PathPrefix           string         // default "/auth/password"; segments of A-Z a-z 0-9 . _ ~ -, no trailing "/", no "." or ".." segment
 	DisableUsernameLogin bool
 	DisableEmailLogin    bool // both true: error
 	EnableRegistration   bool // off by default: POST {prefix}/register is not even routed
@@ -114,8 +114,8 @@ func validateOptions(options Options) error {
 	switch {
 	case options.Sessions == nil || options.Storage == nil:
 		return errors.New("options need Sessions and Storage")
-	case !strings.HasPrefix(options.PathPrefix, "/") || options.PathPrefix == "/" || path.Clean(options.PathPrefix) != options.PathPrefix:
-		return fmt.Errorf("PathPrefix %q must be a clean path below \"/\" without a trailing slash", options.PathPrefix)
+	case !redirect.IsPathPrefix(options.PathPrefix):
+		return fmt.Errorf("PathPrefix %q must be a clean path below \"/\" of unreserved URL characters, without a trailing slash", options.PathPrefix)
 	case options.DisableUsernameLogin && options.DisableEmailLogin:
 		return errors.New("DisableUsernameLogin and DisableEmailLogin leave no way to log in")
 	case options.Policy.MinimumLength < 1 || options.Policy.MinimumLength > maximumPasswordLength:
