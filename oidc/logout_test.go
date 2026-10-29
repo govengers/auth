@@ -70,13 +70,16 @@ func TestLogoutSendsTheIDTokenHintToTheEndSessionEndpoint(t *testing.T) {
 
 func TestLogoutWithoutHintGoesToThePostLogoutURL(t *testing.T) {
 	testCases := []struct {
-		name         string
-		omitEndpoint bool
-		signedIn     bool
-		wantLogouts  []string
+		name          string
+		omitEndpoint  bool
+		signedIn      bool
+		postLogoutURL string
+		wantLocation  string
+		wantLogouts   []string
 	}{
-		{name: "IdP without end_session_endpoint", omitEndpoint: true, signedIn: true, wantLogouts: []string{"user-1"}},
-		{name: "no session", omitEndpoint: false, signedIn: false, wantLogouts: []string{}},
+		{name: "IdP without end_session_endpoint", omitEndpoint: true, signedIn: true, postLogoutURL: "https://www.example.com/bye", wantLocation: "https://www.example.com/bye", wantLogouts: []string{"user-1"}},
+		{name: "no session", omitEndpoint: false, signedIn: false, postLogoutURL: "https://www.example.com/bye", wantLocation: "https://www.example.com/bye", wantLogouts: []string{}},
+		{name: "path made absolute", omitEndpoint: true, signedIn: true, postLogoutURL: "/bye?x=1", wantLocation: externalURL + "/bye?x=1", wantLogouts: []string{"user-1"}},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -84,7 +87,7 @@ func TestLogoutWithoutHintGoesToThePostLogoutURL(t *testing.T) {
 			issuer := startIssuer(t, func(options *fakeprovider.OIDCOptions) { options.OmitEndSessionEndpoint = testCase.omitEndpoint })
 			app := newApp(t, issuer, func(options *oidc.Options) {
 				options.OnLogout = ended.hook
-				options.PostLogoutURL = "https://www.example.com/bye"
+				options.PostLogoutURL = testCase.postLogoutURL
 			})
 			person := newBrowser(t)
 			if testCase.signedIn {
@@ -94,7 +97,7 @@ func TestLogoutWithoutHintGoesToThePostLogoutURL(t *testing.T) {
 			response := person.app(app.handler, prefix+"/logout", nil)
 
 			require.Equal(t, http.StatusFound, response.Code)
-			require.Equal(t, "https://www.example.com/bye", response.Header().Get("Location"))
+			require.Equal(t, testCase.wantLocation, response.Header().Get("Location"))
 			require.Equal(t, testCase.wantLogouts, ended.subjects())
 			require.Equal(t, http.StatusUnauthorized, person.me(app))
 		})

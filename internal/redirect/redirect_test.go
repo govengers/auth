@@ -260,3 +260,38 @@ func TestTo(t *testing.T) {
 	require.Equal(t, "/dashboard?tab=2", recorder.Header().Get("Location"))
 	require.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
 }
+
+func TestAbsoluteTarget(t *testing.T) {
+	const external = "https://app.example/base"
+	testCases := []struct {
+		name      string
+		raw       string
+		want      string
+		wantError bool
+	}{
+		{name: "path made absolute", raw: "/login?source=github", want: external + "/login?source=github"},
+		{name: "root path", raw: "/", want: external + "/"},
+		{name: "empty query dropped", raw: "/login?", want: external + "/login"},
+		{name: "absolute kept", raw: "https://www.example/goodbye?x=1", want: "https://www.example/goodbye?x=1"},
+		{name: "empty", raw: "", wantError: true},
+		{name: "relative", raw: "login", wantError: true},
+		{name: "protocol relative", raw: "//evil.example/login", wantError: true},
+		{name: "backslash host", raw: "/\\evil.example", wantError: true},
+		{name: "javascript", raw: "javascript:alert(1)", wantError: true},
+		{name: "path with fragment", raw: "/login#failed", wantError: true},
+		{name: "absolute with fragment", raw: "https://www.example/#/error", wantError: true},
+		{name: "empty fragment", raw: "/login#", wantError: true},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := AbsoluteTarget(testCase.raw, external)
+			if testCase.wantError {
+				require.Error(t, err)
+				require.Empty(t, got)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, testCase.want, got)
+		})
+	}
+}

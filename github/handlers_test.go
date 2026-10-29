@@ -285,21 +285,23 @@ func TestCallbackRefusesAWrongPKCEVerifier(t *testing.T) {
 	require.JSONEq(t, `{"code":"login_failed","message":"authentication required"}`, response.Body.String())
 }
 
-func TestCallbackRedirectsRefusalsToTheErrorURL(t *testing.T) {
+func TestCallbackRedirectsFailuresToTheErrorURL(t *testing.T) {
 	environment := newTestEnvironment(t, nil, func(options *Options) { options.ErrorURL = "/login?source=github" })
 	login := environment.startLogin(t, "")
 
 	response := environment.callback(t, login, approve(t, login.Header().Get("Location")))
 
 	require.Equal(t, http.StatusFound, response.Code)
-	require.Equal(t, "/login?source=github&code=forbidden", response.Header().Get("Location"))
+	require.Equal(t, testExternalURL+"/login?source=github&code=forbidden", response.Header().Get("Location"))
 	require.Equal(t, "no-store", response.Header().Get("Cache-Control"))
 	require.Equal(t, auth.ResultDenied, environment.outcomes.last(t).Result)
 
 	environment.fake.FailWith(fakeprovider.GitHubEndpointUser, http.StatusInternalServerError)
 	login = environment.startLogin(t, "")
 	response = environment.callback(t, login, approve(t, login.Header().Get("Location")))
-	require.Equal(t, http.StatusInternalServerError, response.Code, "a failure is no refusal and stays a 500")
+	require.Equal(t, http.StatusFound, response.Code, "an internal failure goes to the ErrorURL too")
+	require.Equal(t, testExternalURL+"/login?source=github&code=internal", response.Header().Get("Location"))
+	require.Equal(t, auth.ResultError, environment.outcomes.last(t).Result)
 }
 
 func TestCallbackRunsOnLogin(t *testing.T) {

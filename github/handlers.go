@@ -242,14 +242,14 @@ func (p *Provider) refuse(ctx context.Context, writer http.ResponseWriter, outco
 	p.reportFailure(ctx, outcome)
 }
 
-// refuseCallback is refuse, except that with ErrorURL set a refusal (not a 500) redirects to
-// ErrorURL?code=<code>.
+// refuseCallback is refuse, except that with ErrorURL set the failure (a refusal or code=internal)
+// redirects to ErrorURL?code=<code>.
 func (p *Provider) refuseCallback(ctx context.Context, writer http.ResponseWriter, outcome auth.Outcome) {
-	status, response := auth.ResponseFor(outcome.Err)
-	if p.options.ErrorURL == "" || status == http.StatusInternalServerError {
+	if p.options.ErrorURL == "" {
 		p.refuse(ctx, writer, outcome)
 		return
 	}
+	_, response := auth.ResponseFor(outcome.Err)
 	redirect.To(writer, redirect.WithQuery(p.options.ErrorURL, url.Values{"code": {response.Code}}))
 	p.reportFailure(ctx, outcome)
 }

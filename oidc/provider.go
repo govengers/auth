@@ -37,8 +37,8 @@ type Options struct {
 	Scopes                       []string        // default ["openid","profile","email"]; "openid" added first when missing; order kept, duplicates dropped
 	ExternalURL                  string          // required: absolute public base URL; redirect URI = ExternalURL + PathPrefix + "/callback"
 	PathPrefix                   string          // default "/auth/oidc/" + Name
-	PostLogoutURL                string          // default ExternalURL + "/"; absolute http(s) URL
-	ErrorURL                     string          // optional: callback failures redirect to ErrorURL?code=<code> instead of answering JSON; absolute http(s) URL or path
+	PostLogoutURL                string          // default ExternalURL + "/"; path or absolute http(s) URL, no fragment; a path is made absolute with ExternalURL
+	ErrorURL                     string          // optional: callback failures (refusals and code=internal) redirect to ErrorURL?code=<code> instead of answering JSON; same rules as PostLogoutURL
 	ClaimMapper                  ClaimMapper     // default DefaultClaimMapper
 	AllowedEmailDomains          []string        // optional: requires email_verified=true and a matching domain (case-insensitive, exact)
 	DisableIframeLogoutDetection bool            // stop treating Sec-Fetch-Dest: iframe on /logout as front-channel
@@ -214,33 +214,18 @@ func withURLs(resolved Options) (Options, error) {
 		return Options{}, errors.New("path prefix must start with \"/\", have no trailing \"/\" and only unreserved URL characters")
 	}
 	if resolved.PostLogoutURL == "" {
-		resolved.PostLogoutURL = external + "/"
+		resolved.PostLogoutURL = "/"
 	}
-	if !redirect.IsAbsoluteHTTPURL(resolved.PostLogoutURL) {
-		return Options{}, errors.New("post-logout URL must be an absolute http(s) URL")
+	if resolved.PostLogoutURL, err = redirect.AbsoluteTarget(resolved.PostLogoutURL, external); err != nil {
+		return Options{}, fmt.Errorf("post-logout URL %w", err)
 	}
-	if resolved.ErrorURL, err = absoluteErrorURL(resolved.ErrorURL, external); err != nil {
-		return Options{}, err
+	if resolved.ErrorURL == "" {
+		return resolved, nil
+	}
+	if resolved.ErrorURL, err = redirect.AbsoluteTarget(resolved.ErrorURL, external); err != nil {
+		return Options{}, fmt.Errorf("error URL %w", err)
 	}
 	return resolved, nil
-}
-
-// absoluteErrorURL accepts "", an absolute http(s) URL or a safe path (made absolute with external), all
-// without a fragment, so the appended code stays in the query.
-func absoluteErrorURL(errorURL, external string) (string, error) {
-	if errorURL == "" {
-		return "", nil
-	}
-	if strings.Contains(errorURL, "#") {
-		return "", errors.New("error URL must not have a fragment")
-	}
-	if path, ok := redirect.SafeReturnPath(errorURL); ok {
-		return external + path, nil
-	}
-	if !redirect.IsAbsoluteHTTPURL(errorURL) {
-		return "", errors.New("error URL must be an absolute http(s) URL or a path starting with \"/\"")
-	}
-	return errorURL, nil
 }
 
 func scopesWithOpenID(scopes []string) ([]string, error) {

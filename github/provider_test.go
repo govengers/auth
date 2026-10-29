@@ -57,6 +57,8 @@ func TestNewRefusesInvalidOptions(t *testing.T) {
 		{name: "protocol-relative post logout URL", change: func(options *Options) { options.PostLogoutURL = "//evil.example.com" }},
 		{name: "javascript post logout URL", change: func(options *Options) { options.PostLogoutURL = "javascript:alert(1)" }},
 		{name: "protocol-relative error URL", change: func(options *Options) { options.ErrorURL = "//evil.example.com/error" }},
+		{name: "post logout URL with fragment", change: func(options *Options) { options.PostLogoutURL = "/goodbye#now" }},
+		{name: "error URL with fragment", change: func(options *Options) { options.ErrorURL = "https://app.example.com/#/error" }},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -83,10 +85,6 @@ func TestNewAcceptsLoopbackAndEnterpriseURLs(t *testing.T) {
 		{name: "http on localhost", change: func(options *Options) { options.AuthorizeURL = "http://localhost:9000/authorize" }},
 		{name: "http on ::1", change: func(options *Options) { options.APIURL = "http://[::1]:8080" }},
 		{name: "GitHub Enterprise", change: func(options *Options) { options.APIURL = "https://ghe.example.com/api/v3" }},
-		{name: "relative post logout and error URLs", change: func(options *Options) {
-			options.PostLogoutURL = "/goodbye"
-			options.ErrorURL = "/login?failed=1"
-		}},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -96,6 +94,19 @@ func TestNewAcceptsLoopbackAndEnterpriseURLs(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestNewMakesRelativeRedirectTargetsAbsolute(t *testing.T) {
+	options := validOptions(t)
+	options.PostLogoutURL = "/goodbye"
+	options.ErrorURL = "/login?failed=1"
+
+	provider, err := New(options)
+
+	require.NoError(t, err)
+	require.Equal(t, "https://app.example.com/goodbye", provider.options.PostLogoutURL)
+	require.Equal(t, "https://app.example.com/login?failed=1", provider.options.ErrorURL)
+	require.Equal(t, "/goodbye", options.PostLogoutURL, "the caller's options stay unchanged")
 }
 
 func TestNewAppliesDefaults(t *testing.T) {

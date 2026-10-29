@@ -77,6 +77,23 @@ func ExternalURL(raw string) (string, error) {
 	return strings.TrimSuffix(raw, "/"), nil
 }
 
+// AbsoluteTarget validates a configured redirect target (a provider's ErrorURL or PostLogoutURL) and
+// returns it absolute: a same-origin path (SafeReturnPath) is prefixed with externalURL (an ExternalURL
+// result), so a forward-auth redirect reaches the browser unchanged; an absolute http(s) URL is kept. A
+// fragment is refused, so a query appended later (ErrorURL?code=...) stays in the query. Errors never
+// repeat the value.
+func AbsoluteTarget(raw, externalURL string) (string, error) {
+	if !strings.Contains(raw, "#") {
+		if path, ok := SafeReturnPath(raw); ok {
+			return externalURL + path, nil
+		}
+		if IsAbsoluteHTTPURL(raw) {
+			return raw, nil
+		}
+	}
+	return "", errors.New("must be a path starting with \"/\" or an absolute http(s) URL, without a fragment")
+}
+
 // IsTarget reports whether raw is a valid redirect target: a same-origin path (SafeReturnPath) or an
 // absolute http(s) URL with a host.
 func IsTarget(raw string) bool {
