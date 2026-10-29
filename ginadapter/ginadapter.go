@@ -63,9 +63,16 @@ func Observe(ctx context.Context, outcome auth.Outcome) {
 	recordRequestOutcome(we, outcome)
 }
 
+// errNilCheck is the internal failure a Require without a check answers with.
+var errNilCheck = errors.New("authorization check is nil")
+
 // Require runs check against the request context: allowed continues; refused aborts with auth.ResponseFor
 // (401/403/500) and records authorization.denied / authorization.reason / authorization.error and we.Failure(err).
+// A nil check is a wiring mistake: every request is answered 500.
 func Require(check authorization.Check) gin.HandlerFunc {
+	if check == nil {
+		check = func(context.Context) error { return errNilCheck }
+	}
 	return func(ginContext *gin.Context) {
 		err := check(ginContext.Request.Context())
 		if err == nil {

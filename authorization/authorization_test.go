@@ -145,18 +145,12 @@ func TestCombinators(t *testing.T) {
 		{name: "Any returns the first refusal when all refuse", check: authorization.Any(refuse(unauthenticated), refuse(forbidden)), want: unauthenticated},
 		{name: "Any returns a first internal error", check: authorization.Any(refuse(internal), refuse(forbidden)), want: internal},
 
-		{name: "Not refuses when the check allows", check: authorization.Not(allow()), want: auth.ErrForbidden},
-		{name: "Not allows when the check forbids", check: authorization.Not(refuse(forbidden))},
-		{name: "Not passes unauthenticated through", check: authorization.Not(refuse(unauthenticated)), want: unauthenticated},
-		{name: "Not passes internal errors through", check: authorization.Not(refuse(internal)), want: internal},
-		{name: "Not of Not allows", check: authorization.Not(authorization.Not(allow()))},
-
 		{name: "nested All in Any allows", check: authorization.Any(refuse(forbidden), authorization.All(allow(), allow()))},
 		{name: "nested Any in All refuses", check: authorization.All(allow(), authorization.Any(refuse(forbidden))), want: forbidden},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			err := testCase.check(t.Context())
+			err := testCase.check(withIdentity(t, activeIdentity()))
 
 			if testCase.want == nil {
 				require.NoError(t, err)
@@ -165,6 +159,61 @@ func TestCombinators(t *testing.T) {
 			require.ErrorIs(t, err, testCase.want)
 		})
 	}
+}
+
+func TestNot(t *testing.T) {
+	unauthenticated := &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "inner"}
+	internal := errors.New("membership lookup failed")
+
+	testCases := []struct {
+		name     string
+		check    authorization.Check
+		identity *auth.Identity
+		want     error // nil: allowed; otherwise errors.Is target
+	}{
+		{name: "allows when the check forbids", check: authorization.Not(authorization.HasRole("auditor")), identity: activeIdentity()},
+		{name: "refuses when the check allows", check: authorization.Not(authorization.HasRole("editor")), identity: activeIdentity(), want: auth.ErrForbidden},
+		{name: "refuses no identity", check: authorization.Not(authorization.HasRole("auditor")), want: auth.ErrUnauthenticated},
+		{name: "refuses an inactive identity", check: authorization.Not(authorization.HasRole("auditor")), identity: inactiveIdentity(), want: auth.ErrForbidden},
+		{name: "refuses an inactive identity even when the check forbids", check: authorization.Not(refuse(&auth.Error{Kind: auth.ErrForbidden})), identity: inactiveIdentity(), want: auth.ErrForbidden},
+		{name: "passes unauthenticated through", check: authorization.Not(refuse(unauthenticated)), identity: activeIdentity(), want: unauthenticated},
+		{name: "passes internal errors through", check: authorization.Not(refuse(internal)), identity: activeIdentity(), want: internal},
+		{name: "Not of Not allows", check: authorization.Not(authorization.Not(allow())), identity: activeIdentity()},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := testCase.check(withIdentity(t, testCase.identity))
+
+			if testCase.want == nil {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, testCase.want)
+		})
+	}
+}
+
+func TestNilChecksFailClosed(t *testing.T) {
+	testCases := []struct {
+		name  string
+		check authorization.Check
+	}{
+		{name: "All", check: authorization.All(allow(), nil)},
+		{name: "Any", check: authorization.Any(nil)},
+		{name: "Not", check: authorization.Not(nil)},
+		{name: "Real", check: authorization.Real(nil)},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := testCase.check(withIdentity(t, activeIdentity()))
+
+			var refusal *auth.Error
+			require.ErrorAs(t, err, &refusal)
+			require.ErrorIs(t, err, auth.ErrForbidden)
+			require.Equal(t, "nil check", refusal.Reason)
+		})
+	}
+	require.NoError(t, authorization.Any(nil, allow())(t.Context()), "a nil check is one refusal, not a veto")
 }
 
 func TestCombinatorsKeepTheirChecks(t *testing.T) {
@@ -182,7 +231,7 @@ func TestCombinatorsOverIdentities(t *testing.T) {
 	ownerOrAdmin := authorization.Any(authorization.IsAdmin(), authorization.HasUserID(userID))
 	owner := &auth.Identity{Provider: "password", Subject: "owner", UserID: userID, Active: true}
 	stranger := &auth.Identity{Provider: "password", Subject: "stranger", UserID: otherUserID, Active: true}
-	notReadOnly := authorization.All(authorization.IsUser(), authorization.Not(authorization.HasRole("read-only")))
+	notReadOnly := authorization.Not(authorization.HasRole("read-only"))
 	readOnly := &auth.Identity{Provider: "password", Subject: "reader", Active: true, Roles: []string{"read-only"}}
 
 	requireRefusal(t, nil, ownerOrAdmin(withIdentity(t, owner)))
@@ -192,6 +241,7 @@ func TestCombinatorsOverIdentities(t *testing.T) {
 
 	requireRefusal(t, nil, notReadOnly(withIdentity(t, owner)))
 	requireRefusal(t, auth.ErrForbidden, notReadOnly(withIdentity(t, readOnly)))
+	requireRefusal(t, auth.ErrForbidden, notReadOnly(withIdentity(t, inactiveIdentity())))
 	requireRefusal(t, auth.ErrUnauthenticated, authorization.Not(authorization.IsAuthenticated())(t.Context()))
 }
 

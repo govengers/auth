@@ -4,8 +4,9 @@
 // into the context.
 //
 // Refusals are *auth.Error: ErrUnauthenticated when there is no identity, ErrForbidden otherwise,
-// with a Reason for the wide event that never reaches the client. Every primitive except
-// IsAuthenticated requires an active identity, so a deactivated admin is not an admin.
+// with a Reason for the wide event that never reaches the client. Not and every primitive except
+// IsAuthenticated require an active identity, so a deactivated admin is not an admin.
+// A nil Check given to a combinator refuses with ErrForbidden, so a wiring mistake fails closed.
 //
 // Entity checks (may this identity see this object) stay in the applications. Checks are pure and
 // safe for concurrent use.
@@ -29,7 +30,7 @@ type Check func(ctx context.Context) error
 // All passes when every check passes and returns the first refusal otherwise. Without checks it refuses
 // with ErrForbidden.
 func All(checks ...Check) Check {
-	checks = slices.Clone(checks)
+	checks = failClosed(checks)
 	return func(ctx context.Context) error {
 		if len(checks) == 0 {
 			return forbidden("no checks")
@@ -46,7 +47,7 @@ func All(checks ...Check) Check {
 // Any passes when one check passes. When all refuse it returns the first check's refusal; without
 // checks it refuses with ErrForbidden.
 func Any(checks ...Check) Check {
-	checks = slices.Clone(checks)
+	checks = failClosed(checks)
 	return func(ctx context.Context) error {
 		if len(checks) == 0 {
 			return forbidden("no checks")
@@ -65,12 +66,18 @@ func Any(checks ...Check) Check {
 	}
 }
 
-// Not passes when check refuses with ErrForbidden and refuses with ErrForbidden when check passes.
-// ErrUnauthenticated and other errors pass through, so Not never admits a request without an identity.
-// The primitives refuse inactive identities with ErrForbidden, so Not(HasRole(role)) passes an inactive
-// identity: combine it with IsUser.
+// Not inverts check for an active identity: it passes when check refuses with ErrForbidden and refuses
+// with ErrForbidden when check passes; other errors pass through. Like the primitives it refuses a
+// missing identity with ErrUnauthenticated and an inactive one with ErrForbidden before it evaluates
+// check, so Not(HasRole(role)) never admits an anonymous or deactivated identity.
 func Not(check Check) Check {
+	if check == nil {
+		return nilCheck
+	}
 	return func(ctx context.Context) error {
+		if err := inactiveRefusal(auth.IdentityFrom(ctx)); err != nil {
+			return err
+		}
 		err := check(ctx)
 		switch {
 		case err == nil:
@@ -86,6 +93,7 @@ func Not(check Check) Check {
 // Real evaluates check against the identity that authenticated: the impersonator while impersonating,
 // the identity itself otherwise. Real(IsAdmin()) keeps an impersonating admin an admin.
 func Real(check Check) Check {
+	check = failClosedCheck(check)
 	return func(ctx context.Context) error {
 		return check(auth.WithIdentity(ctx, auth.IdentityFrom(ctx).Real()))
 	}
@@ -154,6 +162,28 @@ func HasGitHubTeam(team string) Check {
 	return activeIdentityWith("missing GitHub team "+team, func(identity *auth.Identity) bool {
 		return slices.Contains(identity.Teams, team)
 	})
+}
+
+// failClosed returns a copy of checks in which every nil check refuses.
+func failClosed(checks []Check) []Check {
+	safeChecks := make([]Check, len(checks))
+	for index, check := range checks {
+		safeChecks[index] = failClosedCheck(check)
+	}
+	return safeChecks
+}
+
+// failClosedCheck returns check, or nilCheck when check is nil.
+func failClosedCheck(check Check) Check {
+	if check == nil {
+		return nilCheck
+	}
+	return check
+}
+
+// nilCheck is what a nil Check becomes: a refusal, never a panic.
+func nilCheck(context.Context) error {
+	return forbidden("nil check")
 }
 
 // activeIdentityWith passes an active identity for which allowed holds and refuses others with reason.

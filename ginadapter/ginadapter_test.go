@@ -292,6 +292,12 @@ func TestRequire(t *testing.T) {
 			wantAuthorization: map[string]any{"denied": true, "reason": "membership lookup failed", "error": "membership lookup failed"},
 			wantOutcome:       "failure", wantError: "membership lookup failed",
 		},
+		{
+			name: "nil check is 500", identity: admin,
+			wantStatus: http.StatusInternalServerError, wantBody: `{"code":"internal","message":"internal error"}`,
+			wantAuthorization: map[string]any{"denied": true, "reason": "authorization check is nil", "error": "authorization check is nil"},
+			wantOutcome:       "failure", wantError: "authorization check is nil",
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
