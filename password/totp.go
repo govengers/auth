@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -72,12 +73,10 @@ func (p *Provider) challengeFor(user *User) (Challenge, bool) {
 	return "", false
 }
 
-// startChallenge starts a fresh session that only holds the pending login and answers 202 with challenge.
+// startChallenge starts a fresh session that only holds the pending login and answers 202 with challenge. It
+// leaves the TOTP attempt counter alone: only a verified second factor resets it, so logging in again does not
+// buy more guesses.
 func (p *Provider) startChallenge(writer http.ResponseWriter, request *http.Request, user *User, challenge Challenge) reply {
-	ctx := request.Context()
-	if err := p.options.Storage.ResetTOTPAttempts(ctx, user.ID); err != nil {
-		return refused(fmt.Errorf("reset TOTP attempts of user %s: %w", user.ID, err))
-	}
 	purpose := purposeVerify
 	if challenge == ChallengeTOTPSetup {
 		purpose = purposeEnrollment
@@ -157,28 +156,53 @@ func (p *Provider) generateKey(user *User) (*otp.Key, error) {
 	return key, nil
 }
 
-// codeValid reports whether code is a TOTP code of secret at the current time, within the skew.
-func (p *Provider) codeValid(secret, code string) bool {
-	valid, err := totp.ValidateCustom(strings.TrimSpace(code), secret, p.now(), totp.ValidateOpts{
-		Period: p.options.TOTP.Period,
-		Skew:   p.options.TOTP.Skew,
-		Digits: otp.Digits(p.options.TOTP.Digits),
-	})
-	return err == nil && valid
+// consumeTOTPCode reports whether code is a TOTP code of secret within the skew whose time step is later than the
+// last one the user used, and marks its step used, so every code is accepted once.
+func (p *Provider) consumeTOTPCode(ctx context.Context, id uuid.UUID, secret, code string) (bool, error) {
+	step, found := p.codeStep(secret, code)
+	if !found {
+		return false, nil
+	}
+	consumed, err := p.options.Storage.ConsumeTOTPStep(ctx, id, step)
+	if err != nil {
+		return false, fmt.Errorf("consume TOTP step of user %s: %w", id, err)
+	}
+	return consumed, nil
 }
 
-// newBackupCodes returns the configured number of random backup codes and their Argon2id hashes; none when
-// backup codes are disabled.
+// codeStep returns the start of the time step within the skew around now whose TOTP code of secret is code.
+func (p *Provider) codeStep(secret, code string) (time.Time, bool) {
+	period := int64(p.options.TOTP.Period) //nolint:gosec // G115: at most maximumPeriod, checked by New
+	skew := int64(p.options.TOTP.Skew)     //nolint:gosec // G115: at most maximumSkew, checked by New
+	current := p.now().Unix() / period
+	for counter := current - skew; counter <= current+skew; counter++ {
+		step := time.Unix(counter*period, 0)
+		valid, err := totp.ValidateCustom(strings.TrimSpace(code), secret, step, totp.ValidateOpts{
+			Period: p.options.TOTP.Period,
+			Digits: otp.Digits(p.options.TOTP.Digits),
+		})
+		if err == nil && valid {
+			return step, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// newBackupCodes returns the configured number of distinct random backup codes and their Argon2id hashes; none
+// when backup codes are disabled.
 func (p *Provider) newBackupCodes() (codes, hashes []string, err error) {
 	if p.options.TOTP.DisableBackupCodes {
 		return []string{}, nil, nil
 	}
 	codes = make([]string, 0, p.options.TOTP.BackupCodeCount)
 	hashes = make([]string, 0, p.options.TOTP.BackupCodeCount)
-	for range p.options.TOTP.BackupCodeCount {
+	for len(codes) < p.options.TOTP.BackupCodeCount {
 		code, err := randomCode(p.backupCodeAlphabet, p.options.TOTP.BackupCodeLength)
 		if err != nil {
 			return nil, nil, err
+		}
+		if slices.Contains(codes, code) {
+			continue // a duplicate would redeem twice
 		}
 		hash, err := Hash(code, p.options.HashParameters)
 		if err != nil {
@@ -215,12 +239,9 @@ func matchingBackupCode(hashes []string, code string) (string, bool) {
 	return "", false
 }
 
-// consumeSecondFactor reports whether code is a current TOTP code of user or, with backup codes on, one of the
-// user's unused backup codes, which it consumes. A backup code a racing request consumed first does not count.
-func (p *Provider) consumeSecondFactor(ctx context.Context, user *User, code string, backupCode bool) (bool, error) {
-	if !backupCode && p.codeValid(*user.TOTPSecret, code) {
-		return true, nil
-	}
+// consumeBackupCode reports whether code is one of the user's unused backup codes, which it consumes. With backup
+// codes disabled none is, and one a racing request consumed first does not count.
+func (p *Provider) consumeBackupCode(ctx context.Context, user *User, code string) (bool, error) {
 	if p.options.TOTP.DisableBackupCodes {
 		return false, nil
 	}

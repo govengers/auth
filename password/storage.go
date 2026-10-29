@@ -3,6 +3,7 @@ package password
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -27,15 +28,16 @@ type User struct {
 }
 
 // Storage persists users; the application implements it. Every method is atomic on its own and safe for
-// concurrent use. The TOTP state (TOTPEnabled, TOTPSecret, BackupCodeHashes and a failed-attempt counter the
-// storage keeps) changes only through the TOTP methods below.
+// concurrent use. The TOTP state (TOTPEnabled, TOTPSecret, BackupCodeHashes, plus a failed-attempt counter and
+// the last used time step the storage keeps) changes only through the TOTP methods below.
 type Storage interface {
-	// CreateUser stores a new user. A username or email another user already has is ErrUserExists; let a
-	// unique constraint decide it, not a lookup before the insert.
+	// CreateUser stores a new user. A username or email another user already has, ignoring case, is
+	// ErrUserExists; let a unique constraint decide it (e.g. on lower(email)), not a lookup before the insert.
 	CreateUser(ctx context.Context, user *User) error
-	// GetUserByUsername returns the user with username, or ErrUserNotFound.
+	// GetUserByUsername returns the user with username, ignoring case (e.g. WHERE lower(username) = lower($1)),
+	// or ErrUserNotFound. The provider passes identifiers as typed.
 	GetUserByUsername(ctx context.Context, username string) (*User, error)
-	// GetUserByEmail returns the user with email, or ErrUserNotFound.
+	// GetUserByEmail returns the user with email, ignoring case, or ErrUserNotFound.
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 	// GetUserByID returns the user with id, or ErrUserNotFound.
 	GetUserByID(ctx context.Context, id uuid.UUID) (*User, error)
@@ -48,8 +50,15 @@ type Storage interface {
 	// nothing and returns ErrTOTPAttemptsExhausted. Check and increment are one atomic step, e.g.
 	// UPDATE ... SET attempts = attempts + 1 WHERE id = $1 AND attempts < $2 RETURNING $2 - attempts.
 	ConsumeTOTPAttempt(ctx context.Context, id uuid.UUID, maximum int) (remaining int, err error)
-	// ResetTOTPAttempts sets the attempt counter to zero.
+	// ResetTOTPAttempts sets the attempt counter to zero. The provider calls it after a verified second factor;
+	// the application calls it to unlock a user whose attempts are exhausted.
 	ResetTOTPAttempts(ctx context.Context, id uuid.UUID) error
+	// ConsumeTOTPStep marks the TOTP time step starting at step as the last one the user used: when step is later
+	// than the step it holds (or it holds none), it records step and returns true; otherwise it changes nothing
+	// and returns false, so a code is accepted once and never after a later one. Check and write are one atomic
+	// step, e.g. UPDATE ... SET totp_step = $2 WHERE id = $1 AND (totp_step IS NULL OR totp_step < $2).
+	// SetTOTP and ClearTOTP keep it.
+	ConsumeTOTPStep(ctx context.Context, id uuid.UUID, step time.Time) (bool, error)
 	// ConsumeBackupCode removes hash from BackupCodeHashes and reports whether it was there; of two concurrent
 	// calls with the same hash at most one returns true.
 	ConsumeBackupCode(ctx context.Context, id uuid.UUID, hash string) (bool, error)

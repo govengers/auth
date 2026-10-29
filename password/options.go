@@ -3,9 +3,12 @@ package password
 import (
 	"errors"
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/redirect"
@@ -23,22 +26,26 @@ const (
 	defaultBackupCodeCount    = 10
 	defaultBackupCodeLength   = 10
 	defaultBackupCodeAlphabet = "0123456789"
+	maximumPeriod             = 3600
+	maximumSkew               = 10
+	maximumBackupCodeCount    = 20
+	minimumBackupCodeSpace    = 1_000_000 // distinct codes, as many as a 6-digit TOTP code has
 )
 
 // TOTPOptions configure the second factor.
 type TOTPOptions struct {
-	Enabled            bool          // routes the TOTP endpoints and challenges users who enabled TOTP
+	Enabled            bool          // routes the TOTP endpoints and challenges users who enabled TOTP; while off, their logins fail (500)
 	Required           bool          // users without TOTP enroll during login; needs Enabled
 	Issuer             string        // required when Enabled (otpauth issuer)
-	Period             uint          // default 30 s
+	Period             uint          // default 30 s; at most 3600
 	Digits             uint          // 6 or 8; default 6
-	Skew               uint          // periods accepted before and after the current one; default 1
-	MaximumAttempts    int           // default 5 wrong codes per password login; must be > 0
+	Skew               uint          // periods accepted before and after the current one; default 1; at most 10
+	MaximumAttempts    int           // default 5 wrong codes in a row, across logins; then the second factor stays locked until Storage.ResetTOTPAttempts
 	PendingTTL         time.Duration // default 5 min (password step to code step)
 	DisableBackupCodes bool
-	BackupCodeCount    int    // default 10
-	BackupCodeLength   int    // default 10
-	BackupCodeAlphabet string // default "0123456789"; at least 2 distinct runes, no white space; stored lower-case
+	BackupCodeCount    int    // default 10; at most 20
+	BackupCodeLength   int    // default 10; at most 128 bytes per code and at least a million distinct codes
+	BackupCodeAlphabet string // default "0123456789"; at least 2 distinct runes, no white space; stored lower-case, repeated runes count once
 }
 
 // Options configure New.
@@ -142,22 +149,38 @@ func validateTOTPOptions(options TOTPOptions) error {
 		return errors.New("option Issuer is required")
 	case options.Digits != 6 && options.Digits != 8:
 		return fmt.Errorf("option Digits %d is neither 6 nor 8", options.Digits)
+	case options.Period > maximumPeriod, options.Skew > maximumSkew:
+		return fmt.Errorf("option Period %d or Skew %d is above %d or %d", options.Period, options.Skew, maximumPeriod, maximumSkew)
 	case options.MaximumAttempts < 0, options.PendingTTL < 0, options.BackupCodeCount < 0, options.BackupCodeLength < 0:
 		return errors.New("MaximumAttempts, PendingTTL, BackupCodeCount and BackupCodeLength must not be negative")
+	case options.BackupCodeCount > maximumBackupCodeCount:
+		return fmt.Errorf("BackupCodeCount %d is above %d", options.BackupCodeCount, maximumBackupCodeCount)
 	}
-	return validateBackupCodeAlphabet(options.BackupCodeAlphabet)
+	return validateBackupCodes(options.BackupCodeAlphabet, options.BackupCodeLength)
 }
 
-func validateBackupCodeAlphabet(alphabet string) error {
-	if strings.ContainsFunc(alphabet, unicode.IsSpace) {
+// validateBackupCodes refuses codes of length characters over alphabet that Hash cannot take or that are too few
+// to resist guessing.
+func validateBackupCodes(alphabet string, length int) error {
+	characters := distinctRunes(alphabet)
+	widest := 0
+	for _, character := range characters {
+		widest = max(widest, utf8.RuneLen(character))
+	}
+	switch {
+	case strings.ContainsFunc(alphabet, unicode.IsSpace):
 		return errors.New("BackupCodeAlphabet contains white space")
-	}
-	distinct := map[rune]bool{}
-	for _, character := range alphabet {
-		distinct[character] = true
-	}
-	if len(distinct) < 2 {
+	case len(characters) < 2:
 		return errors.New("BackupCodeAlphabet needs at least 2 distinct characters")
+	case length*widest > maximumPasswordLength:
+		return fmt.Errorf("BackupCodeLength %d makes codes longer than %d bytes", length, maximumPasswordLength)
+	case math.Pow(float64(len(characters)), float64(length)) < minimumBackupCodeSpace:
+		return fmt.Errorf("BackupCodeLength %d over %d characters makes fewer than %d codes", length, len(characters), minimumBackupCodeSpace)
 	}
 	return nil
+}
+
+// distinctRunes returns the runes of text, each once.
+func distinctRunes(text string) []rune {
+	return slices.Compact(slices.Sorted(slices.Values([]rune(text))))
 }

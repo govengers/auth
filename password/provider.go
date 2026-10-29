@@ -41,6 +41,7 @@ type Provider struct {
 	backupCodeAlphabet []rune
 	dummyHash          string // verified for unknown users, so a lookup costs the same either way
 	now                func() time.Time
+	verifyHash         func(password, encodedHash string) (bool, Parameters, error) // verifyHash; tests observe the calls
 }
 
 // New validates options, applies the defaults to a copy and precomputes the dummy hash used for unknown users
@@ -68,9 +69,10 @@ func newProvider(options Options) (*Provider, error) {
 	}
 	return &Provider{
 		options:            options,
-		backupCodeAlphabet: []rune(options.TOTP.BackupCodeAlphabet),
+		backupCodeAlphabet: distinctRunes(options.TOTP.BackupCodeAlphabet),
 		dummyHash:          dummyHash,
 		now:                time.Now,
+		verifyHash:         verifyHash,
 	}, nil
 }
 
@@ -105,12 +107,9 @@ func (p *Provider) Routes() []auth.Route {
 // Refresh implements session.Refresher: it re-reads the user and updates Username and Email, keeping every
 // other field. A deleted user is ErrUnauthenticated, which ends the session.
 func (p *Provider) Refresh(ctx context.Context, _ session.Session, identity *auth.Identity) (*auth.Identity, error) {
-	user, err := p.options.Storage.GetUserByID(ctx, identity.UserID)
-	if errors.Is(err, ErrUserNotFound) {
-		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "user deleted", Err: err}
-	}
+	user, err := p.knownUser(ctx, identity.UserID, "user deleted")
 	if err != nil {
-		return nil, fmt.Errorf("refresh password user %s: %w", identity.UserID, err)
+		return nil, err
 	}
 	refreshed := identity.Clone()
 	refreshed.Username = textOf(user.Username)
@@ -176,19 +175,29 @@ func (p *Provider) report(ctx context.Context, outcome auth.Outcome) {
 // signIn runs OnLogin for user, starts a fresh session (revoking the request's current one) and saves the
 // identity in it.
 func (p *Provider) signIn(writer http.ResponseWriter, request *http.Request, user *User) (*auth.Identity, error) {
-	ctx := request.Context()
-	identity, err := hook.RunOnLogin(ctx, p.options.OnLogin, identityOf(user))
+	current, identity, err := p.admit(writer, request, user)
 	if err != nil {
 		return nil, err
 	}
-	current, err := p.options.Sessions.Start(ctx, writer, request)
-	if err != nil {
-		return nil, err
-	}
-	if err := current.SaveIdentity(ctx, identity); err != nil {
+	if err := current.SaveIdentity(request.Context(), identity); err != nil {
 		return nil, err
 	}
 	return identity, nil
+}
+
+// admit runs OnLogin for user and starts a fresh session (revoking the request's current one) for the identity
+// it returns; saving the identity there completes the login.
+func (p *Provider) admit(writer http.ResponseWriter, request *http.Request, user *User) (session.Session, *auth.Identity, error) {
+	ctx := request.Context()
+	identity, err := hook.RunOnLogin(ctx, p.options.OnLogin, identityOf(user))
+	if err != nil {
+		return session.Session{}, nil, err
+	}
+	current, err := p.options.Sessions.Start(ctx, writer, request)
+	if err != nil {
+		return session.Session{}, nil, err
+	}
+	return current, identity, nil
 }
 
 func identityOf(user *User) *auth.Identity {

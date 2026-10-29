@@ -8,8 +8,8 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -341,6 +341,13 @@ func (s *failingStorage) ResetTOTPAttempts(ctx context.Context, id uuid.UUID) er
 	return s.MemoryStorage.ResetTOTPAttempts(ctx, id)
 }
 
+func (s *failingStorage) ConsumeTOTPStep(ctx context.Context, id uuid.UUID, step time.Time) (bool, error) {
+	if err := s.fail("ConsumeTOTPStep"); err != nil {
+		return false, err
+	}
+	return s.MemoryStorage.ConsumeTOTPStep(ctx, id, step)
+}
+
 func (s *failingStorage) ConsumeBackupCode(ctx context.Context, id uuid.UUID, hash string) (bool, error) {
 	if err := s.fail("ConsumeBackupCode"); err != nil {
 		return false, err
@@ -367,46 +374,50 @@ func (f *fixture) failStorage(operation string) {
 	f.provider.options.Storage = &failingStorage{MemoryStorage: f.storage, failing: operation}
 }
 
-// failingBackend is a session backend that fails every operation once failing is set.
+// failingBackend is a session backend that fails the operations named in failing, every operation when it names
+// none, and delegates the others.
 type failingBackend struct {
 	session.Backend
-	failing atomic.Bool
+	failing []string
+}
+
+func (b *failingBackend) fails(operation string) bool {
+	return len(b.failing) == 0 || slices.Contains(b.failing, operation)
 }
 
 func (b *failingBackend) Put(ctx context.Context, sessionID, key string, value []byte, ttl time.Duration) error {
-	if b.failing.Load() {
+	if b.fails("Put") {
 		return errStorageDown
 	}
 	return b.Backend.Put(ctx, sessionID, key, value, ttl)
 }
 
 func (b *failingBackend) Get(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
-	if b.failing.Load() {
+	if b.fails("Get") {
 		return nil, false, errStorageDown
 	}
 	return b.Backend.Get(ctx, sessionID, key)
 }
 
 func (b *failingBackend) Pop(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
-	if b.failing.Load() {
+	if b.fails("Pop") {
 		return nil, false, errStorageDown
 	}
 	return b.Backend.Pop(ctx, sessionID, key)
 }
 
 func (b *failingBackend) Revoke(ctx context.Context, sessionID string, ttl time.Duration) error {
-	if b.failing.Load() {
+	if b.fails("Revoke") {
 		return errStorageDown
 	}
 	return b.Backend.Revoke(ctx, sessionID, ttl)
 }
 
-// failSessions moves the provider onto a store over the same sessions whose backend fails from now on.
-func (f *fixture) failSessions(t *testing.T) {
+// failSessions moves the provider onto a store over the same sessions whose backend fails operations (every one
+// when none is named) from now on.
+func (f *fixture) failSessions(t *testing.T, operations ...string) {
 	t.Helper()
-	backend := &failingBackend{Backend: f.backend}
-	backend.failing.Store(true)
-	sessions, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: testEncryptionKey})
+	sessions, err := session.NewStore(&session.StoreOptions{Backend: &failingBackend{Backend: f.backend, failing: operations}, EncryptionKey: testEncryptionKey})
 	require.NoError(t, err)
 	f.provider.options.Sessions = sessions
 }

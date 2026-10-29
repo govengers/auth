@@ -93,6 +93,69 @@ func (s *resettingStorage) UpdatePasswordHash(ctx context.Context, id uuid.UUID,
 	return s.MemoryStorage.UpdatePasswordHash(ctx, id, currentHash, newHash)
 }
 
+func TestLoginRehashesOutdatedArgon2idHashes(t *testing.T) {
+	fixture := newFixture(t, Options{})
+	user := fixture.createUser(t, "ada", "")
+	current := fixture.storedUser(t, user.ID).PasswordHash
+	require.Equal(t, http.StatusOK, fixture.newClient(t).login("ada").Code)
+	require.Equal(t, current, fixture.storedUser(t, user.ID).PasswordHash)
+	outdated := testParameters
+	outdated.Memory = 32
+	outdatedHash, err := Hash(testPassword, outdated)
+	require.NoError(t, err)
+	require.NoError(t, fixture.storage.UpdatePasswordHash(t.Context(), user.ID, current, outdatedHash))
+
+	require.Equal(t, http.StatusOK, fixture.newClient(t).login("ada").Code)
+
+	rehashed := fixture.storedUser(t, user.ID).PasswordHash
+	require.True(t, strings.HasPrefix(rehashed, "$argon2id$v=19$m=64,t=1,p=1$"), rehashed)
+	matched, err := Verify(testPassword, rehashed)
+	require.NoError(t, err)
+	require.True(t, matched)
+}
+
+func TestFailedChecksCostAVerification(t *testing.T) {
+	const unverifiable = "not a hash"
+	testCases := []struct {
+		name           string
+		identifier     string
+		storedHash     string // empty: the hash createUser stores
+		legacyVerifier func(password, storedHash string) (bool, error)
+		password       string
+		wantVerified   []string
+	}{
+		{name: "unknown user", identifier: "grace", password: testPassword, wantVerified: []string{"dummy"}},
+		{name: "wrong password", identifier: "ada", password: "wrong password", wantVerified: []string{"stored"}},
+		{name: "hash nothing verifies", identifier: "ada", storedHash: unverifiable, password: testPassword, wantVerified: []string{"stored", "dummy"}},
+		{
+			name: "hash the legacy verifier refuses", identifier: "ada", storedHash: unverifiable, legacyVerifier: VerifyBcrypt, password: testPassword,
+			wantVerified: []string{"stored", "dummy"},
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newFixture(t, Options{LegacyVerifier: testCase.legacyVerifier})
+			user := fixture.createUser(t, "ada", "")
+			stored := fixture.storedUser(t, user.ID).PasswordHash
+			if testCase.storedHash != "" {
+				require.NoError(t, fixture.storage.UpdatePasswordHash(t.Context(), user.ID, stored, testCase.storedHash))
+				stored = testCase.storedHash
+			}
+			names := map[string]string{stored: "stored", fixture.provider.dummyHash: "dummy"}
+			var verified []string
+			fixture.provider.verifyHash = func(password, encodedHash string) (bool, Parameters, error) {
+				verified = append(verified, names[encodedHash])
+				return verifyHash(password, encodedHash)
+			}
+
+			recorder := fixture.newClient(t).post("/auth/password/login", map[string]any{"identifier": testCase.identifier, "password": testCase.password})
+
+			requireRefusal(t, recorder, http.StatusUnauthorized, "invalid_credentials")
+			require.Equal(t, testCase.wantVerified, verified)
+		})
+	}
+}
+
 func TestLegacyUpgradeKeepsAConcurrentPasswordChange(t *testing.T) {
 	fixture := newFixture(t, Options{LegacyVerifier: VerifyBcrypt})
 	user := fixture.createLegacyUser(t, bcryptHash(t, testPassword))

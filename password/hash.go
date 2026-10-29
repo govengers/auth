@@ -92,13 +92,19 @@ func Hash(password string, parameters Parameters) (string, error) {
 // the limits (memory 128 MiB, 50 iterations, parallelism 8, salt and key 16..1024 bytes) is ErrInvalidHash.
 // It is safe for concurrent use.
 func Verify(password, encodedHash string) (bool, error) {
+	matched, _, err := verifyHash(password, encodedHash)
+	return matched, err
+}
+
+// verifyHash is Verify that also returns the parameters encodedHash was computed with.
+func verifyHash(password, encodedHash string) (bool, Parameters, error) {
 	decoded, err := decodeHash(encodedHash)
 	if err != nil {
-		return false, err
+		return false, Parameters{}, err
 	}
 	key := argon2.IDKey([]byte(password), decoded.salt, decoded.parameters.Iterations, decoded.parameters.Memory,
 		decoded.parameters.Parallelism, decoded.parameters.KeyLength)
-	return subtle.ConstantTimeCompare(key, decoded.key) == 1, nil
+	return subtle.ConstantTimeCompare(key, decoded.key) == 1, decoded.parameters, nil
 }
 
 type decodedHash struct {

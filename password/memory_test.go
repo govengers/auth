@@ -4,6 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -129,6 +130,26 @@ func TestMemoryStorageTOTPAttempts(t *testing.T) {
 	spendAll()
 }
 
+func TestMemoryStorageConsumeTOTPStep(t *testing.T) {
+	storage := NewMemoryStorage()
+	user := newMemoryUser("ada", "")
+	require.NoError(t, storage.CreateUser(t.Context(), user))
+	step := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	consume := func(step time.Time) bool {
+		consumed, err := storage.ConsumeTOTPStep(t.Context(), user.ID, step)
+		require.NoError(t, err)
+		return consumed
+	}
+
+	require.True(t, consume(step))
+	require.False(t, consume(step))
+	require.False(t, consume(step.Add(-30*time.Second)))
+	require.NoError(t, storage.SetTOTP(t.Context(), user.ID, "secret", nil))
+	require.NoError(t, storage.ClearTOTP(t.Context(), user.ID))
+	require.False(t, consume(step))
+	require.True(t, consume(step.Add(30*time.Second)))
+}
+
 func TestMemoryStorageSetAndClearTOTP(t *testing.T) {
 	storage := NewMemoryStorage()
 	user := newMemoryUser("ada", "")
@@ -202,6 +223,10 @@ func TestMemoryStorageUnknownUser(t *testing.T) {
 			return err
 		},
 		"ResetTOTPAttempts": func() error { return storage.ResetTOTPAttempts(t.Context(), unknown) },
+		"ConsumeTOTPStep": func() error {
+			_, err := storage.ConsumeTOTPStep(t.Context(), unknown, time.Now())
+			return err
+		},
 		"ConsumeBackupCode": func() error {
 			_, err := storage.ConsumeBackupCode(t.Context(), unknown, "hash")
 			return err
