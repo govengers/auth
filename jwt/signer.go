@@ -20,6 +20,7 @@ import (
 	jwxjwt "github.com/lestrrat-go/jwx/v3/jwt"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/dependency"
 )
 
 const (
@@ -128,11 +129,11 @@ func parseRSAPrivateKey(block *pem.Block) (*rsa.PrivateKey, error) {
 func publicKeySet(publicKey *rsa.PublicKey) (keyID string, keySetJSON []byte, err error) {
 	thumbprintKey, err := jwk.Import(publicKey)
 	if err != nil {
-		return "", nil, dependencyError("import public key", err)
+		return "", nil, dependency.Error("import public key", err)
 	}
 	thumbprint, err := thumbprintKey.Thumbprint(crypto.SHA256)
 	if err != nil {
-		return "", nil, dependencyError("compute key thumbprint", err)
+		return "", nil, dependency.Error("compute key thumbprint", err)
 	}
 	keyID = base64.RawURLEncoding.EncodeToString(thumbprint)
 	publicJWK, err := jwkWithKeyID(publicKey, keyID)
@@ -141,12 +142,12 @@ func publicKeySet(publicKey *rsa.PublicKey) (keyID string, keySetJSON []byte, er
 	}
 	for name, value := range map[string]any{jwk.AlgorithmKey: jwa.RS512(), jwk.KeyUsageKey: jwk.ForSignature} {
 		if err := publicJWK.Set(name, value); err != nil {
-			return "", nil, dependencyError("set JWK "+name, err)
+			return "", nil, dependency.Error("set JWK "+name, err)
 		}
 	}
 	keySetJSON, err = json.Marshal(map[string][]jwk.Key{"keys": {publicJWK}})
 	if err != nil {
-		return "", nil, dependencyError("encode JWKS", err)
+		return "", nil, dependency.Error("encode JWKS", err)
 	}
 	return keyID, keySetJSON, nil
 }
@@ -154,10 +155,10 @@ func publicKeySet(publicKey *rsa.PublicKey) (keyID string, keySetJSON []byte, er
 func jwkWithKeyID(rawKey any, keyID string) (jwk.Key, error) {
 	key, err := jwk.Import(rawKey)
 	if err != nil {
-		return nil, dependencyError(fmt.Sprintf("import %T", rawKey), err)
+		return nil, dependency.Error(fmt.Sprintf("import %T", rawKey), err)
 	}
 	if err := key.Set(jwk.KeyIDKey, keyID); err != nil {
-		return nil, dependencyError("set key ID", err)
+		return nil, dependency.Error("set key ID", err)
 	}
 	return key, nil
 }
@@ -171,7 +172,7 @@ func (s *Signer) Sign(identity *auth.Identity) (string, error) {
 	}
 	tokenID, err := uuid.NewRandom()
 	if err != nil {
-		return "", dependencyError("sign JWT: generate token ID", err)
+		return "", dependency.Error("sign JWT: generate token ID", err)
 	}
 	claims, err := identityClaims(identity)
 	if err != nil {
@@ -181,12 +182,12 @@ func (s *Signer) Sign(identity *auth.Identity) (string, error) {
 	token := jwxjwt.New()
 	for name, value := range claims {
 		if err := token.Set(name, value); err != nil {
-			return "", dependencyError("sign JWT: set claim "+name, err)
+			return "", dependency.Error("sign JWT: set claim "+name, err)
 		}
 	}
 	signed, err := jwxjwt.Sign(token, jwxjwt.WithKey(jwa.RS512(), s.signingKey))
 	if err != nil {
-		return "", dependencyError("sign JWT for subject "+identity.Subject, err)
+		return "", dependency.Error("sign JWT for subject "+identity.Subject, err)
 	}
 	return string(signed), nil
 }
@@ -216,10 +217,4 @@ func (s *Signer) JWKSHandler() http.Handler {
 		// A write error means the client is gone and there is nobody left to answer.
 		_, _ = writer.Write(s.keySetJSON)
 	})
-}
-
-// dependencyError keeps the message of a jwx (or uuid) error and drops its chain, so callers cannot
-// start matching on the dependency's errors (LIB-010).
-func dependencyError(operation string, err error) error {
-	return fmt.Errorf("%s: %v", operation, err) //nolint:errorlint // LIB-010: the dependency's errors are not part of this package's API
 }

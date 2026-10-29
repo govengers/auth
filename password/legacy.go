@@ -2,9 +2,10 @@ package password
 
 import (
 	"errors"
-	"fmt"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/govengers/auth/internal/dependency"
 )
 
 // VerifyBcrypt is a ready-made Options.LegacyVerifier for bcrypt hashes (PocketBase, Django, Rails and many
@@ -20,6 +21,6 @@ func VerifyBcrypt(password, storedHash string) (bool, error) {
 	case errors.Is(err, bcrypt.ErrMismatchedHashAndPassword):
 		return false, nil
 	default:
-		return false, fmt.Errorf("verify bcrypt hash: %v", err) //nolint:errorlint // LIB-010: bcrypt errors are not part of this package's API
+		return false, dependency.Error("verify bcrypt hash", err)
 	}
 }

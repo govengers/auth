@@ -24,6 +24,7 @@ import (
 	"golang.org/x/oauth2/clientcredentials"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/internal/redirect"
 )
 
@@ -216,7 +217,7 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 	}
 	token, err := c.requestToken(context.WithValue(ctx, oauth2.HTTPClient, c.options.HTTPClient))
 	if err != nil {
-		return "", dependencyError("request admin token", err)
+		return "", dependency.Error("request admin token", err)
 	}
 	// oauth2 turns expires_in into Expiry on the wall clock (the client credentials grant keeps no
 	// ExpiresIn); without expires_in Expiry is zero and the token is not reused.
@@ -309,7 +310,7 @@ func (c *Client) getJSON(ctx context.Context, accessToken, endpoint string, targ
 	request.Header.Set("Accept", "application/json")
 	response, err := c.options.HTTPClient.Do(request)
 	if err != nil {
-		return dependencyError("call admin API", err)
+		return dependency.Error("call admin API", err)
 	}
 	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
 	if response.StatusCode != http.StatusOK {
@@ -344,10 +345,4 @@ func missingRequirement(authorization userAuthorization, options Options) error 
 		}
 	}
 	return nil
-}
-
-// dependencyError keeps the message of an oauth2 or net/http error and drops its chain, so callers cannot
-// start matching on the dependency's errors (LIB-010).
-func dependencyError(operation string, err error) error {
-	return fmt.Errorf("%s: %v", operation, err) //nolint:errorlint // LIB-010: the dependency's errors are not part of this package's API
 }

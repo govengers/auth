@@ -14,6 +14,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/session"
 )
@@ -116,11 +117,11 @@ func discover(ctx context.Context, options Options) (*gooidc.Provider, providerM
 	// ClientContext: discovery uses HTTPClient, and the provider's remote key set keeps it after ctx ends.
 	discovered, err := gooidc.NewProvider(gooidc.ClientContext(ctx, options.HTTPClient), options.Issuer)
 	if err != nil {
-		return nil, providerMetadata{}, dependencyError("discover issuer", err)
+		return nil, providerMetadata{}, dependency.Error("discover issuer", err)
 	}
 	var metadata providerMetadata
 	if err := discovered.Claims(&metadata); err != nil {
-		return nil, providerMetadata{}, dependencyError("read provider metadata", err)
+		return nil, providerMetadata{}, dependency.Error("read provider metadata", err)
 	}
 	if metadata.EndSessionEndpoint != "" && !redirect.IsAbsoluteHTTPURL(metadata.EndSessionEndpoint) {
 		return nil, providerMetadata{}, errors.New("discovered end_session_endpoint is not an absolute http(s) URL")
@@ -274,10 +275,4 @@ func lowerCaseDomains(domains []string) ([]string, error) {
 
 func isSpaceOrControl(character rune) bool {
 	return character <= ' ' || character == 0x7f
-}
-
-// dependencyError keeps the message of a go-oidc or oauth2 error and drops its chain, so callers cannot
-// start matching on the dependency's errors (LIB-010).
-func dependencyError(operation string, err error) error {
-	return fmt.Errorf("%s: %v", operation, err) //nolint:errorlint // LIB-010: the dependency's errors are not part of this package's API
 }

@@ -12,6 +12,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/internal/oauthlogin"
 	"github.com/govengers/auth/internal/redirect"
 )
@@ -90,9 +91,9 @@ func (p *Provider) exchange(ctx context.Context, code, verifier string) (*oauth2
 	var retrieveError *oauth2.RetrieveError
 	switch {
 	case errors.As(err, &retrieveError):
-		return nil, loginFailed("token exchange", dependencyError("exchange code", err))
+		return nil, loginFailed("token exchange", dependency.Error("exchange code", err))
 	case err != nil:
-		return nil, dependencyError("oidc: exchange code", err)
+		return nil, dependency.Error("oidc: exchange code", err)
 	}
 	return token, nil
 }
@@ -104,7 +105,7 @@ func (p *Provider) verifyIdentityToken(ctx context.Context, token *oauth2.Token,
 	}
 	identityToken, err := p.identityTokenVerifier.Verify(ctx, rawIdentityToken)
 	if err != nil {
-		return verifiedLogin{}, loginFailed("ID token verification", dependencyError("verify ID token", err))
+		return verifiedLogin{}, loginFailed("ID token verification", dependency.Error("verify ID token", err))
 	}
 	if subtle.ConstantTimeCompare([]byte(identityToken.Nonce), []byte(nonce)) != 1 {
 		return verifiedLogin{}, loginFailed("nonce mismatch", nil)
@@ -114,7 +115,7 @@ func (p *Provider) verifyIdentityToken(ctx context.Context, token *oauth2.Token,
 	}
 	var claims map[string]any
 	if err := identityToken.Claims(&claims); err != nil {
-		return verifiedLogin{}, loginFailed("ID token claims", dependencyError("decode ID token claims", err))
+		return verifiedLogin{}, loginFailed("ID token claims", dependency.Error("decode ID token claims", err))
 	}
 	return verifiedLogin{rawIdentityToken: rawIdentityToken, subject: identityToken.Subject, identityClaims: claims}, nil
 }
