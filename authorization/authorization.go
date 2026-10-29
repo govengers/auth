@@ -82,9 +82,9 @@ func Any(checks ...Check) Check {
 // Not inverts check for an active identity: it passes when check refuses with ErrForbidden and refuses
 // with ErrForbidden when check passes; other errors pass through. The refusal is classified like
 // auth.ResponseFor does, by the Kind of the outermost *auth.Error, so an unauthenticated refusal with a
-// forbidden cause is no forbidden refusal. Like the primitives it refuses a
-// missing identity with ErrUnauthenticated and an inactive one with ErrForbidden before it evaluates
-// check, so Not(HasRole(role)) never admits an anonymous or deactivated identity.
+// forbidden cause is no forbidden refusal. Like the primitives it refuses a missing identity with
+// ErrUnauthenticated and an inactive one with ErrForbidden before it evaluates check, so
+// Not(HasRole(role)) never admits an anonymous or deactivated identity.
 func Not(check Check) Check {
 	if check == nil {
 		return nilCheck
