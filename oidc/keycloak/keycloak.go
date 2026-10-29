@@ -228,6 +228,17 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 	return c.adminToken, nil
 }
 
+// dropAdminToken forgets accessToken after the Admin API refused it (Keycloak revokes tokens before their
+// expiry), so the next Enrich requests a new one instead of failing until the renewal time. A token
+// renewed meanwhile stays.
+func (c *Client) dropAdminToken(accessToken string) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if c.adminToken == accessToken {
+		c.adminToken = ""
+	}
+}
+
 func (c *Client) clientRoleNames(ctx context.Context, accessToken, user string) ([]string, error) {
 	if c.options.ClientRolesClientID == "" {
 		return nil, nil
@@ -314,8 +325,11 @@ func (c *Client) getJSON(ctx context.Context, accessToken, endpoint string, targ
 		return fmt.Errorf("call admin API: %w", err) // net/http, not a dependency: callers may detect a cancelled context
 	}
 	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
+	if response.StatusCode == http.StatusUnauthorized {
+		c.dropAdminToken(accessToken)
+	}
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("admin API %s answered %s", request.URL.Path, response.Status)
+		return fmt.Errorf("admin API %s answered HTTP %d", request.URL.Path, response.StatusCode) // the reason phrase is the server's free text
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maximumResponseBytes)).Decode(target); err != nil {
 		return fmt.Errorf("decode admin API answer of %s: %w", request.URL.Path, err)

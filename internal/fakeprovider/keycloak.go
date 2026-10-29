@@ -41,6 +41,14 @@ func (h *OIDCHandler) KeycloakClientLookups() int {
 	return h.keycloakClientLookups
 }
 
+// RevokeKeycloakTokens invalidates every admin token issued so far, as Keycloak does before their expiry
+// (key rotation, a logout of the service account): the Admin API answers 401 to them.
+func (h *OIDCHandler) RevokeKeycloakTokens() {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	clear(h.adminTokens)
+}
+
 func (h *OIDCHandler) keycloakToken(writer http.ResponseWriter, request *http.Request) {
 	h.mutex.Lock()
 	h.keycloakTokenRequests++
