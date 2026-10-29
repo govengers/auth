@@ -1,0 +1,116 @@
+// Package oauthlogin keeps the state of one redirect login (state, nonce, PKCE verifier, return path)
+// in the server-side session, so the callback verifies it exactly once on any replica sharing the
+// session backend. Shared by the oidc and github providers; its functions are safe for concurrent use.
+package oauthlogin
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"time"
+
+	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/random"
+	"github.com/govengers/auth/internal/redirect"
+	"github.com/govengers/auth/session"
+)
+
+const (
+	lifetime         = 10 * time.Minute
+	randomTokenBytes = 32
+)
+
+// State is what a login start stores and its callback needs back.
+type State struct {
+	State      string `json:"state"`
+	Nonce      string `json:"nonce"`
+	Verifier   string `json:"verifier"`   // PKCE code verifier: 32 random bytes, base64url (as oauth2.GenerateVerifier)
+	ReturnPath string `json:"returnPath"` // redirect.ReturnPath(request)
+}
+
+// Begin starts a fresh session (Store.Start), generates State (32 bytes), Nonce (32 bytes) and Verifier and stores them as JSON under key for 10 min.
+func Begin(ctx context.Context, store *session.Store, writer http.ResponseWriter, request *http.Request, key string) (State, error) {
+	state, err := newState(request)
+	if err != nil {
+		return State{}, err
+	}
+	current, err := store.Start(ctx, writer, request)
+	if err != nil {
+		return State{}, fmt.Errorf("start login session: %w", err)
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return State{}, fmt.Errorf("encode login state: %w", err)
+	}
+	if err := current.Put(ctx, key, encoded, lifetime); err != nil {
+		return State{}, fmt.Errorf("store login state: %w", err)
+	}
+	return state, nil
+}
+
+// Complete opens the session, pops key (single use) and compares the callback state in constant time.
+// Refusals (*auth.Error): provider sent error=...: ErrUnauthenticated code "login_denied"; no or expired state:
+// ErrInvalidRequest "login_expired"; mismatch: ErrInvalidRequest "state_mismatch"; no code: ErrInvalidRequest.
+// A provider error is refused before the session is read, so it does not consume the state.
+func Complete(ctx context.Context, store *session.Store, request *http.Request, key string) (State, error) {
+	query := request.URL.Query()
+	if query.Get("error") != "" {
+		return State{}, &auth.Error{Kind: auth.ErrUnauthenticated, Code: "login_denied", Reason: "provider returned an error"}
+	}
+	stored, err := popState(ctx, store, request, key)
+	if err != nil {
+		return State{}, err
+	}
+	if err := verifyCallback(query, stored); err != nil {
+		return State{}, err
+	}
+	return stored, nil
+}
+
+func newState(request *http.Request) (State, error) {
+	tokens := make([]string, 3)
+	for index := range tokens {
+		token, err := random.Token(randomTokenBytes)
+		if err != nil {
+			return State{}, fmt.Errorf("generate login state: %w", err)
+		}
+		tokens[index] = token
+	}
+	return State{State: tokens[0], Nonce: tokens[1], Verifier: tokens[2], ReturnPath: redirect.ReturnPath(request)}, nil
+}
+
+func popState(ctx context.Context, store *session.Store, request *http.Request, key string) (State, error) {
+	current, err := store.Open(request)
+	if err != nil {
+		return State{}, loginExpired("no session cookie")
+	}
+	encoded, found, err := current.Pop(ctx, key)
+	if err != nil {
+		return State{}, fmt.Errorf("pop login state: %w", err)
+	}
+	if !found {
+		return State{}, loginExpired("no login state")
+	}
+	var stored State
+	if err := json.Unmarshal(encoded, &stored); err != nil || stored.State == "" {
+		return State{}, loginExpired("unreadable login state")
+	}
+	return stored, nil
+}
+
+func verifyCallback(query url.Values, stored State) error {
+	if subtle.ConstantTimeCompare([]byte(query.Get("state")), []byte(stored.State)) != 1 {
+		return &auth.Error{Kind: auth.ErrInvalidRequest, Code: "state_mismatch", Reason: "callback state does not match"}
+	}
+	if query.Get("code") == "" {
+		return &auth.Error{Kind: auth.ErrInvalidRequest, Reason: "callback without code"}
+	}
+	return nil
+}
+
+func loginExpired(reason string) error {
+	return &auth.Error{Kind: auth.ErrInvalidRequest, Code: "login_expired", Reason: reason}
+}
