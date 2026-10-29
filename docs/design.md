@@ -17,7 +17,7 @@ Core model, in one paragraph: every provider (password, OIDC, GitHub, API key, J
 - Constructors: `New(options *Options) (*X, error)` or `NewX(options *XOptions) (*X, error)`; nil options is an error unless the section says "nil allowed"; validate, apply defaults to a copy, store the copy unexported, clone every slice and map the component keeps (`slices.Clone`, `maps.Clone`), never write to the caller's struct [DES-001, FUN-002]. No exported fields on components [DES-006].
 - No logging of any kind, no stdout/stderr [LIB-003]. No goroutines, no `init()`, no mutable package-level state [LIB-004, DES-002, DES-003]. Compiled regexes and constants are fine.
 - `ctx context.Context` first on everything doing I/O; never store a context in a struct [CON-002]. Outbound HTTP only through the component's `HTTPClient` option, default `&http.Client{Timeout: 10 * time.Second}`, requests built with `http.NewRequestWithContext` [RES-001]. No retries anywhere [RES-002].
-- Refusals are `*auth.Error` (section 5). Third-party errors (go-oidc, oauth2, go-redis, jwx, pquerna/otp, bcrypt) never reach callers through `%w`: they pass through `internal/dependency.Error` (message only, chain dropped; `context.Canceled` and `context.DeadlineExceeded` stay detectable with `errors.Is`) or are translated [LIB-010]. An OAuth token endpoint's error answer (`*oauth2.RetrieveError`) goes through `internal/tokenendpoint.Error`: its HTTP status and a well-formed OAuth error code only, never its description, URI or body, which are the server's free text [LOG-009]. For the same reason go-oidc's discovery and JWKS requests run on a copy of the `HTTPClient` that rebuilds every answer's status line from its code and drops every body except a 200 JSON one, and the Content-Type of a dropped one, so go-oidc's discovery errors carry the status code only (`oidc`). An ID token that does not verify is refused `login_failed` with the fixed Reason `ID token expired` or `ID token verification`, never go-oidc's message, which quotes the token header and claims and the JWKS request's error [LOG-009]. An HTTP call's error (the `*url.Error` of `HTTPClient.Do`, also inside a go-oidc or oauth2 error) goes through `dependency.Error` as well, which reduces it to method, origin and a classified cause (`dependency.TransportFailure`): its path and query may carry personal data and its transport text may repeat bytes the server sent [LOG-009]. Other standard library errors (encoding/json, ...) and own errors wrap with `%w` and say what was done [ERR-004]. No panics outside tests [ERR-001], except `RegisterRoutes` on a conflicting route (a startup wiring mistake, like `http.ServeMux.Handle`).
+- Refusals are `*auth.Error` (section 5). Third-party errors (go-oidc, oauth2, go-redis, jwx, pquerna/otp, bcrypt) never reach callers through `%w`: they pass through `internal/dependency.Error` (message only, chain dropped; `context.Canceled` and `context.DeadlineExceeded` stay detectable with `errors.Is`) or are translated [LIB-010]. An OAuth token endpoint's error answer (`*oauth2.RetrieveError`) goes through `internal/tokenendpoint.Error`: its HTTP status and a well-formed OAuth error code only, never its description, URI or body, which are the server's free text [LOG-009]; an answer that is not a readable token response (a malformed 200, whose oauth2 parse error quotes its values) becomes the fixed text `<operation>: token endpoint answered an unreadable token response`, and only a failed call (`*url.Error`) or a context error keeps `dependency.Error`'s reduced message. For the same reason go-oidc's discovery and JWKS requests run on a copy of the `HTTPClient` that rebuilds every answer's status line from its code and drops every body except a 200 JSON one, and the Content-Type of a dropped one, so go-oidc's discovery errors carry the status code only (`oidc`). An ID token that does not verify is refused `login_failed` with the fixed Reason `ID token expired` or `ID token verification`, never go-oidc's message, which quotes the token header and claims and the JWKS request's error [LOG-009]. An HTTP call's error (the `*url.Error` of `HTTPClient.Do`, also inside a go-oidc or oauth2 error) goes through `dependency.Error` as well, which reduces it to method, origin and a classified cause (`dependency.TransportFailure`): its path and query may carry personal data and its transport text may repeat bytes the server sent [LOG-009]. Other standard library errors (encoding/json, ...) and own errors wrap with `%w` and say what was done [ERR-004]. No panics outside tests [ERR-001], except `RegisterRoutes` on a conflicting route (a startup wiring mistake, like `http.ServeMux.Handle`).
 - Never put tokens, secrets, session IDs, passwords, codes, emails or names into an error message, an `Outcome`, a wide-event field or a metric label [LOG-009, MET-004]. IDs (`Subject`, `UserID`) are fine.
 - Every response the library writes carries `Cache-Control: no-store`; the one exception is the JWKS (`public, max-age=300`).
 - Names [NAM-001..006]: spelled out, initialisms upper-case (`ID URL URI HTTP JSON OIDC JWT JWKS API TOTP PKCE TTL UI`), no stutter, no `Get` on getters. Data-access lookups on `password.Storage` keep `Get` (NAM-006 exception).
@@ -285,6 +285,16 @@ const (
 	ActionRefreshTeams       Action = "refresh_teams"       // github route
 	ActionAuthenticate       Action = "authenticate"        // per request: Guard, apikey, jwt verifier
 	ActionRefresh            Action = "refresh"             // Guard calling a Refresher
+)
+
+// The fixed provider names (Identity.Provider, Outcome.Provider); an OIDC provider uses its own Name, which must
+// not be one of them (oidc builds its reserved names from these, without importing the providers).
+const (
+	ProviderPassword = "password"
+	ProviderGitHub   = "github"
+	ProviderAPIKey   = "apikey"
+	ProviderJWT      = "jwt"     // a JWT verifier's outcomes; its identities keep the provider they were signed for
+	ProviderSession  = "session" // the Guard's outcomes when it finds no identity
 )
 
 type Result string
@@ -964,6 +974,13 @@ type State struct {
 // a login route ends no session; D14), else in a fresh one (Store.Start). A backend error reading the identity is
 // returned. The callbacks call Store.Start after authentication, so the session ID still rotates at every login.
 func Begin(ctx context.Context, store *session.Store, writer http.ResponseWriter, request *http.Request, key string) (State, error)
+// Codes of the login refusals, shared by oauthlogin, oidc and github (wire values, binding).
+const (
+	CodeLoginFailed   = "login_failed"   // the code exchange or the verification of its answer failed
+	CodeLoginDenied   = "login_denied"   // the provider sent error=... (the user or the provider refused)
+	CodeLoginExpired  = "login_expired"  // no, an expired or an unreadable login state
+	CodeStateMismatch = "state_mismatch" // the callback state does not match the stored one
+)
 // Complete opens the session, pops key (single use) and compares the callback state in constant time.
 // Refusals (*auth.Error): provider sent error=...: ErrUnauthenticated code "login_denied" (checked before the
 // session is read, so it does not consume the state); no, empty or expired state: ErrInvalidRequest "login_expired";
@@ -1012,6 +1029,9 @@ func (r *Reporter) Refuse(ctx context.Context, writer http.ResponseWriter, outco
 // RefuseCallback is Refuse, except that with ErrorURL set the failure (a refusal or code=internal) redirects
 // 302 to ErrorURL?code=<code> (redirect.WithQuery).
 func (r *Reporter) RefuseCallback(ctx context.Context, writer http.ResponseWriter, outcome auth.Outcome)
+// UnlessAbsent returns err unless it only says there is nothing (auth.ErrUnauthenticated: no session, no identity
+// in it); github and oidc logout use it to tell a read failure from an absent session.
+func UnlessAbsent(err error) error
 // ReportFailure reports outcome with Result denied (a refusal) or error (answered with 500).
 func (r *Reporter) ReportFailure(ctx context.Context, outcome auth.Outcome)
 // Report sets Provider on outcome and passes it to the Observer.
@@ -1020,8 +1040,10 @@ func (r *Reporter) Report(ctx context.Context, outcome auth.Outcome)
 package tokenendpoint
 // Error returns "<operation>: token endpoint answered HTTP <status> [<OAuth error code>]" for an error answer of
 // the endpoint (*oauth2.RetrieveError; the code only when it is a-z/"_" and at most 64 bytes, nothing of
-// ErrorDescription, ErrorURI or Body; no Response: no status). Any other err goes through dependency.Error, so a
-// cancelled or expired context stays detectable. Used by oidc, oidc/keycloak and github.
+// ErrorDescription, ErrorURI or Body; no Response: no status). A failed call (*url.Error) or a cancelled or expired
+// context goes through dependency.Error, so the context error stays detectable. Anything else is an answer oauth2
+// could not read (its parse error quotes the answer's values): "<operation>: token endpoint answered an unreadable
+// token response". Used by oidc, oidc/keycloak and github.
 func Error(operation string, err error) error
 // Refused reports whether err is an error answer of the endpoint below 500 (an invalid code, verifier or client),
 // as opposed to a failure or an unreachable endpoint. oidc and github answer it with 401 login_failed.
