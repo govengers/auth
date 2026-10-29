@@ -224,8 +224,9 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", dependency.Error("request admin token", err)
 	}
-	// oauth2 turns expires_in into Expiry on the wall clock (the client credentials grant keeps no
-	// ExpiresIn); without expires_in Expiry is zero and the token is not reused.
+	// oauth2 turns expires_in into Expiry with time.Now (the client credentials grant keeps no ExpiresIn),
+	// so the remaining lifetime is read off the wall clock on purpose and only the deadline uses c.now;
+	// without expires_in Expiry is zero and the token is not reused.
 	lifetime := time.Until(token.Expiry)
 	c.adminToken = token.AccessToken
 	c.adminTokenRenewAt = c.now().Add(lifetime - tokenRenewalMargin)
