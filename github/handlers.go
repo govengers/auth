@@ -143,7 +143,7 @@ func (p *Provider) startSession(ctx context.Context, writer http.ResponseWriter,
 	if err != nil {
 		return fmt.Errorf("github: encode token: %w", err)
 	}
-	if err := current.Put(ctx, tokenKey, encoded, p.options.Sessions.MaxAge()); err != nil {
+	if err := current.Put(ctx, tokenKey, encoded, p.options.Sessions.MaximumAge()); err != nil {
 		return fmt.Errorf("github: store token: %w", err)
 	}
 	return current.SaveIdentity(ctx, completed.identity)
@@ -153,12 +153,12 @@ func (p *Provider) startSession(ctx context.Context, writer http.ResponseWriter,
 // OnLogout and redirects to PostLogoutURL.
 func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
-	identity, token, readErr := p.sessionState(context.WithoutCancel(ctx), request)
+	identity, token, readError := p.sessionState(context.WithoutCancel(ctx), request)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
 		p.refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: fmt.Errorf("github: end session: %w", err), Identity: identity})
 		return
 	}
-	outcome := auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity, Err: readErr}
+	outcome := auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity, Err: readError}
 	if token != nil {
 		outcome.Err = errors.Join(outcome.Err, p.revokeToken(ctx, token))
 	}
@@ -177,9 +177,9 @@ func (p *Provider) sessionState(ctx context.Context, request *http.Request) (*au
 	if err != nil {
 		return nil, nil, unlessAbsent(err)
 	}
-	identity, identityErr := current.Identity(ctx)
-	token, tokenErr := sessionToken(ctx, current)
-	return identity, token, errors.Join(unlessAbsent(identityErr), unlessAbsent(tokenErr))
+	identity, identityError := current.Identity(ctx)
+	token, tokenError := sessionToken(ctx, current)
+	return identity, token, errors.Join(unlessAbsent(identityError), unlessAbsent(tokenError))
 }
 
 // unlessAbsent returns err unless it only says that there is nothing (ErrUnauthenticated).

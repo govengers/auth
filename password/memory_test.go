@@ -27,20 +27,20 @@ func TestMemoryStorageCreateUser(t *testing.T) {
 	require.NoError(t, storage.CreateUser(t.Context(), existing))
 
 	testCases := []struct {
-		name    string
-		user    *User
-		wantErr error
+		name      string
+		user      *User
+		wantError error
 	}{
 		{name: "another user", user: newMemoryUser("grace", "grace@example.com")},
 		{name: "username only", user: newMemoryUser("linus", "")},
 		{name: "email only", user: newMemoryUser("", "margaret@example.com")},
-		{name: "same ID", user: &User{ID: existing.ID}, wantErr: ErrUserExists},
-		{name: "same username in another case", user: newMemoryUser("ADA", "other@example.com"), wantErr: ErrUserExists},
-		{name: "same email in another case", user: newMemoryUser("other", "Ada@Example.com"), wantErr: ErrUserExists},
+		{name: "same ID", user: &User{ID: existing.ID}, wantError: ErrUserExists},
+		{name: "same username in another case", user: newMemoryUser("ADA", "other@example.com"), wantError: ErrUserExists},
+		{name: "same email in another case", user: newMemoryUser("other", "Ada@Example.com"), wantError: ErrUserExists},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			require.ErrorIs(t, storage.CreateUser(t.Context(), testCase.user), testCase.wantErr)
+			require.ErrorIs(t, storage.CreateUser(t.Context(), testCase.user), testCase.wantError)
 		})
 	}
 	require.Error(t, storage.CreateUser(t.Context(), nil))

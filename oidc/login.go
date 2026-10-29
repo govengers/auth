@@ -166,7 +166,7 @@ func (p *Provider) saveSession(ctx context.Context, writer http.ResponseWriter, 
 	if err := current.SaveIdentity(ctx, identity); err != nil {
 		return fmt.Errorf("oidc: save identity: %w", err)
 	}
-	if err := current.Put(ctx, p.identityTokenKey, []byte(rawIdentityToken), p.options.Sessions.MaxAge()); err != nil {
+	if err := current.Put(ctx, p.identityTokenKey, []byte(rawIdentityToken), p.options.Sessions.MaximumAge()); err != nil {
 		return fmt.Errorf("oidc: save ID token: %w", err)
 	}
 	return nil

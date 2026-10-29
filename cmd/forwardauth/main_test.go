@@ -22,7 +22,7 @@ func validOIDCConfiguration() *Configuration {
 		Provider: providerOIDC, ExternalURL: "https://app.example.com", PathPrefix: "/auth",
 		Port: 8080, MetricsPort: 9090, WideEventSampleRate: 10, ShutdownDelaySeconds: 5,
 		SessionEncryptionKey: testEncryptionKey, SessionCookieName: "forwardauth_session", SessionSameSite: "lax",
-		SessionMaxAgeSeconds: 86400, SessionRefreshIntervalSeconds: 60, SessionRedisKeyPrefix: "forwardauth",
+		SessionMaximumAgeSeconds: 86400, SessionRefreshIntervalSeconds: 60, SessionRedisKeyPrefix: "forwardauth",
 		OIDCName: "oidc", OIDCIssuer: "https://idp.example.com", OIDCClientID: "forwardauth", OIDCClientSecret: "client-secret",
 		OIDCScopes: []string{"openid", "profile", "email"}, OIDCClaimMapper: claimMapperDefault,
 		KeycloakGrantType: grantTypeClientCredentials, GitHubScopes: []string{"read:org"},
@@ -92,9 +92,9 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		{name: "same port twice", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.MetricsPort = 8080 }, problems: []string{"PORT and METRICS_PORT must differ"}},
 		{name: "sample rate and delays", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.WideEventSampleRate, configuration.ShutdownDelaySeconds = 0, -1
-			configuration.SessionMaxAgeSeconds, configuration.SessionRefreshIntervalSeconds, configuration.JWTLifetimeSeconds = 0, 0, 0
+			configuration.SessionMaximumAgeSeconds, configuration.SessionRefreshIntervalSeconds, configuration.JWTLifetimeSeconds = 0, 0, 0
 			configuration.SessionRedisDatabase = -1
-		}, problems: []string{"WIDE_EVENT_SAMPLE_RATE", "SHUTDOWN_DELAY_SECONDS", "SESSION_MAX_AGE_SECONDS", "SESSION_REFRESH_INTERVAL_SECONDS", "JWT_LIFETIME_SECONDS", "SESSION_REDIS_DATABASE"}},
+		}, problems: []string{"WIDE_EVENT_SAMPLE_RATE", "SHUTDOWN_DELAY_SECONDS", "SESSION_MAXIMUM_AGE_SECONDS", "SESSION_REFRESH_INTERVAL_SECONDS", "JWT_LIFETIME_SECONDS", "SESSION_REDIS_DATABASE"}},
 		{name: "shutdown delay beyond the grace period", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.ShutdownDelaySeconds = 11 }, problems: []string{"SHUTDOWN_DELAY_SECONDS 11 must be between 0 and 10"}},
 		{name: "session key not base64", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionEncryptionKey = "not base64!" }, problems: []string{"SESSION_ENCRYPTION_KEY"}},
 		{name: "session key too short", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionEncryptionKey = "c2hvcnQ=" }, problems: []string{"SESSION_ENCRYPTION_KEY"}},

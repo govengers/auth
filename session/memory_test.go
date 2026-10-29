@@ -12,12 +12,12 @@ func TestNewMemoryBackend(t *testing.T) {
 		name        string
 		options     *MemoryBackendOptions
 		wantMaximum int
-		wantErr     string
+		wantError   string
 	}{
 		{name: "nil options take defaults", options: nil, wantMaximum: 100000},
 		{name: "zero takes the default", options: &MemoryBackendOptions{}, wantMaximum: 100000},
 		{name: "explicit maximum", options: &MemoryBackendOptions{MaximumSessions: 3}, wantMaximum: 3},
-		{name: "negative maximum", options: &MemoryBackendOptions{MaximumSessions: -1}, wantErr: "MaximumSessions -1 is negative"},
+		{name: "negative maximum", options: &MemoryBackendOptions{MaximumSessions: -1}, wantError: "MaximumSessions -1 is negative"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -28,8 +28,8 @@ func TestNewMemoryBackend(t *testing.T) {
 
 			backend, err := NewMemoryBackend(testCase.options)
 
-			if testCase.wantErr != "" {
-				require.ErrorContains(t, err, testCase.wantErr)
+			if testCase.wantError != "" {
+				require.ErrorContains(t, err, testCase.wantError)
 				return
 			}
 			require.NoError(t, err)

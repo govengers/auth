@@ -99,27 +99,27 @@ func TestNewGuardValidation(t *testing.T) {
 	store := newTestStore(t, newTestClock())
 	refresher := &fakeRefresher{name: "password"}
 	testCases := []struct {
-		name    string
-		options *GuardOptions
-		wantErr string
+		name      string
+		options   *GuardOptions
+		wantError string
 	}{
-		{name: "nil options", wantErr: "Store is required"},
-		{name: "no store", options: &GuardOptions{}, wantErr: "Store is required"},
-		{name: "relative login URL", options: &GuardOptions{Store: store, LoginURL: "login"}, wantErr: "LoginURL must be"},
-		{name: "protocol relative login URL", options: &GuardOptions{Store: store, LoginURL: "//evil.example/login"}, wantErr: "LoginURL must be"},
-		{name: "backslash login URL", options: &GuardOptions{Store: store, LoginURL: "/\\evil.example"}, wantErr: "LoginURL must be"},
-		{name: "other scheme", options: &GuardOptions{Store: store, LoginURL: "ftp://example.com/login"}, wantErr: "LoginURL must be"},
-		{name: "absolute URL without host", options: &GuardOptions{Store: store, LoginURL: "https:///login"}, wantErr: "LoginURL must be"},
-		{name: "login URL with a fragment", options: &GuardOptions{Store: store, LoginURL: "https://auth.example.com/login#/signin"}, wantErr: "without a fragment"},
-		{name: "negative refresh interval", options: &GuardOptions{Store: store, RefreshInterval: -time.Second}, wantErr: "RefreshInterval -1s is negative"},
-		{name: "nil refresher", options: &GuardOptions{Store: store, Refreshers: []Refresher{nil}}, wantErr: "every Refresher needs a name"},
-		{name: "unnamed refresher", options: &GuardOptions{Store: store, Refreshers: []Refresher{&fakeRefresher{}}}, wantErr: "every Refresher needs a name"},
-		{name: "duplicate refresher names", options: &GuardOptions{Store: store, Refreshers: []Refresher{refresher, &fakeRefresher{name: "password"}}}, wantErr: `two Refreshers are named "password"`},
+		{name: "nil options", wantError: "Store is required"},
+		{name: "no store", options: &GuardOptions{}, wantError: "Store is required"},
+		{name: "relative login URL", options: &GuardOptions{Store: store, LoginURL: "login"}, wantError: "LoginURL must be"},
+		{name: "protocol relative login URL", options: &GuardOptions{Store: store, LoginURL: "//evil.example/login"}, wantError: "LoginURL must be"},
+		{name: "backslash login URL", options: &GuardOptions{Store: store, LoginURL: "/\\evil.example"}, wantError: "LoginURL must be"},
+		{name: "other scheme", options: &GuardOptions{Store: store, LoginURL: "ftp://example.com/login"}, wantError: "LoginURL must be"},
+		{name: "absolute URL without host", options: &GuardOptions{Store: store, LoginURL: "https:///login"}, wantError: "LoginURL must be"},
+		{name: "login URL with a fragment", options: &GuardOptions{Store: store, LoginURL: "https://auth.example.com/login#/signin"}, wantError: "without a fragment"},
+		{name: "negative refresh interval", options: &GuardOptions{Store: store, RefreshInterval: -time.Second}, wantError: "RefreshInterval -1s is negative"},
+		{name: "nil refresher", options: &GuardOptions{Store: store, Refreshers: []Refresher{nil}}, wantError: "every Refresher needs a name"},
+		{name: "unnamed refresher", options: &GuardOptions{Store: store, Refreshers: []Refresher{&fakeRefresher{}}}, wantError: "every Refresher needs a name"},
+		{name: "duplicate refresher names", options: &GuardOptions{Store: store, Refreshers: []Refresher{refresher, &fakeRefresher{name: "password"}}}, wantError: `two Refreshers are named "password"`},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			guard, err := NewGuard(testCase.options)
-			require.ErrorContains(t, err, testCase.wantErr)
+			require.ErrorContains(t, err, testCase.wantError)
 			require.Nil(t, guard)
 		})
 	}
@@ -351,15 +351,15 @@ func TestGuardRefreshOnlyForProvidersWithARefresher(t *testing.T) {
 
 func TestGuardRefreshRefusalEndsTheSession(t *testing.T) {
 	testCases := []struct {
-		name       string
-		refusal    error
-		wantAPI    int
-		wantUI     int
-		wantAPIErr string
+		name         string
+		refusal      error
+		wantAPI      int
+		wantUI       int
+		wantAPIError string
 	}{
-		{name: "unauthenticated", refusal: &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "user deleted"}, wantAPI: http.StatusUnauthorized, wantUI: http.StatusFound, wantAPIErr: `{"code":"unauthenticated","message":"authentication required"}`},
-		{name: "forbidden", refusal: &auth.Error{Kind: auth.ErrForbidden, Reason: "not in an allowed team"}, wantAPI: http.StatusForbidden, wantUI: http.StatusForbidden, wantAPIErr: `{"code":"forbidden","message":"access denied"}`},
-		{name: "bare sentinel", refusal: auth.ErrForbidden, wantAPI: http.StatusForbidden, wantUI: http.StatusForbidden, wantAPIErr: `{"code":"forbidden","message":"access denied"}`},
+		{name: "unauthenticated", refusal: &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "user deleted"}, wantAPI: http.StatusUnauthorized, wantUI: http.StatusFound, wantAPIError: `{"code":"unauthenticated","message":"authentication required"}`},
+		{name: "forbidden", refusal: &auth.Error{Kind: auth.ErrForbidden, Reason: "not in an allowed team"}, wantAPI: http.StatusForbidden, wantUI: http.StatusForbidden, wantAPIError: `{"code":"forbidden","message":"access denied"}`},
+		{name: "bare sentinel", refusal: auth.ErrForbidden, wantAPI: http.StatusForbidden, wantUI: http.StatusForbidden, wantAPIError: `{"code":"forbidden","message":"access denied"}`},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -375,7 +375,7 @@ func TestGuardRefreshRefusalEndsTheSession(t *testing.T) {
 			ui := serveGuarded(fixture.guard.RequireUI(), uiRequest)
 
 			require.Equal(t, testCase.wantAPI, api.recorder.Code)
-			require.JSONEq(t, testCase.wantAPIErr, api.recorder.Body.String())
+			require.JSONEq(t, testCase.wantAPIError, api.recorder.Body.String())
 			require.Equal(t, testCase.wantUI, ui.recorder.Code)
 			for _, result := range []guardResult{api, ui} {
 				require.Nil(t, result.identity)
@@ -401,16 +401,16 @@ func TestGuardRefreshRefusalEndsTheSession(t *testing.T) {
 
 func TestGuardRefreshFailureKeepsTheIdentity(t *testing.T) {
 	testCases := []struct {
-		name    string
-		refresh func(*auth.Identity) (*auth.Identity, error)
-		wantErr string
+		name      string
+		refresh   func(*auth.Identity) (*auth.Identity, error)
+		wantError string
 	}{
 		{name: "provider outage", refresh: func(*auth.Identity) (*auth.Identity, error) {
 			return nil, errors.New("github unreachable")
-		}, wantErr: "github unreachable"},
+		}, wantError: "github unreachable"},
 		{name: "no identity returned", refresh: func(*auth.Identity) (*auth.Identity, error) {
 			return nil, nil
-		}, wantErr: `refresher "password" returned no identity`},
+		}, wantError: `refresher "password" returned no identity`},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -427,7 +427,7 @@ func TestGuardRefreshFailureKeepsTheIdentity(t *testing.T) {
 			require.Len(t, outcomes, 2)
 			require.Equal(t, auth.ActionRefresh, outcomes[0].Action)
 			require.Equal(t, auth.ResultSuccess, outcomes[0].Result, "degraded success: nothing answered 500")
-			require.ErrorContains(t, outcomes[0].Err, testCase.wantErr)
+			require.ErrorContains(t, outcomes[0].Err, testCase.wantError)
 			require.Equal(t, testIdentity(), outcomes[0].Identity)
 			require.Equal(t, auth.ResultSuccess, outcomes[1].Result)
 

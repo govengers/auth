@@ -33,7 +33,7 @@ type StoreOptions struct {
 	CookiePath     string        // default "/"
 	SameSite       http.SameSite // default http.SameSiteLaxMode; SameSiteNoneMode requires InsecureCookie false (front-channel logout needs None)
 	InsecureCookie bool          // drops the Secure attribute; local HTTP development only
-	MaxAge         time.Duration // default 24h, at least 1s; absolute session lifetime, also the cookie Max-Age
+	MaximumAge     time.Duration // default 24h, at least 1s; absolute session lifetime, also the cookie Max-Age
 }
 
 // Store issues and ends server-side sessions. The cookie carries 32 random bytes; the backend sees
@@ -69,15 +69,15 @@ func withStoreDefaults(options StoreOptions) StoreOptions {
 	if options.SameSite == 0 {
 		options.SameSite = http.SameSiteLaxMode
 	}
-	if options.MaxAge == 0 {
-		options.MaxAge = defaultMaximumAge
+	if options.MaximumAge == 0 {
+		options.MaximumAge = defaultMaximumAge
 	}
 	return options
 }
 
 func validateStoreOptions(options StoreOptions) error {
-	if options.MaxAge < time.Second {
-		return fmt.Errorf("session store: MaxAge %s is below one second", options.MaxAge)
+	if options.MaximumAge < time.Second {
+		return fmt.Errorf("session store: MaximumAge %s is below one second", options.MaximumAge)
 	}
 	if options.SameSite < http.SameSiteDefaultMode || options.SameSite > http.SameSiteNoneMode {
 		return fmt.Errorf("session store: SameSite %d is unknown", options.SameSite)
@@ -106,7 +106,7 @@ func (s *Store) Start(ctx context.Context, writer http.ResponseWriter, request *
 	if err != nil {
 		return Session{}, fmt.Errorf("start session: %w", err)
 	}
-	http.SetCookie(writer, sessionCookie(s.options, cookieValue, int(s.options.MaxAge/time.Second)))
+	http.SetCookie(writer, sessionCookie(s.options, cookieValue, int(s.options.MaximumAge/time.Second)))
 	return Session{store: s, id: sessionIDOf(cookieValue), startedAt: s.now()}, nil
 }
 
@@ -132,13 +132,13 @@ func (s *Store) End(ctx context.Context, writer http.ResponseWriter, request *ht
 	return s.revoke(ctx, id)
 }
 
-// MaxAge returns the configured absolute session lifetime.
-func (s *Store) MaxAge() time.Duration {
-	return s.options.MaxAge
+// MaximumAge returns the configured absolute session lifetime.
+func (s *Store) MaximumAge() time.Duration {
+	return s.options.MaximumAge
 }
 
 func (s *Store) revoke(ctx context.Context, id string) error {
-	if err := s.options.Backend.Revoke(ctx, id, s.options.MaxAge); err != nil {
+	if err := s.options.Backend.Revoke(ctx, id, s.options.MaximumAge); err != nil {
 		return fmt.Errorf("revoke session: %w", err)
 	}
 	return nil

@@ -47,14 +47,14 @@ func TestBackendConformance(t *testing.T) {
 func TestNew(t *testing.T) {
 	_, client := newRedis(t)
 	testCases := []struct {
-		name    string
-		options *redisbackend.Options
-		wantErr string
+		name      string
+		options   *redisbackend.Options
+		wantError string
 	}{
-		{name: "nil options", options: nil, wantErr: "options are required"},
-		{name: "missing client", options: &redisbackend.Options{}, wantErr: "Client is required"},
-		{name: "opening brace in prefix", options: &redisbackend.Options{Client: client, KeyPrefix: "a{b"}, wantErr: "must not contain"},
-		{name: "closing brace in prefix", options: &redisbackend.Options{Client: client, KeyPrefix: "a}b"}, wantErr: "must not contain"},
+		{name: "nil options", options: nil, wantError: "options are required"},
+		{name: "missing client", options: &redisbackend.Options{}, wantError: "Client is required"},
+		{name: "opening brace in prefix", options: &redisbackend.Options{Client: client, KeyPrefix: "a{b"}, wantError: "must not contain"},
+		{name: "closing brace in prefix", options: &redisbackend.Options{Client: client, KeyPrefix: "a}b"}, wantError: "must not contain"},
 		{name: "defaults", options: &redisbackend.Options{Client: client}},
 		{name: "custom prefix", options: &redisbackend.Options{Client: client, KeyPrefix: "app:sessions"}},
 	}
@@ -67,8 +67,8 @@ func TestNew(t *testing.T) {
 
 			backend, err := redisbackend.New(testCase.options)
 
-			if testCase.wantErr != "" {
-				require.ErrorContains(t, err, testCase.wantErr)
+			if testCase.wantError != "" {
+				require.ErrorContains(t, err, testCase.wantError)
 				return
 			}
 			require.NoError(t, err)
