@@ -152,6 +152,11 @@ func TestNewVerifierAppliesDefaultsToACopy(t *testing.T) {
 	require.Equal(t, int32(1), keySets.fetches.Load())
 }
 
+// truncatedKeySet serves a JWKS document that ends early.
+var truncatedKeySet = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	_, _ = writer.Write([]byte(`{"keys":`)) // the client reads what arrives; a lost write fails the parse as well
+})
+
 func TestNewVerifierFailsWhenTheJWKSCannotBeFetched(t *testing.T) {
 	closed := httptest.NewServer(failingHandler)
 	closed.Close()
@@ -162,9 +167,7 @@ func TestNewVerifierFailsWhenTheJWKSCannotBeFetched(t *testing.T) {
 	}{
 		{name: "unreachable", jwksURL: closed.URL, wantError: "fetch JWKS"},
 		{name: "server error", jwksURL: newKeySetServer(t, failingHandler).server.URL, wantError: "status 500"},
-		{name: "not a key set", jwksURL: newKeySetServer(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-			_, _ = writer.Write([]byte(`{"keys":`)) // the client reads what arrives; a lost write fails the parse as well
-		})).server.URL, wantError: "parse JWKS"},
+		{name: "not a key set", jwksURL: newKeySetServer(t, truncatedKeySet).server.URL, wantError: "parse JWKS"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -262,6 +265,23 @@ func TestVerifyIgnoresSymmetricKeysOfTheJWKS(t *testing.T) {
 	require.Equal(t, "42", identity.Subject)
 }
 
+func TestVerifySkipsUnparsableKeysOfTheJWKS(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	signer := newTestSigner(t, clock.now)
+	unknownType := map[string]any{"kty": "AKP", "kid": "pq-1", "alg": "ML-DSA-44", "pub": "AAAA"}
+	brokenModulus := map[string]any{"kty": "RSA", "kid": "broken-1", "alg": "RS512", "n": "!!!", "e": "AQAB"}
+	withoutType := map[string]any{"kid": "no-kty"}
+	keySets := newKeySetServer(t, keySetHandler(t, unknownType, brokenModulus, withoutType, publishedKey(t, signer)))
+	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
+	require.NoError(t, err)
+
+	identity, err := verifier.Verify(t.Context(), token)
+
+	require.NoError(t, err)
+	require.Equal(t, "42", identity.Subject)
+}
+
 func TestVerifierErrorsOmitCredentialsOfTheJWKSURL(t *testing.T) {
 	withCredentials := func(serverURL string) string {
 		location, err := url.Parse(serverURL)
@@ -281,7 +301,7 @@ func TestVerifierErrorsOmitCredentialsOfTheJWKSURL(t *testing.T) {
 		{name: "other scheme", jwksURL: "ftp://user:secret-password@auth.example.com/jwks?token=secret-query", wantError: "JWKSURL ftp://auth.example.com/jwks must be"},
 		{name: "unreachable", jwksURL: withCredentials(closed.URL), wantError: "fetch JWKS: Get \"" + closed.URL + "\""},
 		{name: "server error", jwksURL: withCredentials(newKeySetServer(t, failingHandler).server.URL), wantError: "status 500"},
-		{name: "not a key set", jwksURL: withCredentials(newKeySetServer(t, keySetHandler(t, map[string]any{"kty": "RSA"})).server.URL), wantError: "parse JWKS http://127.0.0.1"},
+		{name: "not a key set", jwksURL: withCredentials(newKeySetServer(t, truncatedKeySet).server.URL), wantError: "parse JWKS http://127.0.0.1"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

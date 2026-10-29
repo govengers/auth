@@ -239,7 +239,9 @@ func fetchKeySet(ctx context.Context, httpClient *http.Client, jwksURL string) (
 	if err != nil {
 		return nil, fmt.Errorf("read JWKS %s: %w", location, err)
 	}
-	keys, err := jwk.Parse(body)
+	// An entry jwx cannot parse (an unknown kty, a broken modulus) is dropped like the other keys that
+	// cannot verify a token, instead of failing the whole set; signingKeys fails when none is left.
+	keys, err := jwk.Parse(body, jwk.WithIgnoreParseError(true))
 	if err != nil {
 		return nil, dependency.Error("parse JWKS "+location, err)
 	}
