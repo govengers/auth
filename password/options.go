@@ -26,6 +26,8 @@ const (
 	defaultBackupCodeCount    = 10
 	defaultBackupCodeLength   = 10
 	defaultBackupCodeAlphabet = "0123456789"
+	maximumPeriod             = 3600
+	maximumSkew               = 10
 	maximumBackupCodeCount    = 20
 	minimumBackupCodeSpace    = 1_000_000 // distinct codes, as many as a 6-digit TOTP code has
 )
@@ -35,9 +37,9 @@ type TOTPOptions struct {
 	Enabled            bool          // routes the TOTP endpoints and challenges users who enabled TOTP
 	Required           bool          // users without TOTP enroll during login; needs Enabled
 	Issuer             string        // required when Enabled (otpauth issuer)
-	Period             uint          // default 30 s
+	Period             uint          // default 30 s; at most 3600
 	Digits             uint          // 6 or 8; default 6
-	Skew               uint          // periods accepted before and after the current one; default 1
+	Skew               uint          // periods accepted before and after the current one; default 1; at most 10
 	MaximumAttempts    int           // default 5 wrong codes per password login; must be > 0
 	PendingTTL         time.Duration // default 5 min (password step to code step)
 	DisableBackupCodes bool
@@ -147,6 +149,8 @@ func validateTOTPOptions(options TOTPOptions) error {
 		return errors.New("option Issuer is required")
 	case options.Digits != 6 && options.Digits != 8:
 		return fmt.Errorf("option Digits %d is neither 6 nor 8", options.Digits)
+	case options.Period > maximumPeriod, options.Skew > maximumSkew:
+		return fmt.Errorf("option Period %d or Skew %d is above %d or %d", options.Period, options.Skew, maximumPeriod, maximumSkew)
 	case options.MaximumAttempts < 0, options.PendingTTL < 0, options.BackupCodeCount < 0, options.BackupCodeLength < 0:
 		return errors.New("MaximumAttempts, PendingTTL, BackupCodeCount and BackupCodeLength must not be negative")
 	case options.BackupCodeCount > maximumBackupCodeCount:

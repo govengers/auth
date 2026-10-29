@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -22,6 +23,7 @@ type MemoryStorage struct {
 type memoryUser struct {
 	user         User
 	totpAttempts int
+	totpStep     time.Time // start of the last used TOTP time step
 }
 
 // NewMemoryStorage returns an empty MemoryStorage.
@@ -93,6 +95,19 @@ func (s *MemoryStorage) ResetTOTPAttempts(_ context.Context, id uuid.UUID) error
 		stored.totpAttempts = 0
 		return nil
 	})
+}
+
+// ConsumeTOTPStep records step when it is later than the last one and reports whether it was.
+func (s *MemoryStorage) ConsumeTOTPStep(_ context.Context, id uuid.UUID, step time.Time) (bool, error) {
+	consumed := false
+	err := s.update(id, func(stored *memoryUser) error {
+		consumed = step.After(stored.totpStep)
+		if consumed {
+			stored.totpStep = step
+		}
+		return nil
+	})
+	return consumed, err
 }
 
 // ConsumeBackupCode removes hash and reports whether it was there.

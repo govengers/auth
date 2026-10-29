@@ -341,6 +341,13 @@ func (s *failingStorage) ResetTOTPAttempts(ctx context.Context, id uuid.UUID) er
 	return s.MemoryStorage.ResetTOTPAttempts(ctx, id)
 }
 
+func (s *failingStorage) ConsumeTOTPStep(ctx context.Context, id uuid.UUID, step time.Time) (bool, error) {
+	if err := s.fail("ConsumeTOTPStep"); err != nil {
+		return false, err
+	}
+	return s.MemoryStorage.ConsumeTOTPStep(ctx, id, step)
+}
+
 func (s *failingStorage) ConsumeBackupCode(ctx context.Context, id uuid.UUID, hash string) (bool, error) {
 	if err := s.fail("ConsumeBackupCode"); err != nil {
 		return false, err

@@ -62,7 +62,12 @@ func (p *Provider) verifyTOTP(writer http.ResponseWriter, request *http.Request)
 	if err != nil {
 		return refused(fmt.Errorf("consume TOTP attempt of user %s: %w", user.ID, err))
 	}
-	verified, err := p.consumeSecondFactor(ctx, user, body.Code, body.BackupCode)
+	var verified bool
+	if body.BackupCode {
+		verified, err = p.consumeBackupCode(ctx, user, body.Code)
+	} else {
+		verified, err = p.consumeTOTPCode(ctx, user.ID, *user.TOTPSecret, body.Code)
+	}
 	if err != nil {
 		return refused(err)
 	}
@@ -167,7 +172,11 @@ func (p *Provider) enableTOTP(writer http.ResponseWriter, request *http.Request)
 	if err != nil {
 		return refused(err)
 	}
-	if !p.codeValid(secret, body.Code) {
+	valid, err := p.consumeTOTPCode(ctx, account.user.ID, secret, body.Code)
+	if err != nil {
+		return refused(err)
+	}
+	if !valid {
 		return refused(&auth.Error{Kind: auth.ErrUnauthenticated, Code: codeInvalidTOTPCode, Reason: "wrong setup code"})
 	}
 	codes, hashes, err := p.newBackupCodes()

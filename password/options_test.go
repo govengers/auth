@@ -59,6 +59,8 @@ func TestNewRefusesInvalidOptions(t *testing.T) {
 		{name: "TOTP required but not enabled", options: valid(func(options *Options) { options.TOTP.Required = true })},
 		{name: "TOTP without issuer", options: enabledTOTP(func(options *TOTPOptions) { options.Issuer = "" })},
 		{name: "TOTP with 7 digits", options: enabledTOTP(func(options *TOTPOptions) { options.Digits = 7 })},
+		{name: "TOTP period above an hour", options: enabledTOTP(func(options *TOTPOptions) { options.Period = 3601 })},
+		{name: "TOTP skew above 10", options: enabledTOTP(func(options *TOTPOptions) { options.Skew = 11 })},
 		{name: "negative attempts", options: enabledTOTP(func(options *TOTPOptions) { options.MaximumAttempts = -1 })},
 		{name: "negative pending TTL", options: enabledTOTP(func(options *TOTPOptions) { options.PendingTTL = -time.Second })},
 		{name: "negative backup code count", options: enabledTOTP(func(options *TOTPOptions) { options.BackupCodeCount = -1 })},

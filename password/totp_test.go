@@ -115,7 +115,7 @@ func TestVerifyTOTP(t *testing.T) {
 		},
 		{name: "wrong code", code: func(*testing.T, *fixture, []string) string { return "000000" }, wantStatus: http.StatusUnauthorized},
 		{name: "backup code", code: func(_ *testing.T, _ *fixture, backupCodes []string) string { return backupCodes[1] }, backupCode: true, wantStatus: http.StatusOK},
-		{name: "backup code without the flag", code: func(_ *testing.T, _ *fixture, backupCodes []string) string { return backupCodes[1] }, wantStatus: http.StatusOK},
+		{name: "backup code without the flag", code: func(_ *testing.T, _ *fixture, backupCodes []string) string { return backupCodes[1] }, wantStatus: http.StatusUnauthorized},
 		{name: "TOTP code flagged as backup code", code: func(t *testing.T, fixture *fixture, _ []string) string { return fixture.code(t, testSecret, 0) }, backupCode: true, wantStatus: http.StatusUnauthorized},
 		{
 			name: "backup code while backup codes are disabled", options: Options{TOTP: TOTPOptions{Enabled: true, Issuer: "Example", DisableBackupCodes: true}},
@@ -151,11 +151,54 @@ func TestVerifyTOTP(t *testing.T) {
 	}
 }
 
+func TestTOTPCodeIsSingleUse(t *testing.T) {
+	fixture := newFixture(t, totpOptions())
+	fixture.createTOTPUser(t, "ada")
+	code := fixture.code(t, testSecret, 0)
+	require.Equal(t, http.StatusOK, fixture.pendingClient(t, "ada").post(verifyPath, map[string]any{"code": code}).Code)
+
+	requireRefusal(t, fixture.pendingClient(t, "ada").post(verifyPath, map[string]any{"code": code}), http.StatusUnauthorized, "invalid_totp_code")
+	previous := fixture.code(t, testSecret, -30*time.Second)
+	requireRefusal(t, fixture.pendingClient(t, "ada").post(verifyPath, map[string]any{"code": previous}), http.StatusUnauthorized, "invalid_totp_code")
+	next := fixture.code(t, testSecret, 30*time.Second)
+	require.Equal(t, http.StatusOK, fixture.pendingClient(t, "ada").post(verifyPath, map[string]any{"code": next}).Code)
+}
+
+func TestTOTPCodeIsSingleUseUnderRace(t *testing.T) {
+	fixture := newFixture(t, totpOptions())
+	fixture.createTOTPUser(t, "ada")
+	browsers := []*client{fixture.pendingClient(t, "ada"), fixture.pendingClient(t, "ada"), fixture.pendingClient(t, "ada")}
+	code := fixture.code(t, testSecret, 0)
+
+	statuses := make([]int, len(browsers))
+	var waitGroup sync.WaitGroup
+	for index, browser := range browsers {
+		waitGroup.Go(func() {
+			statuses[index] = browser.post(verifyPath, map[string]any{"code": code}).Code
+		})
+	}
+	waitGroup.Wait()
+
+	require.ElementsMatch(t, []int{http.StatusOK, http.StatusUnauthorized, http.StatusUnauthorized}, statuses)
+}
+
+func TestEnableCodeIsSingleUse(t *testing.T) {
+	fixture := newFixture(t, totpOptions())
+	fixture.createUser(t, "ada", "")
+	secret, _ := enroll(t, fixture, loggedInClient(t, fixture))
+
+	recorder := fixture.pendingClient(t, "ada").post(verifyPath, map[string]any{"code": fixture.code(t, secret, 0)})
+
+	requireRefusal(t, recorder, http.StatusUnauthorized, "invalid_totp_code")
+	recorder = fixture.pendingClient(t, "ada").post(verifyPath, map[string]any{"code": fixture.code(t, secret, 30*time.Second)})
+	require.Equal(t, http.StatusOK, recorder.Code)
+}
+
 func TestBackupCodeIsSingleUse(t *testing.T) {
 	fixture := newFixture(t, totpOptions())
 	user, backupCodes := fixture.createTOTPUser(t, "ada")
 
-	recorder := fixture.pendingClient(t, "ada").post(verifyPath, map[string]any{"code": strings.ToUpper(" " + backupCodes[0] + " ")})
+	recorder := fixture.pendingClient(t, "ada").post(verifyPath, map[string]any{"code": strings.ToUpper(" " + backupCodes[0] + " "), "backupCode": true})
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.Len(t, fixture.storedUser(t, user.ID).BackupCodeHashes, 2)
 
@@ -259,14 +302,28 @@ func TestVerifyRefusesWithoutAPendingLogin(t *testing.T) {
 }
 
 func TestVerifyStorageFailures(t *testing.T) {
-	for _, operation := range []string{"GetUserByID", "ConsumeTOTPAttempt", "ConsumeBackupCode", "ResetTOTPAttempts"} {
-		t.Run(operation, func(t *testing.T) {
+	testCases := []struct {
+		operation  string
+		backupCode bool
+	}{
+		{operation: "GetUserByID", backupCode: true},
+		{operation: "ConsumeTOTPAttempt", backupCode: true},
+		{operation: "ConsumeBackupCode", backupCode: true},
+		{operation: "ConsumeTOTPStep"},
+		{operation: "ResetTOTPAttempts", backupCode: true},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.operation, func(t *testing.T) {
 			fixture := newFixture(t, totpOptions())
 			_, backupCodes := fixture.createTOTPUser(t, "ada")
 			browser := fixture.pendingClient(t, "ada")
-			fixture.failStorage(operation)
+			fixture.failStorage(testCase.operation)
+			code := fixture.code(t, testSecret, 0)
+			if testCase.backupCode {
+				code = backupCodes[0]
+			}
 
-			recorder := browser.post(verifyPath, map[string]any{"code": backupCodes[0], "backupCode": true})
+			recorder := browser.post(verifyPath, map[string]any{"code": code, "backupCode": testCase.backupCode})
 
 			requireRefusal(t, recorder, http.StatusInternalServerError, "internal")
 			require.ErrorIs(t, fixture.outcomes.last(t).Err, errStorageDown)
@@ -535,6 +592,7 @@ func TestTOTPManagementStorageFailures(t *testing.T) {
 		body      func(code string) map[string]any
 	}{
 		{operation: "GetUserByID", path: setupPath, body: func(string) map[string]any { return map[string]any{} }},
+		{operation: "ConsumeTOTPStep", path: enablePath, body: func(code string) map[string]any { return map[string]any{"code": code, "password": testPassword} }},
 		{operation: "SetTOTP", path: enablePath, body: func(code string) map[string]any { return map[string]any{"code": code, "password": testPassword} }},
 		{operation: "ClearTOTP", path: disablePath, enrolled: true, body: func(string) map[string]any { return map[string]any{"password": testPassword} }},
 	}
