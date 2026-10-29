@@ -36,6 +36,9 @@ const (
 	maximumResponseBytes  = 1 << 20
 )
 
+// errAdminTokenRefused marks an Admin API 401: the cached admin token is no longer valid.
+var errAdminTokenRefused = errors.New("admin token refused")
+
 // GrantType is how the client obtains its Admin API token.
 type GrantType string
 
@@ -185,13 +188,24 @@ func (c *Client) Enrich(ctx context.Context, identity *auth.Identity) (*auth.Ide
 	return enriched, nil
 }
 
+// userAuthorization reads the user's roles, groups and attributes with the cached admin token and drops
+// that token when the Admin API refused it.
 func (c *Client) userAuthorization(ctx context.Context, userID string) (userAuthorization, error) {
 	accessToken, err := c.accessToken(ctx)
 	if err != nil {
 		return userAuthorization{}, err
 	}
+	authorization, err := c.readAuthorization(ctx, accessToken, userID)
+	if errors.Is(err, errAdminTokenRefused) {
+		c.dropAdminToken(accessToken)
+	}
+	return authorization, err
+}
+
+func (c *Client) readAuthorization(ctx context.Context, accessToken, userID string) (userAuthorization, error) {
 	user := c.adminURL() + "/users/" + url.PathEscape(userID)
 	var authorization userAuthorization
+	var err error
 	if authorization.realmRoles, err = c.roleNames(ctx, accessToken, user+"/role-mappings/realm/composite"); err != nil {
 		return userAuthorization{}, err
 	}
@@ -328,7 +342,7 @@ func (c *Client) getJSON(ctx context.Context, accessToken, endpoint string, targ
 	}
 	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
 	if response.StatusCode == http.StatusUnauthorized {
-		c.dropAdminToken(accessToken)
+		return fmt.Errorf("admin API %s answered HTTP %d: %w", request.URL.Path, response.StatusCode, errAdminTokenRefused)
 	}
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("admin API %s answered HTTP %d", request.URL.Path, response.StatusCode) // the reason phrase is the server's free text
