@@ -52,8 +52,6 @@ const (
 	grantTypeClientCredentials = "client_credentials"
 	grantTypePassword          = "password"
 
-	maximumPort = 65535
-
 	redisStartupTimeout = 5 * time.Second
 )
 
@@ -155,12 +153,12 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	sessions, err := newSessions(ctx, configuration, dependencies)
+	sessions, err := newSessionStore(ctx, configuration, dependencies)
 	if err != nil {
 		return err
 	}
 	defer sessions.close(logger)
-	server, err := newServer(ctx, configuration, sessions, &telemetry{registry: metricsRegistry, dependencies: dependencies, logger: logger})
+	server, err := newServer(ctx, configuration, sessions, &instruments{registry: metricsRegistry, dependencies: dependencies, logger: logger})
 	if err != nil {
 		return err
 	}
@@ -178,16 +176,16 @@ func ginMode(devMode bool) string {
 	return gin.ReleaseMode
 }
 
-// telemetry is what the components report to: the registry /metrics serves, the recorder of outbound
+// instruments are what the components report to: the registry /metrics serves, the recorder of outbound
 // calls and the logger of the lines outside a request.
-type telemetry struct {
+type instruments struct {
 	registry     *prometheus.Registry
 	dependencies *forwardauth.Dependencies
 	logger       *slog.Logger
 }
 
 // newServer builds every component after the session store and the server that serves them.
-func newServer(ctx context.Context, configuration *Configuration, sessions *sessions, telemetry *telemetry) (*forwardauth.Server, error) {
+func newServer(ctx context.Context, configuration *Configuration, sessions *sessionStore, telemetry *instruments) (*forwardauth.Server, error) {
 	outcomeCounter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: telemetry.registry, Namespace: "forwardauth"})
 	if err != nil {
 		return nil, err
@@ -255,13 +253,13 @@ func newEmitter(devMode bool) wideevent.Emitter {
 	return wideevent.JSONStdoutEmitter()
 }
 
-// sessions is the session store and, with SESSION_REDIS_ENABLED, the Redis client behind it.
-type sessions struct {
+// sessionStore is the session store and, with SESSION_REDIS_ENABLED, the Redis client behind it.
+type sessionStore struct {
 	store *session.Store
 	redis *redis.Client // nil for the in-memory backend
 }
 
-func newSessions(ctx context.Context, configuration *Configuration, dependencies *forwardauth.Dependencies) (*sessions, error) {
+func newSessionStore(ctx context.Context, configuration *Configuration, dependencies *forwardauth.Dependencies) (*sessionStore, error) {
 	encryptionKey, err := session.ParseKey(configuration.SessionEncryptionKey)
 	if err != nil {
 		return nil, err
@@ -270,7 +268,7 @@ func newSessions(ctx context.Context, configuration *Configuration, dependencies
 	if err != nil {
 		return nil, err
 	}
-	created := &sessions{}
+	created := &sessionStore{}
 	backend, err := created.newBackend(ctx, configuration, dependencies)
 	if err != nil {
 		return nil, err
@@ -292,7 +290,7 @@ func newSessions(ctx context.Context, configuration *Configuration, dependencies
 
 // newBackend opens the Redis client when SESSION_REDIS_ENABLED, fails when Redis does not answer
 // [RES-007] and records its calls; otherwise it returns the in-memory backend (exactly one replica).
-func (s *sessions) newBackend(ctx context.Context, configuration *Configuration, dependencies *forwardauth.Dependencies) (session.Backend, error) {
+func (s *sessionStore) newBackend(ctx context.Context, configuration *Configuration, dependencies *forwardauth.Dependencies) (session.Backend, error) {
 	if !configuration.SessionRedisEnabled {
 		return session.NewMemoryBackend(nil)
 	}
@@ -322,14 +320,14 @@ func newRedisClient(configuration *Configuration) *redis.Client {
 }
 
 // readinessCheck pings Redis; the in-memory backend needs no check.
-func (s *sessions) readinessCheck() func(ctx context.Context) error {
+func (s *sessionStore) readinessCheck() func(ctx context.Context) error {
 	if s.redis == nil {
 		return nil
 	}
 	return func(ctx context.Context) error { return s.redis.Ping(ctx).Err() }
 }
 
-func (s *sessions) closeRedis() error {
+func (s *sessionStore) closeRedis() error {
 	if s.redis == nil {
 		return nil
 	}
@@ -340,7 +338,7 @@ func (s *sessions) closeRedis() error {
 }
 
 // close runs after the server drained; a failure is logged, the process is ending anyway.
-func (s *sessions) close(logger *slog.Logger) {
+func (s *sessionStore) close(logger *slog.Logger) {
 	if err := s.closeRedis(); err != nil {
 		logger.Error("shutdown incomplete", "error", err.Error())
 	}
@@ -608,12 +606,12 @@ func validateServer(configuration *Configuration) error {
 	if _, err := redirect.ExternalURL(configuration.ExternalURL); err != nil {
 		problems = append(problems, fmt.Errorf("EXTERNAL_URL: %w", err))
 	}
-	if !redirect.IsPathPrefix(configuration.PathPrefix) {
-		problems = append(problems, fmt.Errorf("PATH_PREFIX %q must be \"/\"-separated segments of A-Z a-z 0-9 . _ ~ - without a trailing \"/\" and without a \".\" or \"..\" segment", configuration.PathPrefix))
+	if err := forwardauth.ValidatePathPrefix(configuration.PathPrefix); err != nil {
+		problems = append(problems, fmt.Errorf("PATH_PREFIX %w", err))
 	}
 	problems = append(problems,
-		rangeProblem("PORT", configuration.Port, 1, maximumPort),
-		rangeProblem("METRICS_PORT", configuration.MetricsPort, 1, maximumPort),
+		rangeProblem("PORT", configuration.Port, 1, forwardauth.MaximumPort),
+		rangeProblem("METRICS_PORT", configuration.MetricsPort, 1, forwardauth.MaximumPort),
 		minimumProblem("WIDE_EVENT_SAMPLE_RATE", configuration.WideEventSampleRate, 1),
 		rangeProblem("SHUTDOWN_DELAY_SECONDS", configuration.ShutdownDelaySeconds, 0, int(forwardauth.MaximumShutdownDelay/time.Second)),
 	)
