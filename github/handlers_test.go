@@ -286,6 +286,24 @@ func TestCallbackRefusesAWrongPKCEVerifier(t *testing.T) {
 	require.JSONEq(t, `{"code":"login_failed","message":"authentication required"}`, response.Body.String())
 }
 
+func TestCallbackRefusesACodeIssuedForAnotherRedirectURI(t *testing.T) {
+	environment := newTestEnvironment(t, defaultTestTeams(), nil)
+	login := environment.startLogin(t, "")
+	location, err := url.Parse(login.Header().Get("Location"))
+	require.NoError(t, err)
+	query := location.Query()
+	query.Set("redirect_uri", "https://other.example.com/callback")
+	location.RawQuery = query.Encode()
+	otherCallback, err := url.Parse(approve(t, location.String()))
+	require.NoError(t, err)
+	require.Equal(t, "other.example.com", otherCallback.Host)
+
+	response := environment.callback(t, login, testExternalURL+"/auth/github/callback?"+otherCallback.RawQuery)
+
+	require.Equal(t, http.StatusUnauthorized, response.Code)
+	require.JSONEq(t, `{"code":"login_failed","message":"authentication required"}`, response.Body.String())
+}
+
 func TestCallbackRedirectsFailuresToTheErrorURL(t *testing.T) {
 	testCases := []struct {
 		name       string
