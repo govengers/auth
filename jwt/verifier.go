@@ -46,7 +46,8 @@ type VerifierOptions struct {
 
 // Verifier checks RS512 tokens against a JWKS URL and turns them into identities. It keeps no token
 // cache and starts no goroutine: Verify refetches the JWKS lazily, after RefreshInterval or for an
-// unknown key ID, at most once per minute. It is safe for concurrent use.
+// unknown key ID, at most once per minute; the refetch is not cancelled with the triggering request and
+// takes at most 10 s. It is safe for concurrent use.
 type Verifier struct {
 	options VerifierOptions
 	now     func() time.Time
@@ -178,13 +179,17 @@ func keyIDOf(token string) (string, error) {
 func (v *Verifier) keysFor(ctx context.Context, keyID string) (keys jwk.Set, refreshError, err error) {
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
-	// ponytail: the fetch runs under the lock, so verifications wait for it (at most HTTPClient's timeout,
-	// at most once a minute); switch to a fetch-in-flight flag if that latency matters.
+	// ponytail: the fetch runs under the lock, so verifications wait for it (at most 10 s, at most once a
+	// minute); switch to a fetch-in-flight flag if that latency matters.
 	_, known := v.keys.LookupKeyID(keyID)
 	if !v.fetchDue(known) {
 		return v.keys, nil, nil
 	}
-	fetchError := v.refreshKeys(ctx)
+	// The fetch serves every verification waiting for the lock and uses up the minute's attempt, so the
+	// triggering request's cancellation must not end it; it gets its own timeout instead [CON-003].
+	fetchContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultHTTPTimeout)
+	defer cancel()
+	fetchError := v.refreshKeys(fetchContext)
 	switch {
 	case fetchError == nil:
 		return v.keys, nil, nil

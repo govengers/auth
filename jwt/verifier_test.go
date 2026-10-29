@@ -538,6 +538,26 @@ func TestVerifyRefetchesForAnUnknownKeyIDAtMostOncePerMinute(t *testing.T) {
 	requireInvalidToken(t, err, "unknown key ID")
 }
 
+func TestVerifyFetchesARotatedKeyForACancelledRequest(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	rotated := newTestSigner(t, clock.now)
+	keySets := newKeySetServer(t, newTestSigner(t, clock.now).JWKSHandler())
+	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
+	keySets.serve(rotated.JWKSHandler())
+	clock.advance(time.Minute)
+	token, err := rotated.Sign(&auth.Identity{Subject: "42"})
+	require.NoError(t, err)
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err = verifier.Verify(cancelled, token)
+	require.NoError(t, err, "the client's disconnect does not end the shared fetch")
+
+	_, err = verifier.Verify(t.Context(), token)
+	require.NoError(t, err)
+	require.Equal(t, int32(2), keySets.fetches.Load())
+}
+
 func TestVerifyRefreshesKeysAfterTheRefreshInterval(t *testing.T) {
 	clock := &testClock{instant: signedAt}
 	signer := newTestSigner(t, clock.now)
