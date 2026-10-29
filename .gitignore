@@ -1,0 +1,5 @@
+# just recipes write test reports and builds here
+sandbox/
+
+# local configuration and keys
+.env
