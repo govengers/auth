@@ -6,11 +6,11 @@ package prometheusadapter
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/dependency"
 )
 
 // Options configure an OutcomeCounter.
@@ -42,7 +42,7 @@ func New(options *Options) (*OutcomeCounter, error) {
 		Help:      "Authentication outcomes by provider, action and result.",
 	}, []string{"provider", "action", "result"})
 	if err := options.Registerer.Register(outcomes); err != nil {
-		return nil, fmt.Errorf("prometheusadapter: register %s_auth_outcomes_total: %v", options.Namespace, err) //nolint:errorlint // LIB-010: client_golang errors are not part of this API
+		return nil, dependency.Error("prometheusadapter: register "+options.Namespace+"_auth_outcomes_total", err)
 	}
 	return &OutcomeCounter{outcomes: outcomes}, nil
 }
