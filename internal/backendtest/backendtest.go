@@ -6,7 +6,6 @@ package backendtest
 import (
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -169,20 +168,33 @@ func testMarkerLifetimeFollowsTheValues(t *testing.T, backend session.Backend, a
 
 func testConcurrentPop(t *testing.T, backend session.Backend, _ func(time.Duration)) {
 	ctx := t.Context()
+	type popResult struct {
+		value []byte
+		found bool
+		err   error
+	}
 	for round := range raceRounds {
 		require.NoError(t, backend.Put(ctx, "s", "state", []byte("value"), time.Hour))
-		var winners atomic.Int32
+		results := make([]popResult, 8)
 		var waitGroup sync.WaitGroup
-		for range 8 {
+		for index := range results {
 			waitGroup.Go(func() {
-				_, found, err := backend.Pop(ctx, "s", "state")
-				if err == nil && found {
-					winners.Add(1)
-				}
+				value, found, err := backend.Pop(ctx, "s", "state")
+				results[index] = popResult{value: value, found: found, err: err}
 			})
 		}
 		waitGroup.Wait()
-		require.Equal(t, int32(1), winners.Load(), "round %d", round)
+
+		winners := 0
+		for _, result := range results {
+			require.NoError(t, result.err, "round %d", round)
+			if result.found {
+				winners++
+				require.Equal(t, "value", string(result.value), "round %d", round)
+			}
+		}
+		require.Equal(t, 1, winners, "round %d", round)
+		requireAbsent(t, backend, "s", "state")
 	}
 }
 
