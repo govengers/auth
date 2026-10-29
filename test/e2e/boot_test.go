@@ -54,6 +54,13 @@ func TestBootFailsListingEveryMissingOrInvalidVariable(t *testing.T) {
 			}),
 			problems: []string{`API_KEY_PERMISSIONS entry for \"ci\"`},
 		},
+		{
+			name: "redis that does not answer",
+			environment: merged(oidcEnvironment("http://127.0.0.1:1"), map[string]string{
+				"EXTERNAL_URL": "http://127.0.0.1:8080", "SESSION_REDIS_ENABLED": "true", "SESSION_REDIS_ADDRESS": "127.0.0.1:1",
+			}),
+			problems: []string{"SESSION_REDIS_ADDRESS: ping Redis at 127.0.0.1:1"},
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

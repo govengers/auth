@@ -28,6 +28,7 @@ import (
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/apikey"
 	"github.com/govengers/auth/github"
+	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/internal/forwardauth"
 	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/jwt"
@@ -52,6 +53,8 @@ const (
 	grantTypePassword          = "password"
 
 	maximumPort = 65535
+
+	redisStartupTimeout = 5 * time.Second
 )
 
 // Configuration holds every value forwardauth reads, filled once at startup.
@@ -147,7 +150,7 @@ func run(logger *slog.Logger) error {
 	config.Print()
 	gin.SetMode(ginMode(configuration.DevMode)) // process-wide; release mode keeps gin's debug lines off stdout
 
-	sessions, err := newSessions(configuration)
+	sessions, err := newSessions(ctx, configuration)
 	if err != nil {
 		return err
 	}
@@ -246,7 +249,7 @@ type sessions struct {
 	redis *redis.Client // nil for the in-memory backend
 }
 
-func newSessions(configuration *Configuration) (*sessions, error) {
+func newSessions(ctx context.Context, configuration *Configuration) (*sessions, error) {
 	encryptionKey, err := session.ParseKey(configuration.SessionEncryptionKey)
 	if err != nil {
 		return nil, err
@@ -256,7 +259,7 @@ func newSessions(configuration *Configuration) (*sessions, error) {
 		return nil, err
 	}
 	created := &sessions{}
-	backend, err := created.newBackend(configuration)
+	backend, err := created.newBackend(ctx, configuration)
 	if err != nil {
 		return nil, err
 	}
@@ -275,22 +278,35 @@ func newSessions(configuration *Configuration) (*sessions, error) {
 	return created, nil
 }
 
-// newBackend opens the Redis client when SESSION_REDIS_ENABLED, otherwise the in-memory backend
-// (exactly one replica).
-func (s *sessions) newBackend(configuration *Configuration) (session.Backend, error) {
+// newBackend opens the Redis client when SESSION_REDIS_ENABLED and fails when Redis does not answer
+// [RES-007]; otherwise it returns the in-memory backend (exactly one replica).
+func (s *sessions) newBackend(ctx context.Context, configuration *Configuration) (session.Backend, error) {
 	if !configuration.SessionRedisEnabled {
 		return session.NewMemoryBackend(nil)
 	}
-	s.redis = redis.NewClient(&redis.Options{
-		Addr:     configuration.SessionRedisAddress,
-		Password: configuration.SessionRedisPassword,
-		DB:       configuration.SessionRedisDatabase,
-	})
+	s.redis = newRedisClient(configuration)
+	pingContext, cancel := context.WithTimeout(ctx, redisStartupTimeout)
+	defer cancel()
+	if err := s.redis.Ping(pingContext).Err(); err != nil {
+		return nil, errors.Join(dependency.Error("SESSION_REDIS_ADDRESS: ping Redis at "+configuration.SessionRedisAddress, err), s.closeRedis())
+	}
 	backend, err := redisbackend.New(&redisbackend.Options{Client: s.redis, KeyPrefix: configuration.SessionRedisKeyPrefix})
 	if err != nil {
 		return nil, errors.Join(err, s.closeRedis())
 	}
 	return backend, nil
+}
+
+// newRedisClient never retries, so a session Pop whose answer was lost is not run twice [RES-004], and
+// honours context deadlines, so the 2 s readiness check and a request's own deadline bound each command.
+func newRedisClient(configuration *Configuration) *redis.Client {
+	return redis.NewClient(&redis.Options{
+		Addr:                  configuration.SessionRedisAddress,
+		Password:              configuration.SessionRedisPassword,
+		DB:                    configuration.SessionRedisDatabase,
+		MaxRetries:            -1,
+		ContextTimeoutEnabled: true,
+	})
 }
 
 // readinessCheck pings Redis; the in-memory backend needs no check.
