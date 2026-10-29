@@ -284,11 +284,11 @@ func (p *Provider) saveMembership(ctx context.Context, current session.Session, 
 	}
 }
 
-// sameMembership reports whether a and b are the same GitHub user with the same teams and admin role, the
-// fields withMembership owns.
-func sameMembership(a, b *auth.Identity) bool {
-	return a.Provider == b.Provider && a.Subject == b.Subject && slices.Equal(a.Teams, b.Teams) &&
-		slices.Contains(a.Roles, auth.RoleAdmin) == slices.Contains(b.Roles, auth.RoleAdmin)
+// sameMembership reports whether read and latest are the same GitHub user with the same teams and admin
+// role, the fields withMembership owns.
+func sameMembership(read, latest *auth.Identity) bool {
+	return read.Provider == latest.Provider && read.Subject == latest.Subject && slices.Equal(read.Teams, latest.Teams) &&
+		slices.Contains(read.Roles, auth.RoleAdmin) == slices.Contains(latest.Roles, auth.RoleAdmin)
 }
 
 // sessionToken returns the GitHub token stored in current; none or undecodable: ErrUnauthenticated. The
