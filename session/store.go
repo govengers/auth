@@ -160,7 +160,7 @@ func sessionIDOf(cookieValue string) string {
 }
 
 func sessionCookie(options StoreOptions, value string, maxAge int) *http.Cookie {
-	return &http.Cookie{
+	return &http.Cookie{ //nolint:gosec // G124: Secure is dropped only when the caller opts into InsecureCookie for local HTTP
 		Name:     options.CookieName,
 		Value:    value,
 		Path:     options.CookiePath,

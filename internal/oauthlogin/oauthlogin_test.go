@@ -107,7 +107,7 @@ func TestBeginFailsWhenTheStateCannotBeStored(t *testing.T) {
 
 	require.ErrorIs(t, err, errBackendDown)
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/login", nil)
-	request.AddCookie(&http.Cookie{Name: "auth_session", Value: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"})
+	request.Header.Set("Cookie", "auth_session=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 	_, err = Begin(t.Context(), store, httptest.NewRecorder(), request, loginKey)
 	require.ErrorIs(t, err, errBackendDown, "the previous session cannot be revoked")
 }
