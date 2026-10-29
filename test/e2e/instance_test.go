@@ -42,7 +42,7 @@ type instance struct {
 
 // start runs the binary on two free ports with environment and waits until {prefix}/health answers.
 // EXTERNAL_URL defaults to the instance's own base URL. The process is stopped with SIGTERM when the test
-// ends and must then exit with 0. A port that another socket took between freePort and the binary's bind
+// ends and must then exit with 0. A port that another socket took between freePorts and the binary's bind
 // is retried on new ports.
 func start(t *testing.T, environment map[string]string) *instance {
 	t.Helper()
@@ -61,7 +61,8 @@ func start(t *testing.T, environment map[string]string) *instance {
 // launch starts the binary on two free ports without waiting for it.
 func launch(t *testing.T, environment map[string]string) *instance {
 	t.Helper()
-	port, metricsPort := freePort(t), freePort(t)
+	ports := freePorts(t, 2)
+	port, metricsPort := ports[0], ports[1]
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
 	withPorts := merged(map[string]string{"PORT": strconv.Itoa(port), "METRICS_PORT": strconv.Itoa(metricsPort), "EXTERNAL_URL": baseURL}, environment)
 	command, collected := newCommand(t, withPorts)
@@ -134,15 +135,24 @@ func healthy(ctx context.Context, client *http.Client, target string) bool {
 	return response.StatusCode == http.StatusOK
 }
 
-// freePort asks the kernel for a free loopback port and releases it for the binary; start retries when
-// another socket takes it first.
-func freePort(t *testing.T) int {
+// freePorts asks the kernel for count free loopback ports, holding each until all are taken so none is
+// handed out twice, and releases them for the binary; start retries when another socket takes one first.
+func freePorts(t *testing.T, count int) []int {
 	t.Helper()
-	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port := listener.Addr().(*net.TCPAddr).Port
-	require.NoError(t, listener.Close())
-	return port
+	listeners := make([]net.Listener, 0, count)
+	defer func() {
+		for _, listener := range listeners {
+			_ = listener.Close() // a failed close of an idle listener leaves nothing to clean up
+		}
+	}()
+	ports := make([]int, 0, count)
+	for range count {
+		listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		listeners = append(listeners, listener)
+		ports = append(ports, listener.Addr().(*net.TCPAddr).Port)
+	}
+	return ports
 }
 
 // browser is an HTTP client with a cookie jar that never follows a redirect by itself: the test sees

@@ -272,6 +272,9 @@ func (s *Server) readiness(ginContext *gin.Context) {
 		notReady(ginContext)
 		return
 	}
+	if we := wideevent.FromGin(ginContext); we != nil {
+		we.Success()
+	}
 	httpjson.Write(ginContext.Writer, http.StatusOK, statusResponse{Status: "ok"})
 }
 

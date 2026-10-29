@@ -260,6 +260,14 @@ func TestHealthAndReadinessAnswerWithoutMetricsAndAFailedReadinessCheckIsRecorde
 	require.Zero(t, requests)
 }
 
+func TestASuccessfulReadinessCheckIsRecordedAsSuccess(t *testing.T) {
+	testHarness := newHarness(t, harnessOptions{readinessCheck: func(context.Context) error { return nil }})
+
+	require.Equal(t, http.StatusOK, testHarness.serve(t, http.MethodGet, "/auth/ready", nil).Code)
+
+	require.Equal(t, "success", testHarness.events.last(t)["outcome"])
+}
+
 func TestMetricsLabelRouteTemplatesUnmatchedPathsAndUnknownMethods(t *testing.T) {
 	item := auth.Route{Method: http.MethodGet, Path: "/auth/test/items/:id", Handler: http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusNoContent)
