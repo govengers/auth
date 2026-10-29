@@ -8,6 +8,7 @@ require (
 	github.com/lestrrat-go/jwx/v3 v3.4.0
 	github.com/mxcd/go-wide-event-logger v0.3.2
 	github.com/stretchr/testify v1.12.1
+	golang.org/x/oauth2 v0.37.0
 )
 
 require (
