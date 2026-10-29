@@ -23,21 +23,42 @@ import (
 
 // Middleware runs net/http middleware in a gin chain: when it calls its next handler, ginContext.Request
 // becomes the (possibly enriched) request and the rest of the chain runs inside it; otherwise the chain is aborted.
+// Like a net/http chain it wraps once, here, so state the middleware keeps across requests survives. Each
+// request finds its gin chain through its context: a middleware that passes on a request whose context does
+// not derive from the one it got is answered 500.
 // Gin handlers keep writing to ginContext.Writer, so a writer the middleware wraps for its next handler is not seen.
 func Middleware(middleware func(http.Handler) http.Handler) gin.HandlerFunc {
+	handler := middleware(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		chain, found := request.Context().Value(chainKey{}).(*ginChain)
+		if !found {
+			auth.WriteError(writer, errChainLost)
+			return
+		}
+		chain.passed = true
+		chain.ginContext.Request = request
+		chain.ginContext.Next()
+	}))
 	return func(ginContext *gin.Context) {
-		passed := false
-		handler := middleware(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
-			passed = true
-			ginContext.Request = request
-			ginContext.Next()
-		}))
-		handler.ServeHTTP(ginContext.Writer, ginContext.Request)
-		if !passed {
+		chain := &ginChain{ginContext: ginContext}
+		ctx := context.WithValue(ginContext.Request.Context(), chainKey{}, chain)
+		handler.ServeHTTP(ginContext.Writer, ginContext.Request.WithContext(ctx))
+		if !chain.passed {
 			ginContext.Abort()
 		}
 	}
 }
+
+// chainKey is the request context key of the request's ginChain.
+type chainKey struct{}
+
+// ginChain is the rest of one request's gin chain, which Middleware's next handler runs.
+type ginChain struct {
+	ginContext *gin.Context
+	passed     bool
+}
+
+// errChainLost is the internal failure of a middleware that passed on a request without its gin chain.
+var errChainLost = errors.New("ginadapter: the middleware passed on a request without its gin chain")
 
 // RegisterRoutes registers each route with router.Handle(route.Method, route.Path, gin.WrapH(route.Handler)),
 // so gin route templates (and therefore metric labels) are the provider paths. Register on the engine root.

@@ -3,10 +3,13 @@ package ginadapter_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -88,6 +91,80 @@ func TestMiddlewareAbortsWhenItRefuses(t *testing.T) {
 
 	require.Equal(t, http.StatusUnauthorized, recorder.Code)
 	require.JSONEq(t, `{"code":"unauthenticated","message":"authentication required"}`, recorder.Body.String())
+	require.False(t, reached)
+}
+
+// firstRequestOnly is net/http middleware with state across requests: it passes the first request and
+// refuses every later one with 403. wraps counts how often it wrapped a next handler.
+func firstRequestOnly(wraps *atomic.Int32) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		wraps.Add(1)
+		var used atomic.Bool
+		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if used.Swap(true) {
+				auth.WriteError(writer, auth.ErrForbidden)
+				return
+			}
+			next.ServeHTTP(writer, request)
+		})
+	}
+}
+
+func TestMiddlewareWrapsOnce(t *testing.T) {
+	engine, _ := newEngine(t)
+	var wraps atomic.Int32
+	engine.GET("/once", ginadapter.Middleware(firstRequestOnly(&wraps)), func(ginContext *gin.Context) { ginContext.Status(http.StatusNoContent) })
+
+	first := serve(t, engine, http.MethodGet, "/once")
+	second := serve(t, engine, http.MethodGet, "/once")
+
+	require.Equal(t, http.StatusNoContent, first.Code)
+	require.Equal(t, http.StatusForbidden, second.Code, "the middleware's state survives the first request")
+	require.Equal(t, int32(1), wraps.Load())
+}
+
+func TestMiddlewareKeepsConcurrentRequestsApart(t *testing.T) {
+	engine := gin.New()
+	subjectFromHeader := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			identity := &auth.Identity{Provider: "password", Subject: request.Header.Get("X-Subject"), Active: true}
+			next.ServeHTTP(writer, request.WithContext(auth.WithIdentity(request.Context(), identity)))
+		})
+	}
+	engine.GET("/me", ginadapter.Middleware(subjectFromHeader), writeSubject)
+
+	var waitGroup sync.WaitGroup
+	bodies := make([]string, 16)
+	for index := range bodies {
+		waitGroup.Go(func() {
+			request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/me", nil)
+			request.Header.Set("X-Subject", fmt.Sprintf("user-%d", index))
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, request)
+			bodies[index] = recorder.Body.String()
+		})
+	}
+	waitGroup.Wait()
+
+	for index, body := range bodies {
+		require.Equal(t, fmt.Sprintf("user-%d", index), body)
+	}
+}
+
+func TestMiddlewareFailsWhenTheRequestLosesItsChain(t *testing.T) {
+	engine, _ := newEngine(t)
+	reached := false
+	detached := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			next.ServeHTTP(writer, request.WithContext(context.Background()))
+		})
+	}
+	engine.GET("/me", ginadapter.Middleware(detached), func(*gin.Context) { reached = true })
+
+	recorder := serve(t, engine, http.MethodGet, "/me")
+
+	require.Equal(t, http.StatusInternalServerError, recorder.Code)
+	require.JSONEq(t, `{"code":"internal","message":"internal error"}`, recorder.Body.String())
 	require.False(t, reached)
 }
 
