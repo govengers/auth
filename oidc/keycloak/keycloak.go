@@ -310,7 +310,7 @@ func (c *Client) getJSON(ctx context.Context, accessToken, endpoint string, targ
 	request.Header.Set("Accept", "application/json")
 	response, err := c.options.HTTPClient.Do(request)
 	if err != nil {
-		return dependency.Error("call admin API", err)
+		return fmt.Errorf("call admin API: %w", err) // net/http, not a dependency: callers may detect a cancelled context
 	}
 	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
 	if response.StatusCode != http.StatusOK {
