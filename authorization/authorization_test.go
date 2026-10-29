@@ -270,6 +270,72 @@ func TestReal(t *testing.T) {
 	}
 }
 
+func TestHasPermission(t *testing.T) {
+	withPermissions := func(texts ...string) *auth.Identity {
+		identity := &auth.Identity{Provider: "apikey", Subject: "ci", Active: true}
+		for _, text := range texts {
+			permission, err := auth.ParsePermission(text)
+			require.NoError(t, err)
+			identity.Permissions = append(identity.Permissions, permission)
+		}
+		return identity
+	}
+	inactiveWriter := withPermissions("*:write")
+	inactiveWriter.Active = false
+
+	testCases := []struct {
+		name       string
+		resource   string
+		access     auth.Access
+		identity   *auth.Identity
+		want       error // nil: allowed; otherwise the refusal kind
+		wantReason string
+	}{
+		{name: "exact resource read", resource: "builds", access: auth.AccessRead, identity: withPermissions("builds:read")},
+		{name: "exact resource write", resource: "builds", access: auth.AccessWrite, identity: withPermissions("builds:write")},
+		{name: "write grants read", resource: "builds", access: auth.AccessRead, identity: withPermissions("builds:write")},
+		{name: "read refuses write", resource: "builds", access: auth.AccessWrite, identity: withPermissions("builds:read"), want: auth.ErrForbidden, wantReason: "missing permission builds:write"},
+		{name: "wildcard read grants read", resource: "builds", access: auth.AccessRead, identity: withPermissions("*:read")},
+		{name: "wildcard read refuses write", resource: "builds", access: auth.AccessWrite, identity: withPermissions("*:read"), want: auth.ErrForbidden, wantReason: "missing permission builds:write"},
+		{name: "wildcard write grants write", resource: "builds", access: auth.AccessWrite, identity: withPermissions("*:write")},
+		{name: "one of several permissions grants", resource: "builds", access: auth.AccessRead, identity: withPermissions("deployments:write", "builds:read")},
+		{name: "another resource refuses", resource: "builds", access: auth.AccessRead, identity: withPermissions("deployments:write"), want: auth.ErrForbidden, wantReason: "missing permission builds:read"},
+		{name: "requiring every resource needs the wildcard", resource: "*", access: auth.AccessRead, identity: withPermissions("builds:write"), want: auth.ErrForbidden, wantReason: "missing permission *:read"},
+		{name: "the wildcard grants every resource", resource: "*", access: auth.AccessRead, identity: withPermissions("*:read")},
+		{name: "no permissions refuse", resource: "builds", access: auth.AccessRead, identity: withPermissions(), want: auth.ErrForbidden, wantReason: "missing permission builds:read"},
+		{name: "inactive identity refuses", resource: "builds", access: auth.AccessRead, identity: inactiveWriter, want: auth.ErrForbidden, wantReason: "inactive"},
+		{name: "no identity is unauthenticated", resource: "builds", access: auth.AccessRead, want: auth.ErrUnauthenticated, wantReason: "no identity"},
+		{name: "empty resource refuses", resource: "", access: auth.AccessRead, identity: withPermissions("*:write"), want: auth.ErrForbidden, wantReason: "missing permission :read"},
+		{name: "invalid resource refuses", resource: "Builds", access: auth.AccessRead, identity: withPermissions("*:write"), want: auth.ErrForbidden, wantReason: "missing permission Builds:read"},
+		{name: "invalid access refuses", resource: "builds", access: auth.Access("admin"), identity: withPermissions("*:write"), want: auth.ErrForbidden, wantReason: "missing permission builds:admin"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := authorization.HasPermission(testCase.resource, testCase.access)(withIdentity(t, testCase.identity))
+
+			if testCase.want == nil {
+				require.NoError(t, err)
+				return
+			}
+			var refusal *auth.Error
+			require.ErrorAs(t, err, &refusal)
+			require.ErrorIs(t, err, testCase.want)
+			require.Equal(t, testCase.wantReason, refusal.Reason)
+		})
+	}
+}
+
+func TestHasPermissionChecksTheEffectiveIdentity(t *testing.T) {
+	impersonated := &auth.Identity{
+		Provider: "password", Subject: "user-7", Active: true,
+		Impersonator: &auth.Identity{Provider: "password", Subject: "admin-1", Active: true, Permissions: []auth.Permission{{Resource: "*", Access: auth.AccessWrite}}},
+	}
+	ctx := withIdentity(t, impersonated)
+
+	requireRefusal(t, auth.ErrForbidden, authorization.HasPermission("builds", auth.AccessRead)(ctx))
+	requireRefusal(t, nil, authorization.Real(authorization.HasPermission("builds", auth.AccessRead))(ctx))
+}
+
 func TestReasonsStayServerSide(t *testing.T) {
 	err := authorization.HasRole("payroll-auditor")(withIdentity(t, activeIdentity()))
 
@@ -277,6 +343,14 @@ func TestReasonsStayServerSide(t *testing.T) {
 	require.ErrorAs(t, err, &refusal)
 	require.Contains(t, refusal.Reason, "payroll-auditor")
 	status, response := auth.ResponseFor(err)
+	require.Equal(t, http.StatusForbidden, status)
+	require.Equal(t, auth.ErrorResponse{Code: "forbidden", Message: "access denied"}, response)
+
+	err = authorization.HasPermission("payroll", auth.AccessWrite)(withIdentity(t, activeIdentity()))
+
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, "missing permission payroll:write", refusal.Reason)
+	status, response = auth.ResponseFor(err)
 	require.Equal(t, http.StatusForbidden, status)
 	require.Equal(t, auth.ErrorResponse{Code: "forbidden", Message: "access denied"}, response)
 }

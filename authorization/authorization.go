@@ -164,6 +164,18 @@ func HasGitHubTeam(team string) Check {
 	})
 }
 
+// HasPermission passes an active identity that Permits access on resource (auth.Permission.Grants: "*"
+// covers every resource, write includes read). An empty or invalid resource, or an access other than read
+// and write, refuses everything. The effective identity counts; wrap the check in Real to check the
+// impersonator. Interactive users have no permissions unless an OnLogin hook grants them: compose
+// Any(HasRole(role), HasPermission(resource, access)) or grant them at login.
+func HasPermission(resource string, access auth.Access) Check {
+	reason := "missing permission " + auth.Permission{Resource: resource, Access: access}.String()
+	return activeIdentityWith(reason, func(identity *auth.Identity) bool {
+		return identity.Permits(resource, access)
+	})
+}
+
 // failClosed returns a copy of checks in which every nil check refuses.
 func failClosed(checks []Check) []Check {
 	safeChecks := make([]Check, len(checks))
@@ -206,7 +218,7 @@ func inactiveRefusal(identity *auth.Identity) error {
 		return unauthenticated()
 	}
 	if !identity.Active {
-		return forbidden("identity is inactive")
+		return forbidden("inactive")
 	}
 	return nil
 }

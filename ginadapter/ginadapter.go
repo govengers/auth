@@ -86,6 +86,21 @@ func Require(check authorization.Check) gin.HandlerFunc {
 	}
 }
 
+// RequireMethodPermission is Require(authorization.HasPermission(resource, auth.AccessForMethod(method)))
+// evaluated per request: one gate for a route group where GET, HEAD and OPTIONS need read access on
+// resource and every other method write access. Same recording and responses as Require.
+func RequireMethodPermission(resource string) gin.HandlerFunc {
+	requireRead := Require(authorization.HasPermission(resource, auth.AccessRead))
+	requireWrite := Require(authorization.HasPermission(resource, auth.AccessWrite))
+	return func(ginContext *gin.Context) {
+		if auth.AccessForMethod(ginContext.Request.Method) == auth.AccessRead {
+			requireRead(ginContext)
+			return
+		}
+		requireWrite(ginContext)
+	}
+}
+
 func recordDecision(we *wideevent.Event, outcome auth.Outcome) {
 	we.Str("auth.provider", outcome.Provider).
 		Str("auth.action", string(outcome.Action)).
