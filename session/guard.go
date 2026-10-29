@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/impersonation"
 	"github.com/govengers/auth/internal/redirect"
 )
 
@@ -178,7 +179,7 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 	case refreshed == nil:
 		outcome.Err = fmt.Errorf("refresher %q returned no identity", realIdentity.Provider)
 	default:
-		stored.Identity = withRealIdentity(stored.Identity, refreshed)
+		stored.Identity = impersonation.WithReal(stored.Identity, refreshed)
 	}
 	stored.RefreshedAt = g.now()
 	if err := current.saveEnvelope(ctx, stored); err != nil {
@@ -188,16 +189,6 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 	outcome.Identity, outcome.Result = stored.Identity, auth.ResultSuccess
 	g.report(ctx, outcome)
 	return stored.Identity, nil
-}
-
-// withRealIdentity returns identity with its real identity (the impersonator, or itself) replaced by refreshed.
-func withRealIdentity(identity, refreshed *auth.Identity) *auth.Identity {
-	if identity.Impersonator == nil {
-		return refreshed
-	}
-	impersonated := identity.Clone()
-	impersonated.Impersonator = refreshed
-	return impersonated
 }
 
 // reportFailure reports outcome as denied (a refusal) or error (anything answered with 500) and returns its Err.

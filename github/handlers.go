@@ -12,6 +12,7 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/httpjson"
+	"github.com/govengers/auth/internal/impersonation"
 	"github.com/govengers/auth/internal/oauthlogin"
 	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/session"
@@ -227,7 +228,7 @@ func (p *Provider) refreshSession(ctx context.Context, writer http.ResponseWrite
 	if err != nil {
 		return stored, err
 	}
-	updated := withRealIdentity(stored, refreshed)
+	updated := impersonation.WithReal(stored, refreshed)
 	if err := current.SaveIdentity(ctx, updated); err != nil {
 		return stored, err
 	}

@@ -92,17 +92,6 @@ func withMembership(identity *auth.Identity, userMembership membership) *auth.Id
 	return updated
 }
 
-// withRealIdentity returns stored with its real identity (the impersonator, or stored itself) replaced
-// by refreshed.
-func withRealIdentity(stored, refreshed *auth.Identity) *auth.Identity {
-	if stored.Impersonator == nil {
-		return refreshed
-	}
-	impersonated := stored.Clone()
-	impersonated.Impersonator = refreshed
-	return impersonated
-}
-
 func notAllowed() error {
 	return &auth.Error{Kind: auth.ErrForbidden, Reason: "not in an allowed team"}
 }
