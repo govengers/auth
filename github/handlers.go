@@ -152,12 +152,12 @@ func (p *Provider) startSession(ctx context.Context, writer http.ResponseWriter,
 // OnLogout and redirects to PostLogoutURL. A cross-site request (logout CSRF) is refused before the
 // session is touched.
 func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) {
-	ctx := request.Context()
 	if err := fetchmetadata.RefuseCrossSite(request); err != nil {
-		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: err})
+		p.reporter.Refuse(request.Context(), writer, auth.Outcome{Action: auth.ActionLogout, Err: err})
 		return
 	}
-	identity, token, readError := p.sessionState(context.WithoutCancel(ctx), request)
+	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the reads or OnLogout
+	identity, token, readError := p.sessionState(ctx, request)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
 		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: fmt.Errorf("github: end session: %w", err), Identity: identity})
 		return

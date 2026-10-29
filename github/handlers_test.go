@@ -513,8 +513,12 @@ func TestLogoutFailsWhenTheSessionCannotBeEnded(t *testing.T) {
 
 func TestLogoutIgnoresAClientDisconnect(t *testing.T) {
 	var loggedOut []*auth.Identity
+	var hookContextError error
 	environment := newTestEnvironment(t, defaultTestTeams(), func(options *Options) {
-		options.OnLogout = func(_ context.Context, identity *auth.Identity) { loggedOut = append(loggedOut, identity) }
+		options.OnLogout = func(ctx context.Context, identity *auth.Identity) {
+			loggedOut = append(loggedOut, identity)
+			hookContextError = ctx.Err()
+		}
 	})
 	login := environment.login(t)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -526,6 +530,7 @@ func TestLogoutIgnoresAClientDisconnect(t *testing.T) {
 	require.Equal(t, http.StatusFound, response.Code)
 	require.Len(t, environment.fake.RevokedTokens(), 1)
 	require.Len(t, loggedOut, 1)
+	require.NoError(t, hookContextError, "OnLogout runs on a context the client cannot cancel")
 	outcome := environment.outcomes.last(t)
 	require.NoError(t, outcome.Err)
 	require.Equal(t, "42", outcome.Identity.Subject)
