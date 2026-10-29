@@ -33,11 +33,21 @@ build:
 docker-build:
     docker build -f docker/forwardauth.Dockerfile --build-arg VERSION={{version}} -t {{image}}:{{version}} .
 
-# End-to-end: binary subprocess suite (with binary coverage) and the docker compose suite
+# End-to-end: binary subprocess suite (with binary coverage) and the docker compose suite; the stack is always stopped
 test-e2e:
-    mkdir -p sandbox/coverage
+    #!/usr/bin/env bash
+    set -euo pipefail
+    compose="docker compose -f test/e2e/compose/compose.yml"
+    free_port() { local port; while port=$((20000 + RANDOM % 20000)); (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; do :; done; echo "$port"; }
+    export E2E_APP_PORT="$(free_port)" E2E_ISSUER_PORT="$(free_port)"
+    while [ "$E2E_ISSUER_PORT" = "$E2E_APP_PORT" ]; do E2E_ISSUER_PORT="$(free_port)"; done
+    export JWT_PRIVATE_KEY="$(openssl genrsa 2048 2>/dev/null)"
+    trap 'status=$?; [ "$status" -eq 0 ] || $compose logs --no-color --tail=100; $compose down --volumes --remove-orphans' EXIT
+    rm -rf sandbox/coverage && mkdir -p sandbox/coverage
     go build -cover -o sandbox/forwardauth-e2e ./cmd/forwardauth
-    E2E_BINARY={{justfile_directory()}}/sandbox/forwardauth-e2e GOCOVERDIR={{justfile_directory()}}/sandbox/coverage {{gotestsum}} --format testname --jsonfile sandbox/e2e.json -- -tags e2e -count=1 ./test/e2e/...
+    $compose up --detach --build --wait
+    export E2E_BINARY={{justfile_directory()}}/sandbox/forwardauth-e2e GOCOVERDIR={{justfile_directory()}}/sandbox/coverage
+    {{gotestsum}} --format testname --jsonfile sandbox/e2e.json -- -tags e2e -count=1 ./test/e2e/...
     go tool covdata percent -i=sandbox/coverage
 
 # Scan for known vulnerabilities in reachable code

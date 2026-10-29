@@ -1,0 +1,10 @@
+.git
+.github
+docs
+sandbox
+**/*.md
+**/*_test.go
+.env
+**/*.env
+**/*.pem
+**/*.key

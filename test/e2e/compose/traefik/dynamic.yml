@@ -1,0 +1,42 @@
+# forwardauth shares the network namespace of the issuer service, so it is reached as http://issuer:8080.
+http:
+  routers:
+    # a protected page: the browser is sent to the login when there is no session
+    whoami-ui:
+      rule: PathPrefix(`/whoami`)
+      entryPoints: [web]
+      service: whoami
+      middlewares: [forwardauth-ui]
+    # a protected API: 401 JSON when there is no session
+    whoami-api:
+      rule: PathPrefix(`/api`)
+      entryPoints: [web]
+      service: whoami
+      middlewares: [forwardauth-api]
+    # login, callback, logout, jwks, health of forwardauth itself: no middleware
+    forwardauth:
+      rule: PathPrefix(`/auth`)
+      entryPoints: [web]
+      service: forwardauth
+
+  middlewares:
+    forwardauth-ui:
+      forwardAuth:
+        address: http://issuer:8080/auth/ui
+        authResponseHeaders: [Authorization]
+        trustForwardHeader: false # forwardauth builds return paths from X-Forwarded-*: only Traefik may set them
+        maxResponseBodySize: 65536
+    forwardauth-api:
+      forwardAuth:
+        address: http://issuer:8080/auth/api
+        authResponseHeaders: [Authorization]
+        trustForwardHeader: false
+        maxResponseBodySize: 65536
+
+  services:
+    whoami:
+      loadBalancer:
+        servers: [{url: "http://whoami:80"}]
+    forwardauth: # runs in the network namespace of the issuer service (see compose.yml)
+      loadBalancer:
+        servers: [{url: "http://issuer:8080"}]
