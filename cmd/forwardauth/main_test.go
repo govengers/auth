@@ -85,6 +85,9 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		{name: "external URL with a query", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.ExternalURL = "https://app.example.com/?a=b" }, problems: []string{"EXTERNAL_URL"}},
 		{name: "path prefix without leading slash", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.PathPrefix = "auth" }, problems: []string{"PATH_PREFIX"}},
 		{name: "path prefix with trailing slash", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.PathPrefix = "/auth/" }, problems: []string{"PATH_PREFIX"}},
+		{name: "path prefix with a gin parameter", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.PathPrefix = "/auth/:tenant" }, problems: []string{"PATH_PREFIX"}},
+		{name: "path prefix with an empty segment", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.PathPrefix = "/auth//x" }, problems: []string{"PATH_PREFIX"}},
+		{name: "path prefix with a dot-dot segment", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.PathPrefix = "/auth/.." }, problems: []string{"PATH_PREFIX"}},
 		{name: "ports out of range", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.Port, configuration.MetricsPort = 0, 65536 }, problems: []string{"PORT 0", "METRICS_PORT 65536"}},
 		{name: "same port twice", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.MetricsPort = 8080 }, problems: []string{"PORT and METRICS_PORT must differ"}},
 		{name: "sample rate and delays", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
@@ -121,6 +124,13 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		{name: "jwt without key", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTEnabled = true }, problems: []string{"JWT_PRIVATE_KEY"}},
 		{name: "jwt header that is no header name", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "X Auth" }, problems: []string{"JWT_HEADER \"X Auth\" is not an HTTP header name"}},
 		{name: "jwt header the check answer sets", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "Cache-Control" }, problems: []string{"JWT_HEADER \"Cache-Control\" is set by the check answer"}},
+		{name: "api key secret too short", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.APIKeys = []string{"ci:short-secret"} }, problems: []string{"API_KEYS: apikey: key 0: key secret is shorter than 16 bytes"}},
+		{name: "api key used twice", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
+			configuration.APIKeys = []string{"ci:" + testSecret, "ci:other-secret-0123456789"}
+		}, problems: []string{"API_KEYS: apikey: key 1: name or secret is used by another key"}},
+		{name: "problems of several kinds at once", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
+			configuration.PathPrefix, configuration.APIKeys, configuration.JWTHeader = "/auth/:tenant", []string{"ci:short-secret"}, "X Auth"
+		}, problems: []string{"PATH_PREFIX", "API_KEYS", "JWT_HEADER"}},
 		{name: "permissions for an unknown key", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.APIKeyPermissions = []string{"ci=builds:write"}
 		}, problems: []string{"API_KEY_PERMISSIONS names \"ci\""}},

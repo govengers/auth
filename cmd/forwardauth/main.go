@@ -592,8 +592,8 @@ func validateServer(configuration *Configuration) error {
 	if _, err := redirect.ExternalURL(configuration.ExternalURL); err != nil {
 		problems = append(problems, fmt.Errorf("EXTERNAL_URL: %w", err))
 	}
-	if !strings.HasPrefix(configuration.PathPrefix, "/") || strings.HasSuffix(configuration.PathPrefix, "/") {
-		problems = append(problems, fmt.Errorf("PATH_PREFIX %q must start with \"/\" and must not end with \"/\"", configuration.PathPrefix))
+	if !redirect.IsPathPrefix(configuration.PathPrefix) {
+		problems = append(problems, fmt.Errorf("PATH_PREFIX %q must be \"/\"-separated segments of A-Z a-z 0-9 . _ ~ - without a trailing \"/\" and without a \".\" or \"..\" segment", configuration.PathPrefix))
 	}
 	problems = append(problems,
 		rangeProblem("PORT", configuration.Port, 1, maximumPort),
@@ -630,9 +630,17 @@ func validateSession(configuration *Configuration) error {
 	return errors.Join(problems...)
 }
 
+// validateAPIKeys parses API_KEYS and API_KEY_PERMISSIONS and lets apikey.New judge the keys (secret
+// length, duplicates), so its problems are listed with all others.
 func validateAPIKeys(configuration *Configuration) error {
-	_, err := apiKeys(configuration.APIKeys, configuration.APIKeyPermissions)
-	return err
+	keys, err := apiKeys(configuration.APIKeys, configuration.APIKeyPermissions)
+	if err != nil || len(keys) == 0 {
+		return err
+	}
+	if _, err := apikey.New(&apikey.Options{Keys: keys}); err != nil {
+		return fmt.Errorf("API_KEYS: %w", err)
+	}
+	return nil
 }
 
 func validateProvider(configuration *Configuration) error {

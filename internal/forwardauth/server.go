@@ -26,6 +26,7 @@ import (
 	"github.com/govengers/auth/apikey"
 	"github.com/govengers/auth/ginadapter"
 	"github.com/govengers/auth/internal/httpjson"
+	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/jwt"
 	"github.com/govengers/auth/session"
 )
@@ -42,10 +43,6 @@ const (
 	MaximumShutdownDelay = 10 * time.Second
 )
 
-// pathPattern is an absolute path of one or more non-empty segments without a trailing "/" and without
-// characters gin would read as a parameter or wildcard.
-var pathPattern = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
-
 // errNoRoute is the failure of a request no route matches: recorded, so the sampler keeps path scans and
 // a wrong Traefik address [LOG-002, LOG-011].
 var errNoRoute = errors.New("no route")
@@ -57,7 +54,7 @@ var headerNamePattern = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 type ServerOptions struct {
 	Version           string
 	Port, MetricsPort int                             // 0 picks a free port (tests)
-	PathPrefix        string                          // required: starts with "/", no trailing "/", e.g. "/auth"
+	PathPrefix        string                          // required: redirect.IsPathPrefix (no gin parameter, wildcard or "." segment), e.g. "/auth"
 	Routes            []auth.Route                    // provider routes, absolute paths
 	Guard             *session.Guard                  // required
 	APIKeys           *apikey.Authenticator           // optional; runs before the Guard on the checks
@@ -127,8 +124,8 @@ func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
 		resolved.JWTHeader = defaultJWTHeader
 	}
 	var problems []error
-	if !validPathPrefix(resolved.PathPrefix) {
-		problems = append(problems, fmt.Errorf("PathPrefix %q must be an absolute path without a trailing \"/\"", resolved.PathPrefix))
+	if !redirect.IsPathPrefix(resolved.PathPrefix) {
+		problems = append(problems, fmt.Errorf("PathPrefix %q must be \"/\"-separated segments of A-Z a-z 0-9 . _ ~ - without a trailing \"/\" and without a \".\" or \"..\" segment", resolved.PathPrefix))
 	}
 	if err := ValidateJWTHeader(resolved.JWTHeader); err != nil {
 		problems = append(problems, fmt.Errorf("JWTHeader %w", err))
@@ -159,10 +156,6 @@ func ValidateJWTHeader(name string) error {
 		return fmt.Errorf("%q is set by the check answer itself", name)
 	}
 	return nil
-}
-
-func validPathPrefix(pathPrefix string) bool {
-	return pathPattern.MatchString(pathPrefix)
 }
 
 func validPort(port int) bool {

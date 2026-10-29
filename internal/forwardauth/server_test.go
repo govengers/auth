@@ -51,6 +51,7 @@ func TestNewServerValidatesOptions(t *testing.T) {
 		{name: "path prefix with trailing slash", change: func(options *ServerOptions) { options.PathPrefix = "/auth/" }},
 		{name: "root path prefix", change: func(options *ServerOptions) { options.PathPrefix = "/" }},
 		{name: "path prefix with a gin parameter", change: func(options *ServerOptions) { options.PathPrefix = "/auth/:tenant" }},
+		{name: "path prefix with a dot-dot segment", change: func(options *ServerOptions) { options.PathPrefix = "/auth/.." }},
 		{name: "negative port", change: func(options *ServerOptions) { options.Port = -1 }},
 		{name: "metrics port out of range", change: func(options *ServerOptions) { options.MetricsPort = 65536 }},
 		{name: "sample rate zero", change: func(options *ServerOptions) { options.SampleRate = 0 }},
