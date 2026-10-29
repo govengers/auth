@@ -168,6 +168,8 @@ func TestMiddlewareAuthenticatesStaticKeys(t *testing.T) {
 		{name: "extra whitespace after bearer", headers: headerValues{"Authorization": "Bearer   " + buildSecret + " "}, wantSubject: "build", wantPermissions: buildPermissions},
 		{name: "header wins over bearer", headers: headerValues{"X-API-Key": buildSecret, "Authorization": "Bearer " + adminSecret}, wantSubject: "build", wantPermissions: buildPermissions},
 		{name: "blank header falls back to bearer", headers: headerValues{"X-API-Key": "  ", "Authorization": "Bearer " + adminSecret}, wantSubject: "admin", wantRoles: []string{auth.RoleAdmin}},
+		{name: "lower case scheme", headers: headerValues{"Authorization": "bearer " + buildSecret}, wantSubject: "build", wantPermissions: buildPermissions},
+		{name: "upper case scheme", headers: headerValues{"Authorization": "BEARER " + adminSecret}, wantSubject: "admin", wantRoles: []string{auth.RoleAdmin}},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -213,6 +215,7 @@ func TestMiddlewareRefusesInvalidKeys(t *testing.T) {
 	}{
 		{name: "unknown key", headers: headerValues{"X-API-Key": "wrong-key-0123456789"}},
 		{name: "unknown bearer", headers: headerValues{"Authorization": "Bearer wrong-key-0123456789"}},
+		{name: "unknown bearer with a lower case scheme", headers: headerValues{"Authorization": "bearer wrong-key-0123456789"}},
 		{name: "prefix of a key", headers: headerValues{"X-API-Key": buildSecret[:16]}},
 		{name: "key with extra suffix", headers: headerValues{"X-API-Key": buildSecret + "x"}},
 		{name: "key differing in case", headers: headerValues{"X-API-Key": "BUILD-secret-0123456789"}},
@@ -238,7 +241,6 @@ func TestMiddlewarePassesRequestsWithoutKey(t *testing.T) {
 		{name: "empty bearer", headers: headerValues{"Authorization": "Bearer "}},
 		{name: "blank bearer", headers: headerValues{"Authorization": "Bearer    "}},
 		{name: "bearer without space", headers: headerValues{"Authorization": "Bearer" + buildSecret}},
-		{name: "lower case scheme", headers: headerValues{"Authorization": "bearer " + buildSecret}},
 		{name: "other scheme", headers: headerValues{"Authorization": "Basic dXNlcjpwYXNz"}},
 	}
 	for _, testCase := range testCases {

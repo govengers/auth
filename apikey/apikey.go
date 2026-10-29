@@ -18,7 +18,7 @@ const (
 	provider          = "apikey"
 	defaultHeaderName = "X-API-Key"
 	minimumSecretSize = 16
-	bearerPrefix      = "Bearer "
+	bearerScheme      = "Bearer"
 )
 
 // Key is one statically configured API key.
@@ -140,12 +140,13 @@ func (a *Authenticator) Middleware() func(http.Handler) http.Handler {
 	}
 }
 
-// presentedKey returns the key from HeaderName, else from "Authorization: Bearer", else "".
+// presentedKey returns the key from HeaderName, else from "Authorization: Bearer" (scheme matched
+// case-insensitively, RFC 9110 section 11.1), else "".
 func (a *Authenticator) presentedKey(request *http.Request) string {
 	if key := strings.TrimSpace(request.Header.Get(a.headerName)); key != "" {
 		return key
 	}
-	if bearer, found := strings.CutPrefix(request.Header.Get("Authorization"), bearerPrefix); found {
+	if scheme, bearer, found := strings.Cut(request.Header.Get("Authorization"), " "); found && strings.EqualFold(scheme, bearerScheme) {
 		return strings.TrimSpace(bearer)
 	}
 	return ""
