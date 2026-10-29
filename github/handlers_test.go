@@ -701,6 +701,27 @@ func TestRefreshTeamsRefusesSessionsItDoesNotOwn(t *testing.T) {
 	require.Zero(t, environment.fake.Calls(fakeprovider.GitHubEndpointTeams))
 }
 
+func TestRefreshTeamsRefusesACrossSiteRequest(t *testing.T) {
+	environment := newTestEnvironment(t, defaultTestTeams(), nil)
+	login := environment.login(t)
+	environment.fake.SetTeams([]fakeprovider.GitHubTeam{{Organization: "acme", Slug: "ops"}})
+	calls := environment.fake.Calls(fakeprovider.GitHubEndpointTeams)
+	request := withSessionCookie(t, newRequest(t, http.MethodPost, testExternalURL+"/auth/github/refresh-teams"), login)
+	request.Header.Set("Sec-Fetch-Site", "cross-site")
+
+	response := environment.serve(request)
+
+	require.Equal(t, http.StatusForbidden, response.Code)
+	require.JSONEq(t, `{"code":"forbidden","message":"access denied"}`, response.Body.String())
+	require.Equal(t, calls, environment.fake.Calls(fakeprovider.GitHubEndpointTeams), "GitHub is not called")
+	_, err := environment.sessionOf(t, login).Identity(t.Context())
+	require.NoError(t, err, "the session is untouched")
+	outcome := environment.outcomes.last(t)
+	require.Equal(t, auth.ActionRefreshTeams, outcome.Action)
+	require.Equal(t, auth.ResultDenied, outcome.Result)
+	require.ErrorIs(t, outcome.Err, auth.ErrForbidden)
+}
+
 func TestRefreshTeamsKeepsTheImpersonatedIdentity(t *testing.T) {
 	environment := newTestEnvironment(t, defaultTestTeams(), nil)
 	login := environment.login(t)

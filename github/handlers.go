@@ -209,9 +209,14 @@ func unlessAbsent(err error) error {
 	return err
 }
 
-// refreshTeams refreshes the teams of the request's GitHub session and answers its IdentityResponse.
+// refreshTeams refreshes the teams of the request's GitHub session and answers its IdentityResponse. A
+// cross-site request is refused before GitHub is called: it could end the session (SameSite=None cookies).
 func (p *Provider) refreshTeams(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
+	if err := fetchmetadata.RefuseCrossSite(request); err != nil {
+		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionRefreshTeams, Err: err})
+		return
+	}
 	identity, err := p.refreshSession(ctx, writer, request)
 	if err != nil {
 		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionRefreshTeams, Err: err, Identity: identity})
