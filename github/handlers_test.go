@@ -780,7 +780,7 @@ func TestRefreshTeamsKeepsAConcurrentSave(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			transport := &beforeTeamsTransport{}
 			environment := newTestEnvironment(t, defaultTestTeams(), func(options *Options) {
-				options.HTTPClient = &http.Client{Transport: transport}
+				options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
 				options.OnLogin = func(_ context.Context, identity *auth.Identity) (*auth.Identity, error) {
 					mapped := identity.Clone()
 					mapped.Permissions = []auth.Permission{{Resource: "builds", Access: auth.AccessWrite}}

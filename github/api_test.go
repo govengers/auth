@@ -134,13 +134,15 @@ func TestFetchTeamsStopsAfterFiftyPages(t *testing.T) {
 
 func TestRevokeTokenFailures(t *testing.T) {
 	for _, status := range []int{http.StatusNotFound, http.StatusUnauthorized, http.StatusBadGateway} {
-		_, apiURL := startAPIStub(t, status, ``)
-		provider := providerForAPI(t, apiURL)
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			_, apiURL := startAPIStub(t, status, ``)
+			provider := providerForAPI(t, apiURL)
 
-		err := provider.revokeToken(t.Context(), &oauth2.Token{AccessToken: "gho_secret"})
+			err := provider.revokeToken(t.Context(), &oauth2.Token{AccessToken: "gho_secret"})
 
-		require.ErrorContains(t, err, "revoke token")
-		require.NotContains(t, err.Error(), "gho_secret")
+			require.ErrorContains(t, err, "revoke token")
+			require.NotContains(t, err.Error(), "gho_secret")
+		})
 	}
 }
 
@@ -160,22 +162,11 @@ func TestRevokeTokenSendsTheAppCredentials(t *testing.T) {
 }
 
 func TestRevokeTokenFailsWhenGitHubIsUnreachable(t *testing.T) {
-	_, apiURL := startAPIStub(t, http.StatusNoContent, ``)
-	options := validOptions(t)
-	options.APIURL = apiURL
-	options.HTTPClient = &http.Client{Transport: unreachableTransport{}}
-	provider, err := New(options)
-	require.NoError(t, err)
+	server := httptest.NewServer(http.NotFoundHandler())
+	server.Close()
+	provider := providerForAPI(t, server.URL)
 
 	require.ErrorContains(t, provider.revokeToken(t.Context(), &oauth2.Token{AccessToken: "gho_secret"}), "revoke token")
-}
-
-var errUnreachable = errors.New("unreachable")
-
-type unreachableTransport struct{}
-
-func (unreachableTransport) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, errUnreachable
 }
 
 func TestExchangeKeepsGitHubTextOutOfErrors(t *testing.T) {
