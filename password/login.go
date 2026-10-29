@@ -65,29 +65,29 @@ func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) rep
 	if err := fetchmetadata.RefuseCrossSite(request); err != nil {
 		return refused(err)
 	}
-	ctx := request.Context()
-	identity := p.sessionIdentity(ctx, request)
+	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip OnLogout
+	identity, readError := p.sessionIdentity(ctx, request)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
-		return refused(err)
+		return refused(errors.Join(err, readError))
 	}
 	if identity != nil && p.options.OnLogout != nil {
 		p.options.OnLogout(ctx, identity)
 	}
-	return succeeded(http.StatusNoContent, nil, identity)
+	return succeeded(http.StatusNoContent, nil, identity).degradedBy(readError)
 }
 
-// sessionIdentity returns the identity of the request's session; nil when there is none or it cannot be read
-// (End then reports a failing backend).
-func (p *Provider) sessionIdentity(ctx context.Context, request *http.Request) *auth.Identity {
+// sessionIdentity returns the identity of the request's session, nil when there is none. A failed read is
+// returned with a nil identity: logout ends the session all the same, and the outcome tells that OnLogout missed it.
+func (p *Provider) sessionIdentity(ctx context.Context, request *http.Request) (*auth.Identity, error) {
+	var identity *auth.Identity
 	current, err := p.options.Sessions.Open(request)
-	if err != nil {
-		return nil
+	if err == nil {
+		identity, err = current.Identity(ctx)
 	}
-	identity, err := current.Identity(ctx)
-	if err != nil {
-		return nil
+	if err != nil && !errors.Is(err, auth.ErrUnauthenticated) {
+		return nil, fmt.Errorf("read password session identity: %w", err)
 	}
-	return identity
+	return identity, nil
 }
 
 // continueLogin answers an authenticated user: a pending second-factor step when TOTP asks for one, else a

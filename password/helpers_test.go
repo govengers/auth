@@ -417,7 +417,25 @@ func (b *failingBackend) Revoke(ctx context.Context, sessionID string, ttl time.
 // when none is named) from now on.
 func (f *fixture) failSessions(t *testing.T, operations ...string) {
 	t.Helper()
-	sessions, err := session.NewStore(&session.StoreOptions{Backend: &failingBackend{Backend: f.backend, failing: operations}, EncryptionKey: testEncryptionKey})
+	f.useBackend(t, &failingBackend{Backend: f.backend, failing: operations})
+}
+
+// useBackend moves the provider onto a store over the same sessions on backend, which wraps the fixture's.
+func (f *fixture) useBackend(t *testing.T, backend session.Backend) {
+	t.Helper()
+	sessions, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: testEncryptionKey})
 	require.NoError(t, err)
 	f.provider.options.Sessions = sessions
+}
+
+// cancellableBackend is a session backend that fails a read on a cancelled context, like a network backend.
+type cancellableBackend struct {
+	session.Backend
+}
+
+func (b cancellableBackend) Get(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return b.Backend.Get(ctx, sessionID, key)
 }
