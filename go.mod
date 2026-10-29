@@ -12,6 +12,7 @@ require (
 	github.com/prometheus/client_golang v1.25.0
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/stretchr/testify v1.12.1
+	golang.org/x/oauth2 v0.37.0
 )
 
 require (
