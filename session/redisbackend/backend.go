@@ -58,13 +58,18 @@ redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
 return 1
 `)
 
-	// revokeScript deletes every indexed value and writes the marker for ttl, or for the index's remaining
-	// lifetime (the latest value expiry) when that is shorter; without an index (nothing stored) no marker.
+	// revokeScript deletes every indexed value and writes the marker for ttl, or until the latest of the
+	// values still stored would expire when that is sooner; without a live value no marker. The index TTL is
+	// no measure: it only ever grows, so it outlives replaced, popped and expired values.
 	// KEYS: marker, index. ARGV: ttl in ms.
 	revokeScript = redis.NewScript(`
-local ttl = math.min(redis.call('PTTL', KEYS[2]), tonumber(ARGV[1]))
-for _, k in ipairs(redis.call('SMEMBERS', KEYS[2])) do redis.call('DEL', k) end
+local latest = 0
+for _, k in ipairs(redis.call('SMEMBERS', KEYS[2])) do
+  latest = math.max(latest, redis.call('PTTL', k))
+  redis.call('DEL', k)
+end
 redis.call('DEL', KEYS[2])
+local ttl = math.min(latest, tonumber(ARGV[1]))
 if ttl > 0 then redis.call('SET', KEYS[1], '1', 'PX', ttl) end
 return 1
 `)

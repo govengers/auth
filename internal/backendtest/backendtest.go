@@ -35,6 +35,7 @@ func Run(t *testing.T, newBackend func(t *testing.T) (session.Backend, func(dura
 		{name: "revoke reaches values outliving shorter ones", run: testRevokeAfterMixedTTLs},
 		{name: "revocation marker expires after its ttl", run: testMarkerExpiry},
 		{name: "revocation marker never outlives the revoked values", run: testMarkerLifetimeFollowsTheValues},
+		{name: "revocation marker ignores replaced and popped values", run: testMarkerLifetimeFollowsTheLiveValues},
 		{name: "concurrent pops find the value once", run: testConcurrentPop},
 		{name: "concurrent swaps of one value succeed once", run: testConcurrentCompareAndSwap},
 		{name: "revoke racing a put leaves nothing", run: testRevokeRacingPut},
@@ -191,6 +192,28 @@ func testMarkerLifetimeFollowsTheValues(t *testing.T, backend session.Backend, a
 
 	advance(2 * time.Second)
 	require.NoError(t, backend.Put(ctx, "s", "key", []byte("value"), time.Hour))
+}
+
+// testMarkerLifetimeFollowsTheLiveValues: the marker follows the values a session holds when it is revoked,
+// not a longer-lived value replaced or popped before.
+func testMarkerLifetimeFollowsTheLiveValues(t *testing.T, backend session.Backend, advance func(time.Duration)) {
+	ctx := t.Context()
+	require.NoError(t, backend.Put(ctx, "replaced", "key", []byte("value"), time.Hour))
+	require.NoError(t, backend.Put(ctx, "replaced", "key", []byte("value"), time.Minute))
+	require.NoError(t, backend.Put(ctx, "popped", "long", []byte("value"), time.Hour))
+	require.NoError(t, backend.Put(ctx, "popped", "short", []byte("value"), 10*time.Minute))
+	_, _, err := backend.Pop(ctx, "popped", "long")
+	require.NoError(t, err)
+	advance(2 * time.Minute)
+
+	require.NoError(t, backend.Revoke(ctx, "replaced", 24*time.Hour))
+	require.NoError(t, backend.Revoke(ctx, "popped", 24*time.Hour))
+
+	require.NoError(t, backend.Put(ctx, "replaced", "key", []byte("value"), time.Hour), "its value had expired: no marker")
+	advance(8*time.Minute - time.Second)
+	require.ErrorIs(t, backend.Put(ctx, "popped", "key", []byte("value"), time.Hour), session.ErrSessionRevoked)
+	advance(2 * time.Second)
+	require.NoError(t, backend.Put(ctx, "popped", "key", []byte("value"), time.Hour), "the marker lived as long as the value left")
 }
 
 func testConcurrentPop(t *testing.T, backend session.Backend, _ func(time.Duration)) {
