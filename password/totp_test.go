@@ -220,22 +220,38 @@ func TestTOTPCodeIsSingleUse(t *testing.T) {
 	require.Equal(t, http.StatusOK, fixture.pendingClient(t, "ada").post(verifyPath, map[string]any{"code": next}).Code)
 }
 
-func TestTOTPCodeIsSingleUseUnderRace(t *testing.T) {
-	fixture := newFixture(t, totpOptions())
-	fixture.createTOTPUser(t, "ada")
-	browsers := []*client{fixture.pendingClient(t, "ada"), fixture.pendingClient(t, "ada"), fixture.pendingClient(t, "ada")}
-	code := fixture.code(t, testSecret, 0)
+func TestCodeIsSingleUseUnderRace(t *testing.T) {
+	testCases := []struct {
+		name string
+		body func(t *testing.T, fixture *fixture, backupCodes []string) map[string]any
+	}{
+		{name: "TOTP code", body: func(t *testing.T, fixture *fixture, _ []string) map[string]any {
+			return map[string]any{"code": fixture.code(t, testSecret, 0)}
+		}},
+		{name: "backup code", body: func(_ *testing.T, _ *fixture, backupCodes []string) map[string]any {
+			return map[string]any{"code": backupCodes[0], "backupCode": true}
+		}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newFixture(t, totpOptions())
+			_, backupCodes := fixture.createTOTPUser(t, "ada")
+			body := testCase.body(t, fixture, backupCodes)
+			browsers := []*client{fixture.pendingClient(t, "ada"), fixture.pendingClient(t, "ada"), fixture.pendingClient(t, "ada")}
 
-	statuses := make([]int, len(browsers))
-	var waitGroup sync.WaitGroup
-	for index, browser := range browsers {
-		waitGroup.Go(func() {
-			statuses[index] = browser.post(verifyPath, map[string]any{"code": code}).Code
+			statuses := make([]int, len(browsers))
+			var waitGroup sync.WaitGroup
+			for index, browser := range browsers {
+				request := browser.postRequest(verifyPath, body)
+				waitGroup.Go(func() {
+					statuses[index] = browser.postStatus(request)
+				})
+			}
+			waitGroup.Wait()
+
+			require.ElementsMatch(t, []int{http.StatusOK, http.StatusUnauthorized, http.StatusUnauthorized}, statuses)
 		})
 	}
-	waitGroup.Wait()
-
-	require.ElementsMatch(t, []int{http.StatusOK, http.StatusUnauthorized, http.StatusUnauthorized}, statuses)
 }
 
 func TestEnableCodeIsSingleUse(t *testing.T) {
@@ -264,23 +280,6 @@ func TestBackupCodeIsSingleUse(t *testing.T) {
 	recorder = fixture.pendingClient(t, "ada").post(verifyPath, map[string]any{"code": backupCodes[2], "backupCode": true})
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.Len(t, fixture.storedUser(t, user.ID).BackupCodeHashes, 1)
-}
-
-func TestBackupCodeIsSingleUseUnderRace(t *testing.T) {
-	fixture := newFixture(t, totpOptions())
-	_, backupCodes := fixture.createTOTPUser(t, "ada")
-	browsers := []*client{fixture.pendingClient(t, "ada"), fixture.pendingClient(t, "ada"), fixture.pendingClient(t, "ada")}
-
-	statuses := make([]int, len(browsers))
-	var waitGroup sync.WaitGroup
-	for index, browser := range browsers {
-		waitGroup.Go(func() {
-			statuses[index] = browser.post(verifyPath, map[string]any{"code": backupCodes[0], "backupCode": true}).Code
-		})
-	}
-	waitGroup.Wait()
-
-	require.ElementsMatch(t, []int{http.StatusOK, http.StatusUnauthorized, http.StatusUnauthorized}, statuses)
 }
 
 func TestVerifyEndsThePendingLoginAfterTheLastAttempt(t *testing.T) {
