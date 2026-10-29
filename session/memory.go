@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"maps"
@@ -13,7 +14,9 @@ const defaultMaximumSessions = 100000
 
 // MemoryBackendOptions configures NewMemoryBackend.
 type MemoryBackendOptions struct {
-	MaximumSessions int // default 100000; when full: expired entries are dropped, then the session expiring soonest is evicted
+	// MaximumSessions defaults to 100000. When full, expired entries are dropped, then the session expiring
+	// soonest is evicted; when that is a live revocation marker, the Put fails instead (a marker is never evicted).
+	MaximumSessions int
 }
 
 // MemoryBackend implements Backend with a map and one mutex; expiry is lazy (no goroutine). It is
@@ -61,7 +64,11 @@ func (b *MemoryBackend) Put(_ context.Context, sessionID, key string, value []by
 		return ErrSessionRevoked
 	}
 	if !found {
-		entry = b.add(sessionID, &memorySession{values: map[string]memoryValue{}}, now)
+		if err := b.makeRoom(now); err != nil {
+			return err
+		}
+		entry = &memorySession{values: map[string]memoryValue{}}
+		b.sessions[sessionID] = entry
 	}
 	entry.values[key] = memoryValue{value: slices.Clone(value), expiresAt: now.Add(ttl)}
 	return nil
@@ -87,13 +94,39 @@ func (b *MemoryBackend) Pop(_ context.Context, sessionID, key string) ([]byte, b
 	return value, found, nil
 }
 
-// Revoke deletes every value of sessionID and writes a marker that refuses Puts for ttl.
+// CompareAndSwap replaces the live value under (sessionID, key) with a copy of value, keeping its expiry,
+// when it equals previous.
+func (b *MemoryBackend) CompareAndSwap(_ context.Context, sessionID, key string, previous, value []byte) (bool, error) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	current, found := b.lookup(sessionID, key, b.now())
+	if !found || !bytes.Equal(current, previous) {
+		return false, nil
+	}
+	values := b.sessions[sessionID].values
+	values[key] = memoryValue{value: slices.Clone(value), expiresAt: values[key].expiresAt}
+	return true, nil
+}
+
+// Revoke deletes every value of sessionID. When there was any, the entry becomes a marker that refuses Puts
+// for ttl, or until the latest of those values would have expired when that is sooner; it never takes a new slot.
 func (b *MemoryBackend) Revoke(_ context.Context, sessionID string, ttl time.Duration) error {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
+	entry, found := b.sessions[sessionID]
+	if !found || len(entry.values) == 0 {
+		return nil
+	}
 	now := b.now()
-	delete(b.sessions, sessionID)
-	b.add(sessionID, &memorySession{values: map[string]memoryValue{}, revokedUntil: now.Add(ttl)}, now)
+	revokedUntil := entry.expiresAt()
+	if limit := now.Add(ttl); limit.Before(revokedUntil) {
+		revokedUntil = limit
+	}
+	if !revokedUntil.After(now) {
+		delete(b.sessions, sessionID)
+		return nil
+	}
+	b.sessions[sessionID] = &memorySession{values: map[string]memoryValue{}, revokedUntil: revokedUntil}
 	return nil
 }
 
@@ -119,25 +152,25 @@ func (b *MemoryBackend) remove(sessionID, key string, now time.Time) {
 	}
 }
 
-// add stores a new session entry, making room first when the backend is full. b.mutex must be held.
-func (b *MemoryBackend) add(sessionID string, entry *memorySession, now time.Time) *memorySession {
-	if len(b.sessions) >= b.options.MaximumSessions {
-		b.makeRoom(now)
+// makeRoom frees a slot for a new session when the backend is full: it drops expired sessions and, when
+// that frees nothing, evicts the session expiring soonest. It fails when that is a live revocation marker,
+// so a revoked session never accepts a Put again before its marker expires. b.mutex must be held.
+func (b *MemoryBackend) makeRoom(now time.Time) error {
+	if len(b.sessions) < b.options.MaximumSessions {
+		return nil
 	}
-	b.sessions[sessionID] = entry
-	return entry
-}
-
-// makeRoom drops expired sessions and, when that frees nothing, evicts the session expiring soonest.
-// b.mutex must be held.
-func (b *MemoryBackend) makeRoom(now time.Time) {
 	maps.DeleteFunc(b.sessions, func(_ string, entry *memorySession) bool {
 		return !entry.expiresAt().After(now)
 	})
 	if len(b.sessions) < b.options.MaximumSessions {
-		return
+		return nil
 	}
-	delete(b.sessions, b.soonestExpiring())
+	soonestID := b.soonestExpiring()
+	if b.sessions[soonestID].revoked(now) {
+		return fmt.Errorf("memory session backend: all %d sessions are live and the one expiring soonest is revoked", b.options.MaximumSessions)
+	}
+	delete(b.sessions, soonestID)
+	return nil
 }
 
 func (b *MemoryBackend) soonestExpiring() string {

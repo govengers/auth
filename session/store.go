@@ -18,8 +18,10 @@ import (
 
 const (
 	defaultCookieName = "auth_session"
-	defaultMaxAge     = 24 * time.Hour
+	defaultMaximumAge = 24 * time.Hour
 	cookieValueBytes  = 32
+	// revokeTimeout bounds End's revocation, which a disconnecting client cannot cancel.
+	revokeTimeout = 10 * time.Second
 )
 
 // StoreOptions configures NewStore.
@@ -68,7 +70,7 @@ func withStoreDefaults(options StoreOptions) StoreOptions {
 		options.SameSite = http.SameSiteLaxMode
 	}
 	if options.MaxAge == 0 {
-		options.MaxAge = defaultMaxAge
+		options.MaxAge = defaultMaximumAge
 	}
 	return options
 }
@@ -105,7 +107,7 @@ func (s *Store) Start(ctx context.Context, writer http.ResponseWriter, request *
 		return Session{}, fmt.Errorf("start session: %w", err)
 	}
 	http.SetCookie(writer, sessionCookie(s.options, cookieValue, int(s.options.MaxAge/time.Second)))
-	return Session{store: s, id: sessionIDOf(cookieValue), started: true}, nil
+	return Session{store: s, id: sessionIDOf(cookieValue), startedAt: s.now()}, nil
 }
 
 // Open returns the handle of the request's session from its cookie (no I/O). No or malformed cookie: *auth.Error ErrUnauthenticated.
@@ -117,14 +119,17 @@ func (s *Store) Open(request *http.Request) (Session, error) {
 	return Session{store: s, id: id}, nil
 }
 
-// End revokes the request's session (with context.WithoutCancel, so a disconnecting client cannot keep it) and expires the cookie. No cookie: only expires it.
+// End revokes the request's session (with context.WithoutCancel and its own 10 s timeout, so a disconnecting
+// client cannot keep it and a hung backend cannot hold the request) and expires the cookie. No cookie: only expires it.
 func (s *Store) End(ctx context.Context, writer http.ResponseWriter, request *http.Request) error {
 	http.SetCookie(writer, sessionCookie(s.options, "", -1))
 	id, found := s.sessionID(request)
 	if !found {
 		return nil
 	}
-	return s.revoke(context.WithoutCancel(ctx), id)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revokeTimeout)
+	defer cancel()
+	return s.revoke(ctx, id)
 }
 
 // MaxAge returns the configured absolute session lifetime.
@@ -159,13 +164,13 @@ func sessionIDOf(cookieValue string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func sessionCookie(options StoreOptions, value string, maxAge int) *http.Cookie {
+func sessionCookie(options StoreOptions, value string, maximumAge int) *http.Cookie {
 	return &http.Cookie{ //nolint:gosec // G124: Secure is dropped only when the caller opts into InsecureCookie for local HTTP
 		Name:     options.CookieName,
 		Value:    value,
 		Path:     options.CookiePath,
 		Domain:   options.CookieDomain,
-		MaxAge:   maxAge,
+		MaxAge:   maximumAge,
 		Secure:   !options.InsecureCookie,
 		HttpOnly: true,
 		SameSite: options.SameSite,

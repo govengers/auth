@@ -108,11 +108,11 @@ func IsPathPrefix(prefix string) bool {
 	return pathPrefixPattern.MatchString(prefix) && path.Clean(prefix) == prefix
 }
 
-// IsTarget reports whether raw is a valid redirect target: a same-origin path (SafeReturnPath) or an
-// absolute http(s) URL with a host.
+// IsTarget reports whether raw is a valid redirect target that takes a query: a same-origin path
+// (SafeReturnPath) or an absolute http(s) URL with a host, without a fragment (AbsoluteTarget's rule).
 func IsTarget(raw string) bool {
-	_, ok := SafeReturnPath(raw)
-	return ok || IsAbsoluteHTTPURL(raw)
+	_, err := AbsoluteTarget(raw, "")
+	return err == nil
 }
 
 // IsAbsoluteHTTPURL reports whether raw parses as an http or https URL with a host name.

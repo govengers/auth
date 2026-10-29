@@ -75,3 +75,14 @@ func TestWrite(t *testing.T) {
 	require.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
 	require.JSONEq(t, `{"code":"created"}`, recorder.Body.String())
 }
+
+func TestWriteAnswers500ForABodyThatDoesNotEncode(t *testing.T) {
+	recorder := httptest.NewRecorder()
+
+	Write(recorder, http.StatusOK, map[string]any{"channel": make(chan int)})
+
+	require.Equal(t, http.StatusInternalServerError, recorder.Code)
+	require.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
+	require.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
+	require.JSONEq(t, `{"code":"internal","message":"internal error"}`, recorder.Body.String())
+}

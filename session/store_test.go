@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/random"
 )
 
 func TestNewStoreValidation(t *testing.T) {
@@ -145,6 +146,63 @@ func TestStartRevokesThePreviousSession(t *testing.T) {
 	require.NoError(t, current.Put(t.Context(), "app.key", []byte("value"), time.Hour))
 }
 
+// An attacker sending fresh well-formed cookies to a login route must not store anything (and so evict nobody).
+func TestStartWithAnUnknownCookieWritesNothing(t *testing.T) {
+	clock := newTestClock()
+	backend, err := NewMemoryBackend(&MemoryBackendOptions{MaximumSessions: 4})
+	require.NoError(t, err)
+	backend.now = clock.now
+	store := newTestStoreOn(t, clock, backend)
+	victim := login(t, store, testIdentity())
+	clock.advance(time.Hour)
+
+	for range 4 {
+		value, err := random.Token(cookieValueBytes)
+		require.NoError(t, err)
+		request := newRequest(t)
+		request.Header.Set("Cookie", defaultCookieName+"="+value)
+		_, err = store.Start(t.Context(), httptest.NewRecorder(), request)
+		require.NoError(t, err)
+	}
+
+	require.Len(t, backend.sessions, 1)
+	requireAuthenticated(t, store, victim)
+}
+
+// An attacker chaining login starts (each one revokes the previous login state) must not evict live
+// sessions with markers: a marker lives no longer than the state it replaced and is never evicted, so the
+// attacker's own Put fails once the backend is full.
+func TestRevokedLoginStatesEvictNoSession(t *testing.T) {
+	clock := newTestClock()
+	backend, err := NewMemoryBackend(&MemoryBackendOptions{MaximumSessions: 3})
+	require.NoError(t, err)
+	backend.now = clock.now
+	store := newTestStoreOn(t, clock, backend)
+	victim := login(t, store, testIdentity())
+	clock.advance(time.Hour)
+
+	request := newRequest(t)
+	var putError error
+	for range 3 {
+		recorder := httptest.NewRecorder()
+		state, err := store.Start(t.Context(), recorder, request)
+		require.NoError(t, err)
+		putError = state.Put(t.Context(), "login.state", []byte("state"), 10*time.Minute)
+		request = requestWithCookies(t, recorder)
+	}
+
+	require.Error(t, putError, "the backend is full of the attacker's markers")
+	requireAuthenticated(t, store, victim)
+}
+
+func requireAuthenticated(t *testing.T, store *Store, request *http.Request) {
+	t.Helper()
+	current, err := store.Open(request)
+	require.NoError(t, err)
+	_, err = current.Identity(t.Context())
+	require.NoError(t, err)
+}
+
 func TestStartFailsWhenThePreviousSessionCannotBeRevoked(t *testing.T) {
 	clock := newTestClock()
 	_, request := startSession(t, newTestStore(t, clock))
@@ -189,7 +247,7 @@ func TestOpen(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.Equal(t, sessionIDOf(validValue), current.id)
-			require.False(t, current.started)
+			require.Zero(t, current.startedAt)
 		})
 	}
 }
@@ -207,6 +265,8 @@ func TestEnd(t *testing.T) {
 
 	requireExpiredCookie(t, recorder)
 	require.Equal(t, []error{nil}, recording.revokeErrors, "revoked with a context the client cannot cancel")
+	require.Len(t, recording.revokeDeadlines, 1)
+	require.WithinDuration(t, time.Now().Add(revokeTimeout), recording.revokeDeadlines[0], revokeTimeout, "but with its own timeout")
 	_, found, err := current.Get(t.Context(), "app.key")
 	require.NoError(t, err)
 	require.False(t, found)

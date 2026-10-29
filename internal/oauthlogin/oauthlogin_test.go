@@ -248,6 +248,10 @@ func (failingBackend) Pop(context.Context, string, string) ([]byte, bool, error)
 	return nil, false, errBackendDown
 }
 
+func (failingBackend) CompareAndSwap(context.Context, string, string, []byte, []byte) (bool, error) {
+	return false, errBackendDown
+}
+
 func (failingBackend) Revoke(context.Context, string, time.Duration) error {
 	return errBackendDown
 }

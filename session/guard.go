@@ -32,7 +32,7 @@ type Refresher interface {
 // GuardOptions configures NewGuard.
 type GuardOptions struct {
 	Store            *Store        // required
-	LoginURL         string        // RequireUI target; absolute http(s) URL or path starting with "/"; default "/"
+	LoginURL         string        // RequireUI target; absolute http(s) URL or path starting with "/", without a fragment; default "/"
 	ReturnPathHeader string        // header carrying the original request URI (forward auth: "X-Forwarded-Uri"); default: request.URL.RequestURI()
 	Refreshers       []Refresher   // optional; names must be unique
 	RefreshInterval  time.Duration // default 1 min
@@ -59,7 +59,7 @@ func NewGuard(options *GuardOptions) (*Guard, error) {
 		resolved.LoginURL = "/"
 	}
 	if !redirect.IsTarget(resolved.LoginURL) {
-		return nil, errors.New("session guard: LoginURL must be an absolute http(s) URL or a path starting with \"/\"")
+		return nil, errors.New("session guard: LoginURL must be an absolute http(s) URL or a path starting with \"/\", without a fragment")
 	}
 	if resolved.RefreshInterval == 0 {
 		resolved.RefreshInterval = defaultRefreshInterval
@@ -166,6 +166,8 @@ func (g *Guard) refreshDue(stored identityEnvelope) bool {
 // refresh runs the real identity's Refresher, saves the outcome and reports it (Action refresh). A
 // refusal ends the session; any other failure keeps the identity, only moves refreshedAt and is
 // reported as a degraded success (Result success with Err set): the request is still answered.
+// The save swaps against the envelope the refresh started from: when another request saved the
+// session meanwhile, that save wins and the request continues with it.
 func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, current Session, stored identityEnvelope) (*auth.Identity, error) {
 	ctx := request.Context()
 	realIdentity := stored.Identity.Real()
@@ -183,7 +185,11 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 		stored.Identity = impersonation.WithReal(stored.Identity, refreshed)
 	}
 	stored.RefreshedAt = g.now()
-	if err := current.saveEnvelope(ctx, stored); err != nil {
+	swapped, err := current.swapEnvelope(ctx, stored)
+	if err == nil && !swapped {
+		stored, err = current.envelope(ctx)
+	}
+	if err != nil {
 		outcome.Err = errors.Join(outcome.Err, err)
 		return nil, g.reportFailure(ctx, outcome)
 	}

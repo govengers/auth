@@ -223,6 +223,8 @@ func TestIsTarget(t *testing.T) {
 		{raw: "https:app.example", want: false},
 		{raw: "javascript:alert(1)", want: false},
 		{raw: "ftp://app.example", want: false},
+		{raw: "https://app.example/login#/signin", want: false},
+		{raw: "/login#/signin", want: false},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.raw, func(t *testing.T) {

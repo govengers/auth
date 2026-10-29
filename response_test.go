@@ -129,6 +129,11 @@ func TestIdentityHandler(t *testing.T) {
 	}{
 		{name: "identity", identity: &Identity{Provider: "apikey", Subject: "ci", Active: true}, wantStatus: http.StatusOK, wantBody: `{"provider":"apikey","subject":"ci","active":true,"roles":[]}`},
 		{name: "no identity", wantStatus: http.StatusUnauthorized, wantBody: `{"code":"unauthenticated","message":"authentication required"}`},
+		{
+			name:       "identity that does not encode",
+			identity:   &Identity{Provider: "apikey", Subject: "ci", Active: true, Permissions: []Permission{{Resource: "Builds", Access: "write"}}},
+			wantStatus: http.StatusInternalServerError, wantBody: `{"code":"internal","message":"internal error"}`,
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

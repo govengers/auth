@@ -6,7 +6,6 @@ package backendtest
 import (
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,11 +28,14 @@ func Run(t *testing.T, newBackend func(t *testing.T) (session.Backend, func(dura
 		{name: "put replaces and get reads", run: testPutAndGet},
 		{name: "values are copied", run: testValuesAreCopied},
 		{name: "pop takes the value once", run: testPop},
+		{name: "compare and swap replaces only the expected value", run: testCompareAndSwap},
 		{name: "revoke deletes the session and refuses puts", run: testRevoke},
 		{name: "values expire after their ttl", run: testExpiry},
 		{name: "revoke reaches values outliving shorter ones", run: testRevokeAfterMixedTTLs},
 		{name: "revocation marker expires after its ttl", run: testMarkerExpiry},
+		{name: "revocation marker never outlives the revoked values", run: testMarkerLifetimeFollowsTheValues},
 		{name: "concurrent pops find the value once", run: testConcurrentPop},
+		{name: "concurrent swaps of one value succeed once", run: testConcurrentCompareAndSwap},
 		{name: "revoke racing a put leaves nothing", run: testRevokeRacingPut},
 	}
 	for _, testCase := range testCases {
@@ -87,6 +89,30 @@ func testPop(t *testing.T, backend session.Backend, _ func(time.Duration)) {
 	requireValue(t, backend, "s", "other", "kept")
 }
 
+func testCompareAndSwap(t *testing.T, backend session.Backend, advance func(time.Duration)) {
+	ctx := t.Context()
+	require.NoError(t, backend.Put(ctx, "s", "key", []byte("v1"), time.Hour))
+
+	require.False(t, swap(t, backend, "s", "other", "v2"))
+	requireValue(t, backend, "s", "key", "v1")
+	require.True(t, swap(t, backend, "s", "v1", "v2"))
+	requireValue(t, backend, "s", "key", "v2")
+	require.False(t, swap(t, backend, "missing", "", "v1"))
+	requireAbsent(t, backend, "missing", "key")
+
+	require.NoError(t, backend.Put(ctx, "short", "key", []byte("v1"), time.Minute))
+	advance(30 * time.Second)
+	require.True(t, swap(t, backend, "short", "v1", "v2"))
+	advance(30*time.Second + time.Second)
+	requireAbsent(t, backend, "short", "key")
+	require.False(t, swap(t, backend, "short", "v2", "v3"))
+	requireAbsent(t, backend, "short", "key")
+
+	require.NoError(t, backend.Revoke(ctx, "s", time.Hour))
+	require.False(t, swap(t, backend, "s", "v2", "v3"))
+	requireAbsent(t, backend, "s", "key")
+}
+
 func testRevoke(t *testing.T, backend session.Backend, _ func(time.Duration)) {
 	ctx := t.Context()
 	require.NoError(t, backend.Put(ctx, "s1", "a", []byte("1"), time.Hour))
@@ -103,9 +129,11 @@ func testRevoke(t *testing.T, backend session.Backend, _ func(time.Duration)) {
 	requireAbsent(t, backend, "s1", "a")
 	requireValue(t, backend, "s2", "a", "other")
 
-	require.NoError(t, backend.Revoke(ctx, "never-used", time.Hour))
-	require.ErrorIs(t, backend.Put(ctx, "never-used", "a", []byte("1"), time.Hour), session.ErrSessionRevoked)
 	require.NoError(t, backend.Revoke(ctx, "s1", time.Hour), "revoking twice")
+	require.ErrorIs(t, backend.Put(ctx, "s1", "a", []byte("1"), time.Hour), session.ErrSessionRevoked, "revoking twice keeps the marker")
+
+	require.NoError(t, backend.Revoke(ctx, "never-used", time.Hour))
+	require.NoError(t, backend.Put(ctx, "never-used", "a", []byte("1"), time.Hour), "an ID without values gets no marker")
 }
 
 func testExpiry(t *testing.T, backend session.Backend, advance func(time.Duration)) {
@@ -138,6 +166,7 @@ func testRevokeAfterMixedTTLs(t *testing.T, backend session.Backend, advance fun
 
 func testMarkerExpiry(t *testing.T, backend session.Backend, advance func(time.Duration)) {
 	ctx := t.Context()
+	require.NoError(t, backend.Put(ctx, "s", "key", []byte("value"), time.Hour))
 	require.NoError(t, backend.Revoke(ctx, "s", time.Minute))
 
 	advance(time.Minute - time.Second)
@@ -148,22 +177,77 @@ func testMarkerExpiry(t *testing.T, backend session.Backend, advance func(time.D
 	requireValue(t, backend, "s", "key", "value")
 }
 
+// testMarkerLifetimeFollowsTheValues: a marker replaces the session's values and lives no longer than the
+// latest of them would have, so revoking never makes a session hold its slot longer.
+func testMarkerLifetimeFollowsTheValues(t *testing.T, backend session.Backend, advance func(time.Duration)) {
+	ctx := t.Context()
+	require.NoError(t, backend.Put(ctx, "s", "short", []byte("value"), time.Minute))
+	require.NoError(t, backend.Put(ctx, "s", "long", []byte("value"), 10*time.Minute))
+	require.NoError(t, backend.Revoke(ctx, "s", time.Hour))
+
+	advance(10*time.Minute - time.Second)
+	require.ErrorIs(t, backend.Put(ctx, "s", "key", []byte("value"), time.Hour), session.ErrSessionRevoked)
+
+	advance(2 * time.Second)
+	require.NoError(t, backend.Put(ctx, "s", "key", []byte("value"), time.Hour))
+}
+
 func testConcurrentPop(t *testing.T, backend session.Backend, _ func(time.Duration)) {
 	ctx := t.Context()
+	type popResult struct {
+		value []byte
+		found bool
+		err   error
+	}
 	for round := range raceRounds {
 		require.NoError(t, backend.Put(ctx, "s", "state", []byte("value"), time.Hour))
-		var winners atomic.Int32
+		results := make([]popResult, 8)
 		var waitGroup sync.WaitGroup
-		for range 8 {
+		for index := range results {
 			waitGroup.Go(func() {
-				_, found, err := backend.Pop(ctx, "s", "state")
-				if err == nil && found {
-					winners.Add(1)
-				}
+				value, found, err := backend.Pop(ctx, "s", "state")
+				results[index] = popResult{value: value, found: found, err: err}
 			})
 		}
 		waitGroup.Wait()
-		require.Equal(t, int32(1), winners.Load(), "round %d", round)
+
+		winners := 0
+		for _, result := range results {
+			require.NoError(t, result.err, "round %d", round)
+			if result.found {
+				winners++
+				require.Equal(t, "value", string(result.value), "round %d", round)
+			}
+		}
+		require.Equal(t, 1, winners, "round %d", round)
+		requireAbsent(t, backend, "s", "state")
+	}
+}
+
+func testConcurrentCompareAndSwap(t *testing.T, backend session.Backend, _ func(time.Duration)) {
+	ctx := t.Context()
+	for round := range raceRounds {
+		require.NoError(t, backend.Put(ctx, "s", "identity", []byte("read"), time.Hour))
+		swapped := make([]bool, 8)
+		swapErrors := make([]error, 8)
+		var waitGroup sync.WaitGroup
+		for index := range swapped {
+			waitGroup.Go(func() {
+				swapped[index], swapErrors[index] = backend.CompareAndSwap(ctx, "s", "identity", []byte("read"), fmt.Appendf(nil, "writer-%d", index))
+			})
+		}
+		waitGroup.Wait()
+
+		winner := -1
+		for index := range swapped {
+			require.NoError(t, swapErrors[index], "round %d", round)
+			if swapped[index] {
+				require.Equal(t, -1, winner, "round %d: two swaps of one value", round)
+				winner = index
+			}
+		}
+		require.NotEqual(t, -1, winner, "round %d: no swap", round)
+		requireValue(t, backend, "s", "identity", fmt.Sprintf("writer-%d", winner))
 	}
 }
 
@@ -196,6 +280,14 @@ func requireValue(t *testing.T, backend session.Backend, sessionID, key, want st
 	require.NoError(t, err)
 	require.True(t, found, "%s/%s is absent", sessionID, key)
 	require.Equal(t, want, string(value))
+}
+
+// swap swaps previous for value under (sessionID, "key") and reports whether that happened.
+func swap(t *testing.T, backend session.Backend, sessionID, previous, value string) bool {
+	t.Helper()
+	swapped, err := backend.CompareAndSwap(t.Context(), sessionID, "key", []byte(previous), []byte(value))
+	require.NoError(t, err)
+	return swapped
 }
 
 func requireAbsent(t *testing.T, backend session.Backend, sessionID, key string) {

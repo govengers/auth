@@ -115,9 +115,10 @@ func testIdentity() *auth.Identity {
 // recordingBackend records what reaches the backend and passes it on.
 type recordingBackend struct {
 	Backend
-	mutex        sync.Mutex
-	puts         []recordedPut
-	revokeErrors []error
+	mutex           sync.Mutex
+	puts            []recordedPut
+	revokeErrors    []error
+	revokeDeadlines []time.Time // zero when the context had none
 }
 
 type recordedPut struct {
@@ -137,6 +138,8 @@ func (b *recordingBackend) Put(ctx context.Context, sessionID, key string, value
 func (b *recordingBackend) Revoke(ctx context.Context, sessionID string, ttl time.Duration) error {
 	b.mutex.Lock()
 	b.revokeErrors = append(b.revokeErrors, ctx.Err())
+	deadline, _ := ctx.Deadline()
+	b.revokeDeadlines = append(b.revokeDeadlines, deadline)
 	b.mutex.Unlock()
 	return b.Backend.Revoke(ctx, sessionID, ttl)
 }
@@ -153,6 +156,10 @@ func (failingBackend) Get(context.Context, string, string) ([]byte, bool, error)
 
 func (failingBackend) Pop(context.Context, string, string) ([]byte, bool, error) {
 	return nil, false, errBackendDown
+}
+
+func (failingBackend) CompareAndSwap(context.Context, string, string, []byte, []byte) (bool, error) {
+	return false, errBackendDown
 }
 
 func (failingBackend) Revoke(context.Context, string, time.Duration) error {
