@@ -38,14 +38,14 @@ type Options struct {
 	Name                         string          // required; [a-z0-9-]{1,32}; not "password", "github", "apikey", "session", "jwt"; becomes Identity.Provider
 	Issuer                       string          // required; https, or http on a loopback host; discovery at <Issuer>/.well-known/openid-configuration
 	ClientID, ClientSecret       string          // required (confidential client)
-	Scopes                       []string        // default ["openid","profile","email"]; "openid" added first when missing; order kept, duplicates dropped
+	Scopes                       []string        // default ["openid","profile","email"]; "openid" added first when missing; order kept, duplicates dropped; empty or space-containing entries are an error
 	ExternalURL                  string          // required: absolute public base URL; redirect URI = ExternalURL + PathPrefix + "/callback"
 	PathPrefix                   string          // default "/auth/oidc/" + Name; segments of A-Z a-z 0-9 . _ ~ -, no trailing "/", no "." or ".." segment
 	PostLogoutURL                string          // default ExternalURL + "/"; path or absolute http(s) URL, no fragment; a path is made absolute with ExternalURL
 	ErrorURL                     string          // optional: callback failures (refusals and code=internal) redirect to ErrorURL?code=<code> instead of answering JSON; same rules as PostLogoutURL
 	ClaimMapper                  ClaimMapper     // default DefaultClaimMapper
 	AllowedEmailDomains          []string        // optional: requires email_verified=true and a matching domain (case-insensitive, exact)
-	DisableIframeLogoutDetection bool            // stop treating Sec-Fetch-Dest: iframe on /logout as front-channel
+	DisableIframeLogoutDetection bool            // stop treating Sec-Fetch-Dest: iframe on /logout as front-channel; a cross-site iframe load of /logout is then refused (403)
 	Sessions                     *session.Store  // required
 	HTTPClient                   *http.Client    // default 10 s timeout; used for discovery, token exchange, JWKS
 	OnLogin                      auth.Hook       // e.g. keycloak.Client.Enrich, or an app closure calling it and then provisioning
