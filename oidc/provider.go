@@ -1,12 +1,16 @@
 package oidc
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -119,7 +123,7 @@ func (p *Provider) LoginURL() string {
 
 func discover(ctx context.Context, options Options) (*gooidc.Provider, providerMetadata, error) {
 	// ClientContext: discovery uses HTTPClient, and the provider's remote key set keeps it after ctx ends.
-	discovered, err := gooidc.NewProvider(gooidc.ClientContext(ctx, options.HTTPClient), options.Issuer)
+	discovered, err := gooidc.NewProvider(gooidc.ClientContext(ctx, withoutFreeText(options.HTTPClient)), options.Issuer)
 	if err != nil {
 		return nil, providerMetadata{}, dependency.Error("discover issuer", err)
 	}
@@ -149,6 +153,47 @@ func insecureEndpoint(endpoint oauth2.Endpoint, metadata providerMetadata) strin
 		return "end_session_endpoint"
 	}
 	return ""
+}
+
+// withoutFreeText returns a copy of client for go-oidc's discovery and JWKS requests that rebuilds every
+// answer's status line from its code and keeps the body only of a 200 answer holding JSON: go-oidc copies
+// the status line and body of a failed request into its errors, and both are the server's free text
+// (LOG-009). The token exchange keeps the plain client: oauth2 needs the body's error code.
+func withoutFreeText(client *http.Client) *http.Client {
+	next := client.Transport
+	if next == nil {
+		next = http.DefaultTransport
+	}
+	filtered := *client
+	filtered.Transport = freeTextFilter{next: next}
+	return &filtered
+}
+
+// freeTextFilter is the RoundTripper of withoutFreeText.
+type freeTextFilter struct {
+	next http.RoundTripper
+}
+
+// RoundTrip passes request on and returns the answer without its free text.
+func (f freeTextFilter) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := f.next.RoundTrip(request)
+	if err != nil {
+		return nil, err // as it is: http.Client wraps it in a *url.Error naming the request
+	}
+	body, err := io.ReadAll(response.Body)
+	_ = response.Body.Close() // fully read: a close error loses nothing
+	if err != nil {
+		return nil, fmt.Errorf("read answer of %s: %w", request.URL.Path, err)
+	}
+	// ponytail: JSON that go-oidc cannot read as a key set still reaches its error; check the JWKS shape
+	// here if an IdP ever answers like that.
+	if response.StatusCode != http.StatusOK || !json.Valid(body) {
+		body = nil
+	}
+	response.Status = strconv.Itoa(response.StatusCode) + " " + http.StatusText(response.StatusCode)
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	response.ContentLength = int64(len(body))
+	return response, nil
 }
 
 func newOAuth2Configuration(options Options, endpoint oauth2.Endpoint, metadata providerMetadata) *oauth2.Config {

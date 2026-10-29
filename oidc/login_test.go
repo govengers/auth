@@ -1,6 +1,7 @@
 package oidc_test
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -210,6 +211,35 @@ func TestCallbackClassifiesTokenEndpointErrorsWithoutTheirText(t *testing.T) {
 	}
 }
 
+func TestCallbackKeepsTheJWKSAnswerOutOfTheOutcome(t *testing.T) {
+	const marker = "alice@example.com"
+	testCases := []struct {
+		name     string
+		status   int
+		reason   string
+		wantText string
+	}{
+		{name: "outage as a page", status: http.StatusServiceUnavailable, reason: marker, wantText: "503 Service Unavailable"},
+		{name: "a page instead of the key set", status: http.StatusOK, wantText: `got "text/html"`},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			transport := &answeringTransport{path: "/jwks", status: testCase.status, reason: testCase.reason, contentType: "text/html", body: "<p>" + marker + "</p>"}
+			application := newApplication(t, startIssuer(t, nil), func(options *oidc.Options) {
+				options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
+			})
+
+			response := newBrowser(t).signIn(application, prefix+"/login")
+
+			require.Equal(t, http.StatusUnauthorized, response.Code, response.Body.String())
+			outcome := application.outcomes.last(t)
+			require.ErrorContains(t, outcome.Err, "verify ID token")
+			require.ErrorContains(t, outcome.Err, testCase.wantText)
+			require.NotContains(t, outcome.Err.Error(), marker, "the JWKS answer's free text stays out of outcomes and events")
+		})
+	}
+}
+
 func TestAllowedEmailDomains(t *testing.T) {
 	testCases := []struct {
 		name          string
@@ -412,10 +442,12 @@ func (f *failingTransport) requests() int {
 	return f.passed
 }
 
-// answeringTransport answers requests to path itself and passes the others on.
+// answeringTransport answers requests to path itself and passes the others on. The reason phrase of its
+// status line defaults to the standard one.
 type answeringTransport struct {
 	path        string
 	status      int
+	reason      string
 	contentType string
 	body        string
 }
@@ -425,7 +457,7 @@ func (a *answeringTransport) RoundTrip(request *http.Request) (*http.Response, e
 		return http.DefaultTransport.RoundTrip(request)
 	}
 	return &http.Response{
-		Status: strconv.Itoa(a.status) + " " + http.StatusText(a.status), StatusCode: a.status,
+		Status: strconv.Itoa(a.status) + " " + cmp.Or(a.reason, http.StatusText(a.status)), StatusCode: a.status,
 		Header: http.Header{"Content-Type": {a.contentType}}, Body: io.NopCloser(strings.NewReader(a.body)), Request: request,
 	}, nil
 }
