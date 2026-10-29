@@ -208,13 +208,26 @@ func TestSignUsesAFreshTokenIDAndLeavesTheIdentityUntouched(t *testing.T) {
 	require.Equal(t, &auth.Identity{Subject: "42", Active: true, Roles: []string{"reader"}, Claims: map[string]any{"iss": "https://idp.example.com", "locale": "de"}}, identity)
 }
 
-func TestSignRefusesANilIdentity(t *testing.T) {
-	signer := newTestSigner(t, fixedClock(signedAt))
+func TestSignRefuses(t *testing.T) {
+	testCases := []struct {
+		name      string
+		identity  *auth.Identity
+		wantError string
+	}{
+		{name: "nil identity", wantError: "identity is nil"},
+		{name: "invalid permission", identity: &auth.Identity{Subject: "42", Active: true, Permissions: []auth.Permission{{Resource: "builds", Access: "admin"}}}, wantError: "sign JWT for subject 42: permissions claim"},
+		{name: "claims that do not encode", identity: &auth.Identity{Subject: "42", Active: true, Claims: map[string]any{"channel": make(chan int)}}, wantError: "sign JWT for subject 42"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			signer := newTestSigner(t, fixedClock(signedAt))
 
-	token, err := signer.Sign(nil)
+			token, err := signer.Sign(testCase.identity)
 
-	require.ErrorContains(t, err, "identity is nil")
-	require.Empty(t, token)
+			require.ErrorContains(t, err, testCase.wantError)
+			require.Empty(t, token)
+		})
+	}
 }
 
 func TestSignRefusesAnInactiveIdentity(t *testing.T) {
@@ -225,23 +238,5 @@ func TestSignRefusesAnInactiveIdentity(t *testing.T) {
 	require.ErrorIs(t, err, auth.ErrForbidden, "Verify would return the identity as active, privileges and all")
 	status, _ := auth.ResponseFor(err)
 	require.Equal(t, http.StatusForbidden, status)
-	require.Empty(t, token)
-}
-
-func TestSignRefusesAnInvalidPermission(t *testing.T) {
-	signer := newTestSigner(t, fixedClock(signedAt))
-
-	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true, Permissions: []auth.Permission{{Resource: "builds", Access: "admin"}}})
-
-	require.ErrorContains(t, err, "sign JWT for subject 42: permissions claim")
-	require.Empty(t, token)
-}
-
-func TestSignRefusesClaimsThatDoNotEncode(t *testing.T) {
-	signer := newTestSigner(t, fixedClock(signedAt))
-
-	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true, Claims: map[string]any{"channel": make(chan int)}})
-
-	require.ErrorContains(t, err, "sign JWT for subject 42")
 	require.Empty(t, token)
 }
