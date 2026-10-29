@@ -92,13 +92,16 @@ func (p *Provider) startPendingSession(writer http.ResponseWriter, request *http
 	ctx := request.Context()
 	current, err := p.options.Sessions.Start(ctx, writer, request)
 	if err != nil {
-		return err
+		return fmt.Errorf("start pending login of user %s: %w", pending.UserID, err)
 	}
 	encoded, err := json.Marshal(pending)
 	if err != nil {
 		return fmt.Errorf("encode pending login: %w", err)
 	}
-	return current.Put(ctx, pendingKey, encoded, p.options.TOTP.PendingTTL)
+	if err := current.Put(ctx, pendingKey, encoded, p.options.TOTP.PendingTTL); err != nil {
+		return fmt.Errorf("store pending login of user %s: %w", pending.UserID, err)
+	}
+	return nil
 }
 
 // openPendingLogin returns the request's pending login with purpose; none, expired or another purpose is
@@ -110,7 +113,7 @@ func (p *Provider) openPendingLogin(ctx context.Context, request *http.Request, 
 	}
 	encoded, found, err := current.Get(ctx, pendingKey)
 	if err != nil {
-		return session.Session{}, pendingLogin{}, err
+		return session.Session{}, pendingLogin{}, fmt.Errorf("read pending login: %w", err)
 	}
 	if !found {
 		return session.Session{}, pendingLogin{}, noPendingLogin("no pending login", nil)
@@ -159,7 +162,10 @@ func (p *Provider) generateKey(user *User) (*otp.Key, error) {
 // consumeTOTPCode reports whether code is a TOTP code of secret within the skew whose time step is later than the
 // last one the user used, and marks its step used, so every code is accepted once.
 func (p *Provider) consumeTOTPCode(ctx context.Context, id uuid.UUID, secret, code string) (bool, error) {
-	step, found := p.codeStep(secret, code)
+	step, found, err := p.codeStep(secret, code)
+	if err != nil {
+		return false, fmt.Errorf("check TOTP code of user %s: %w", id, err)
+	}
 	if !found {
 		return false, nil
 	}
@@ -170,8 +176,9 @@ func (p *Provider) consumeTOTPCode(ctx context.Context, id uuid.UUID, secret, co
 	return consumed, nil
 }
 
-// codeStep returns the start of the time step within the skew around now whose TOTP code of secret is code.
-func (p *Provider) codeStep(secret, code string) (time.Time, bool) {
+// codeStep returns the start of the time step within the skew around now whose TOTP code of secret is code. A code
+// of the wrong length matches no step; a secret that does not decode is an error, not a wrong code.
+func (p *Provider) codeStep(secret, code string) (time.Time, bool, error) {
 	period := int64(p.options.TOTP.Period) //nolint:gosec // G115: at most maximumPeriod, checked by New
 	skew := int64(p.options.TOTP.Skew)     //nolint:gosec // G115: at most maximumSkew, checked by New
 	current := p.now().Unix() / period
@@ -181,11 +188,16 @@ func (p *Provider) codeStep(secret, code string) (time.Time, bool) {
 			Period: p.options.TOTP.Period,
 			Digits: otp.Digits(p.options.TOTP.Digits),
 		})
-		if err == nil && valid {
-			return step, true
+		switch {
+		case errors.Is(err, otp.ErrValidateInputInvalidLength):
+			return time.Time{}, false, nil
+		case err != nil:
+			return time.Time{}, false, dependency.Error("validate TOTP code", err)
+		case valid:
+			return step, true, nil
 		}
 	}
-	return time.Time{}, false
+	return time.Time{}, false, nil
 }
 
 // newBackupCodes returns the configured number of distinct random backup codes and their Argon2id hashes; none
@@ -272,7 +284,7 @@ func (p *Provider) sessionAccount(ctx context.Context, request *http.Request) (t
 	}
 	identity, err := current.Identity(ctx)
 	if err != nil {
-		return totpAccount{}, err
+		return totpAccount{}, fmt.Errorf("read session identity: %w", err)
 	}
 	if identity.Impersonator != nil {
 		return totpAccount{}, &auth.Error{Kind: auth.ErrForbidden, Reason: "TOTP change while impersonating"}

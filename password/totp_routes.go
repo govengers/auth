@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/govengers/auth"
-	"github.com/govengers/auth/internal/httpjson"
 	"github.com/govengers/auth/session"
 )
 
@@ -47,8 +46,8 @@ type statusResponse struct {
 func (p *Provider) verifyTOTP(writer http.ResponseWriter, request *http.Request) reply {
 	ctx := request.Context()
 	var body verifyRequest
-	if err := httpjson.Decode(writer, request, &body); err != nil {
-		return refused(&auth.Error{Kind: auth.ErrInvalidRequest, Reason: "malformed TOTP verify request", Err: err})
+	if err := decodeRequest(writer, request, &body, "TOTP verify"); err != nil {
+		return refused(err)
 	}
 	user, err := p.resumeVerification(writer, request)
 	if err != nil {
@@ -109,7 +108,7 @@ func (p *Provider) resumeVerification(writer http.ResponseWriter, request *http.
 // returned instead, so it is reported as the failure it is.
 func (p *Provider) endPendingLogin(writer http.ResponseWriter, request *http.Request, code, reason string) error {
 	if err := p.options.Sessions.End(request.Context(), writer, request); err != nil {
-		return err
+		return fmt.Errorf("end pending login: %w", err)
 	}
 	return &auth.Error{Kind: auth.ErrUnauthenticated, Code: code, Reason: reason}
 }
@@ -127,8 +126,8 @@ func (p *Provider) totpStatus(_ http.ResponseWriter, request *http.Request) repl
 // session until enable confirms it.
 func (p *Provider) setupTOTP(writer http.ResponseWriter, request *http.Request) reply {
 	ctx := request.Context()
-	if err := httpjson.Decode(writer, request, &struct{}{}); err != nil {
-		return refused(&auth.Error{Kind: auth.ErrInvalidRequest, Reason: "malformed TOTP setup request", Err: err})
+	if err := decodeRequest(writer, request, &struct{}{}, "TOTP setup"); err != nil {
+		return refused(err)
 	}
 	account, err := p.enrollmentAccount(ctx, request)
 	if err != nil {
@@ -146,7 +145,7 @@ func (p *Provider) setupTOTP(writer http.ResponseWriter, request *http.Request) 
 		return refused(fmt.Errorf("encode TOTP setup: %w", err))
 	}
 	if err := account.session.Put(ctx, totpSetupKey, encoded, totpSetupTTL); err != nil {
-		return refused(err)
+		return refused(fmt.Errorf("store TOTP setup of user %s: %w", account.user.ID, err))
 	}
 	response := setupResponse{Secret: key.Secret(), OTPAuthURL: key.URL(), Issuer: key.Issuer(), AccountName: key.AccountName()}
 	return succeeded(http.StatusOK, response, account.outcomeIdentity())
@@ -157,8 +156,8 @@ func (p *Provider) setupTOTP(writer http.ResponseWriter, request *http.Request) 
 func (p *Provider) enableTOTP(writer http.ResponseWriter, request *http.Request) reply {
 	ctx := request.Context()
 	var body enableRequest
-	if err := httpjson.Decode(writer, request, &body); err != nil {
-		return refused(&auth.Error{Kind: auth.ErrInvalidRequest, Reason: "malformed TOTP enable request", Err: err})
+	if err := decodeRequest(writer, request, &body, "TOTP enable"); err != nil {
+		return refused(err)
 	}
 	account, err := p.enrollmentAccount(ctx, request)
 	if err != nil {
@@ -170,7 +169,7 @@ func (p *Provider) enableTOTP(writer http.ResponseWriter, request *http.Request)
 	if err := p.confirmPassword(account.user, body.Password); err != nil {
 		return refused(err)
 	}
-	secret, err := popSetupSecret(ctx, account.session)
+	secret, err := setupSecret(ctx, account.session)
 	if err != nil {
 		return refused(err)
 	}
@@ -192,11 +191,13 @@ func (p *Provider) enableTOTP(writer http.ResponseWriter, request *http.Request)
 	return succeeded(http.StatusOK, enableResponse{BackupCodes: codes}, identity)
 }
 
-// popSetupSecret takes the secret of the session's pending TOTP setup; none is totp_setup_missing.
-func popSetupSecret(ctx context.Context, current session.Session) (string, error) {
-	encoded, found, err := current.Pop(ctx, totpSetupKey)
+// setupSecret returns the secret of the session's pending TOTP setup; none is totp_setup_missing. It stays for a
+// retry after a mistyped code (the client holds the secret anyway): the session that enabling a pending enrollment
+// starts drops it, in a full session it expires.
+func setupSecret(ctx context.Context, current session.Session) (string, error) {
+	encoded, found, err := current.Get(ctx, totpSetupKey)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read TOTP setup: %w", err)
 	}
 	var setup totpSetup
 	if !found || json.Unmarshal(encoded, &setup) != nil || setup.Secret == "" {
@@ -225,14 +226,19 @@ func (p *Provider) storeTOTP(writer http.ResponseWriter, request *http.Request, 
 		return nil, err
 	}
 	if err := current.SaveIdentity(ctx, identity); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("save session identity of user %s: %w", account.user.ID, err)
 	}
 	return identity, nil
 }
 
+// setTOTP enables TOTP for the user; a user who has it enabled by now (a concurrent enrollment won) is a conflict.
 func (p *Provider) setTOTP(ctx context.Context, id uuid.UUID, secret string, hashes []string) error {
-	if err := p.options.Storage.SetTOTP(ctx, id, secret, hashes); err != nil {
+	enabled, err := p.options.Storage.SetTOTP(ctx, id, secret, hashes)
+	if err != nil {
 		return fmt.Errorf("enable TOTP of user %s: %w", id, err)
+	}
+	if !enabled {
+		return &auth.Error{Kind: auth.ErrConflict, Code: codeTOTPAlreadyEnabled, Reason: "enabled by a concurrent enrollment"}
 	}
 	return nil
 }
@@ -241,8 +247,8 @@ func (p *Provider) setTOTP(ctx context.Context, id uuid.UUID, secret string, has
 func (p *Provider) disableTOTP(writer http.ResponseWriter, request *http.Request) reply {
 	ctx := request.Context()
 	var body disableRequest
-	if err := httpjson.Decode(writer, request, &body); err != nil {
-		return refused(&auth.Error{Kind: auth.ErrInvalidRequest, Reason: "malformed TOTP disable request", Err: err})
+	if err := decodeRequest(writer, request, &body, "TOTP disable"); err != nil {
+		return refused(err)
 	}
 	account, err := p.sessionAccount(ctx, request)
 	if err != nil {

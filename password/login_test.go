@@ -167,6 +167,15 @@ func TestOnLogin(t *testing.T) {
 			wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError,
 		},
 		{
+			name: "replaces the user ID",
+			hook: func(_ context.Context, identity *auth.Identity) (*auth.Identity, error) {
+				mapped := identity.Clone()
+				mapped.UserID = uuid.New()
+				return mapped, nil
+			},
+			wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError,
+		},
+		{
 			name:       "returns no identity",
 			hook:       func(context.Context, *auth.Identity) (*auth.Identity, error) { return nil, nil },
 			wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError,
@@ -221,6 +230,53 @@ func TestLogout(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, recorder.Code)
 	require.Len(t, loggedOut, 1)
 	require.Nil(t, fixture.outcomes.last(t).Identity)
+}
+
+func TestLogoutWithADisconnectedClient(t *testing.T) {
+	var loggedOut []*auth.Identity
+	var hookContextError error
+	fixture := newFixture(t, Options{OnLogout: func(ctx context.Context, identity *auth.Identity) {
+		loggedOut = append(loggedOut, identity)
+		hookContextError = ctx.Err()
+	}})
+	user := fixture.createUser(t, "ada", "")
+	browser := loggedInClient(t, fixture)
+	fixture.outcomes.take()
+	fixture.useBackend(t, cancellableBackend{Backend: fixture.backend})
+	disconnected, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	recorder := browser.send(httptest.NewRequestWithContext(disconnected, http.MethodPost, "/auth/password/logout", http.NoBody))
+
+	require.Equal(t, http.StatusNoContent, recorder.Code)
+	require.Len(t, loggedOut, 1)
+	require.Equal(t, user.ID, loggedOut[0].UserID)
+	require.NoError(t, hookContextError, "OnLogout gets a context the disconnect does not cancel")
+	outcome := fixture.outcomes.last(t)
+	require.Equal(t, auth.ResultSuccess, outcome.Result)
+	require.NoError(t, outcome.Err)
+	require.Equal(t, loggedOut[0], outcome.Identity)
+}
+
+func TestLogoutReportsAFailedSessionRead(t *testing.T) {
+	var loggedOut []*auth.Identity
+	fixture := newFixture(t, Options{OnLogout: func(_ context.Context, identity *auth.Identity) { loggedOut = append(loggedOut, identity) }})
+	fixture.createUser(t, "ada", "")
+	browser := loggedInClient(t, fixture)
+	stolen := browser.copy()
+	fixture.outcomes.take()
+	fixture.failSessions(t, "Get")
+
+	recorder := browser.post("/auth/password/logout", nil)
+
+	require.Equal(t, http.StatusNoContent, recorder.Code)
+	_, err := fixture.sessionIdentity(t, stolen)
+	require.ErrorIs(t, err, auth.ErrUnauthenticated, "the session ends all the same")
+	require.Empty(t, loggedOut)
+	outcome := fixture.outcomes.last(t)
+	require.Equal(t, auth.ResultSuccess, outcome.Result)
+	require.ErrorIs(t, outcome.Err, errStorageDown, "the outcome tells that OnLogout missed the identity")
+	require.Nil(t, outcome.Identity)
 }
 
 func TestLogoutRefusesACrossSiteRequest(t *testing.T) {

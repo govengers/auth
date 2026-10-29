@@ -1,6 +1,7 @@
 package password
 
 import (
+	"math"
 	"net/http"
 	"testing"
 	"time"
@@ -72,6 +73,10 @@ func TestNewRefusesInvalidOptions(t *testing.T) {
 		{name: "multibyte backup codes longer than a hash accepts", options: enabledTOTP(func(options *TOTPOptions) {
 			options.BackupCodeAlphabet = "äöü"
 			options.BackupCodeLength = 65
+		})},
+		{name: "backup code length whose byte length overflows", options: enabledTOTP(func(options *TOTPOptions) {
+			options.BackupCodeAlphabet = "äö"
+			options.BackupCodeLength = math.MaxInt
 		})},
 		{name: "backup codes of one character", options: enabledTOTP(func(options *TOTPOptions) { options.BackupCodeLength = 1 })},
 		{name: "fewer than a million backup codes", options: enabledTOTP(func(options *TOTPOptions) { options.BackupCodeLength = 5 })},

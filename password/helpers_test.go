@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 	"github.com/stretchr/testify/require"
 
@@ -143,14 +144,25 @@ func (f *fixture) createTOTPUser(t *testing.T, username string) (*User, []string
 		require.NoError(t, err)
 		hashes = append(hashes, hash)
 	}
-	require.NoError(t, f.storage.SetTOTP(t.Context(), user.ID, testSecret, hashes))
+	requireSetTOTP(t, f.storage, user.ID, testSecret, hashes)
 	return user, codes
 }
 
-// code returns the TOTP code of secret at the fixture's time plus offset.
+// requireSetTOTP enables TOTP for a user of storage who has it disabled.
+func requireSetTOTP(t *testing.T, storage Storage, id uuid.UUID, secret string, hashes []string) {
+	t.Helper()
+	enabled, err := storage.SetTOTP(t.Context(), id, secret, hashes)
+	require.NoError(t, err)
+	require.True(t, enabled)
+}
+
+// code returns the TOTP code of secret at the fixture's time plus offset, on the provider's period and digits.
 func (f *fixture) code(t *testing.T, secret string, offset time.Duration) string {
 	t.Helper()
-	code, err := totp.GenerateCodeCustom(secret, f.clock.now().Add(offset), totp.ValidateOpts{Period: 30, Digits: 6})
+	code, err := totp.GenerateCodeCustom(secret, f.clock.now().Add(offset), totp.ValidateOpts{
+		Period: f.provider.options.TOTP.Period,
+		Digits: otp.Digits(f.provider.options.TOTP.Digits),
+	})
 	require.NoError(t, err)
 	return code
 }
@@ -355,9 +367,9 @@ func (s *failingStorage) ConsumeBackupCode(ctx context.Context, id uuid.UUID, ha
 	return s.MemoryStorage.ConsumeBackupCode(ctx, id, hash)
 }
 
-func (s *failingStorage) SetTOTP(ctx context.Context, id uuid.UUID, secret string, backupCodeHashes []string) error {
+func (s *failingStorage) SetTOTP(ctx context.Context, id uuid.UUID, secret string, backupCodeHashes []string) (bool, error) {
 	if err := s.fail("SetTOTP"); err != nil {
-		return err
+		return false, err
 	}
 	return s.MemoryStorage.SetTOTP(ctx, id, secret, backupCodeHashes)
 }
@@ -417,7 +429,25 @@ func (b *failingBackend) Revoke(ctx context.Context, sessionID string, ttl time.
 // when none is named) from now on.
 func (f *fixture) failSessions(t *testing.T, operations ...string) {
 	t.Helper()
-	sessions, err := session.NewStore(&session.StoreOptions{Backend: &failingBackend{Backend: f.backend, failing: operations}, EncryptionKey: testEncryptionKey})
+	f.useBackend(t, &failingBackend{Backend: f.backend, failing: operations})
+}
+
+// useBackend moves the provider onto a store over the same sessions on backend, which wraps the fixture's.
+func (f *fixture) useBackend(t *testing.T, backend session.Backend) {
+	t.Helper()
+	sessions, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: testEncryptionKey})
 	require.NoError(t, err)
 	f.provider.options.Sessions = sessions
+}
+
+// cancellableBackend is a session backend that fails a read on a cancelled context, like a network backend.
+type cancellableBackend struct {
+	session.Backend
+}
+
+func (b cancellableBackend) Get(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return b.Backend.Get(ctx, sessionID, key)
 }

@@ -60,7 +60,7 @@ type Options struct {
 	TOTP                 TOTPOptions
 	HashParameters       Parameters                                      // zero value: DefaultParameters(); at least 32 MiB, 1 iteration, salt and key 16 bytes
 	LegacyVerifier       func(password, storedHash string) (bool, error) // optional, e.g. VerifyBcrypt; consulted for stored hashes that are not Argon2id
-	OnLogin              auth.Hook
+	OnLogin              auth.Hook                                       // must keep UserID, the Storage user ID that Refresh and the TOTP routes look users up by; a login whose hook replaces it fails (500)
 	OnLogout             auth.LogoutHook
 	Observer             auth.Observer
 }
@@ -172,7 +172,7 @@ func validateBackupCodes(alphabet string, length int) error {
 		return errors.New("BackupCodeAlphabet contains white space")
 	case len(characters) < 2:
 		return errors.New("BackupCodeAlphabet needs at least 2 distinct characters")
-	case length*widest > maximumPasswordLength:
+	case length > maximumPasswordLength/widest: // length*widest > maximumPasswordLength, without the overflow
 		return fmt.Errorf("BackupCodeLength %d makes codes longer than %d bytes", length, maximumPasswordLength)
 	case math.Pow(float64(len(characters)), float64(length)) < minimumBackupCodeSpace:
 		return fmt.Errorf("BackupCodeLength %d over %d characters makes fewer than %d codes", length, len(characters), minimumBackupCodeSpace)

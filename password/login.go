@@ -10,7 +10,6 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/fetchmetadata"
-	"github.com/govengers/auth/internal/httpjson"
 )
 
 type loginRequest struct {
@@ -21,8 +20,8 @@ type loginRequest struct {
 // login is flow F1: credentials, then a second-factor challenge or a session.
 func (p *Provider) login(writer http.ResponseWriter, request *http.Request) reply {
 	var body loginRequest
-	if err := httpjson.Decode(writer, request, &body); err != nil {
-		return refused(&auth.Error{Kind: auth.ErrInvalidRequest, Reason: "malformed login request", Err: err})
+	if err := decodeRequest(writer, request, &body, "login"); err != nil {
+		return refused(err)
 	}
 	user, rehash, err := p.checkCredentials(request.Context(), body.Identifier, body.Password)
 	if err != nil {
@@ -38,8 +37,8 @@ func (p *Provider) login(writer http.ResponseWriter, request *http.Request) repl
 // register creates a user and logs it in like a password login would (F3 register).
 func (p *Provider) register(writer http.ResponseWriter, request *http.Request) reply {
 	var body registerRequest
-	if err := httpjson.Decode(writer, request, &body); err != nil {
-		return refused(&auth.Error{Kind: auth.ErrInvalidRequest, Reason: "malformed registration request", Err: err})
+	if err := decodeRequest(writer, request, &body, "registration"); err != nil {
+		return refused(err)
 	}
 	if err := validateRegistration(body, p.options); err != nil {
 		return refused(err)
@@ -65,29 +64,29 @@ func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) rep
 	if err := fetchmetadata.RefuseCrossSite(request); err != nil {
 		return refused(err)
 	}
-	ctx := request.Context()
-	identity := p.sessionIdentity(ctx, request)
+	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip OnLogout
+	identity, readError := p.sessionIdentity(ctx, request)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
-		return refused(err)
+		return refused(fmt.Errorf("end session: %w", err)).degradedBy(readError)
 	}
 	if identity != nil && p.options.OnLogout != nil {
 		p.options.OnLogout(ctx, identity)
 	}
-	return succeeded(http.StatusNoContent, nil, identity)
+	return succeeded(http.StatusNoContent, nil, identity).degradedBy(readError)
 }
 
-// sessionIdentity returns the identity of the request's session; nil when there is none or it cannot be read
-// (End then reports a failing backend).
-func (p *Provider) sessionIdentity(ctx context.Context, request *http.Request) *auth.Identity {
+// sessionIdentity returns the identity of the request's session, nil when there is none. A failed read is
+// returned with a nil identity: logout ends the session all the same, and the outcome tells that OnLogout missed it.
+func (p *Provider) sessionIdentity(ctx context.Context, request *http.Request) (*auth.Identity, error) {
+	var identity *auth.Identity
 	current, err := p.options.Sessions.Open(request)
-	if err != nil {
-		return nil
+	if err == nil {
+		identity, err = current.Identity(ctx)
 	}
-	identity, err := current.Identity(ctx)
-	if err != nil {
-		return nil
+	if err != nil && !errors.Is(err, auth.ErrUnauthenticated) {
+		return nil, fmt.Errorf("read password session identity: %w", err)
 	}
-	return identity
+	return identity, nil
 }
 
 // continueLogin answers an authenticated user: a pending second-factor step when TOTP asks for one, else a

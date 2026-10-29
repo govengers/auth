@@ -196,3 +196,20 @@ func TestLegacyUpgradeFailureDegradesTheLogin(t *testing.T) {
 		})
 	}
 }
+
+func TestLegacyUpgradeFailureOutlivesARefusedLogin(t *testing.T) {
+	refuse := func(context.Context, *auth.Identity) (*auth.Identity, error) {
+		return nil, &auth.Error{Kind: auth.ErrForbidden, Reason: "inactive user"}
+	}
+	fixture := newFixture(t, Options{LegacyVerifier: VerifyBcrypt, OnLogin: refuse})
+	fixture.createLegacyUser(t, bcryptHash(t, testPassword))
+	fixture.failStorage("UpdatePasswordHash")
+
+	recorder := fixture.newClient(t).login("ada")
+
+	requireRefusal(t, recorder, http.StatusForbidden, "forbidden")
+	outcome := fixture.outcomes.last(t)
+	require.Equal(t, auth.ResultDenied, outcome.Result)
+	require.ErrorIs(t, outcome.Err, auth.ErrForbidden)
+	require.ErrorIs(t, outcome.Err, errStorageDown, "the failed upgrade is reported next to the refusal")
+}
