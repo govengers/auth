@@ -48,15 +48,17 @@ type VerifierOptions struct {
 // Verifier checks RS512 tokens against a JWKS URL and turns them into identities. It keeps no token
 // cache and starts no goroutine: Verify refetches the JWKS lazily, after RefreshInterval or for an
 // unknown key ID, at most once per minute; the refetch is not cancelled with the triggering request and
-// takes at most 10 s. It is safe for concurrent use.
+// takes at most 10 s. Meanwhile verifications with a known key ID go on with the current keys, those
+// with an unknown one wait for it. It is safe for concurrent use.
 type Verifier struct {
 	options VerifierOptions
 	now     func() time.Time
 
-	mutex       sync.Mutex // guards the fields below; held during a JWKS fetch
+	mutex       sync.Mutex // guards the fields below; never held during a JWKS fetch
 	keys        jwk.Set
-	fetchedAt   time.Time // last successful fetch
-	attemptedAt time.Time // last fetch, successful or not
+	fetchedAt   time.Time     // last successful fetch
+	attemptedAt time.Time     // last fetch, successful or not
+	fetchDone   chan struct{} // closed when the fetch in flight ends; nil without one
 }
 
 // NewVerifier fetches the JWKS once and fails when it cannot (fail fast). ctx bounds that fetch only.
@@ -66,7 +68,7 @@ func NewVerifier(ctx context.Context, options *VerifierOptions) (*Verifier, erro
 		return nil, err
 	}
 	verifier := &Verifier{options: resolved, now: time.Now}
-	if err := verifier.refreshKeys(ctx); err != nil {
+	if _, err := verifier.refreshKeys(ctx); err != nil {
 		return nil, fmt.Errorf("new JWT verifier: %w", err)
 	}
 	return verifier, nil
@@ -175,27 +177,54 @@ func keyIDOf(token string) (string, error) {
 // stale or lack keyID and the last fetch is at least a minute ago. A failed refetch is err when the
 // keys lack keyID, and refreshError (the previous keys are returned) when they have it.
 func (v *Verifier) keysFor(ctx context.Context, keyID string) (keys jwk.Set, refreshError, err error) {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-	// ponytail: the fetch runs under the lock, so verifications wait for it (at most 10 s, at most once a
-	// minute); switch to a fetch-in-flight flag if that latency matters.
-	_, known := v.keys.LookupKeyID(keyID)
-	if !v.fetchDue(known) {
-		return v.keys, nil, nil
+	keys, known, fetchDone := v.claimFetch(keyID)
+	if fetchDone == nil {
+		return keys, nil, nil
 	}
-	// The fetch serves every verification waiting for the lock and uses up the minute's attempt, so the
+	defer v.endFetch(fetchDone)
+	// The fetch serves every verification waiting for it and uses up the minute's attempt, so the
 	// triggering request's cancellation must not end it; it gets its own timeout instead [CON-003].
 	fetchContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultHTTPTimeout)
 	defer cancel()
-	fetchError := v.refreshKeys(fetchContext)
+	keys, fetchError := v.refreshKeys(fetchContext)
 	switch {
 	case fetchError == nil:
-		return v.keys, nil, nil
+		return keys, nil, nil
 	case known:
-		return v.keys, fetchError, nil
+		return keys, fetchError, nil
 	default:
 		return nil, nil, fetchError
 	}
+}
+
+// claimFetch returns the current keys and whether they have keyID. When a fetch is due it claims it and
+// returns a non-nil fetchDone: the caller fetches without the mutex and ends the claim with endFetch.
+// While a fetch is in flight, a known keyID goes on with the current keys and an unknown one waits for
+// the fetch (at most 10 s), which may bring it.
+func (v *Verifier) claimFetch(keyID string) (keys jwk.Set, known bool, fetchDone chan struct{}) {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+	_, known = v.keys.LookupKeyID(keyID)
+	for v.fetchDone != nil && !known {
+		inFlight := v.fetchDone
+		v.mutex.Unlock()
+		<-inFlight
+		v.mutex.Lock()
+		_, known = v.keys.LookupKeyID(keyID)
+	}
+	if v.fetchDone != nil || !v.fetchDue(known) {
+		return v.keys, known, nil
+	}
+	v.fetchDone = make(chan struct{})
+	return v.keys, known, v.fetchDone
+}
+
+// endFetch ends the fetch claimed with fetchDone and wakes the verifications waiting for it.
+func (v *Verifier) endFetch(fetchDone chan struct{}) {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+	v.fetchDone = nil
+	close(fetchDone)
 }
 
 func (v *Verifier) fetchDue(keyKnown bool) bool {
@@ -204,17 +233,19 @@ func (v *Verifier) fetchDue(keyKnown bool) bool {
 	return (stale || !keyKnown) && now.Sub(v.attemptedAt) >= minimumFetchSpacing
 }
 
-// refreshKeys fetches the JWKS and replaces the keys on success. The caller holds the mutex (or owns the
-// verifier exclusively, as NewVerifier does).
-func (v *Verifier) refreshKeys(ctx context.Context) error {
-	v.attemptedAt = v.now()
-	keys, err := fetchKeySet(ctx, v.options.HTTPClient, v.options.JWKSURL)
-	if err != nil {
-		return err
+// refreshKeys fetches the JWKS without the mutex, replaces the keys on success and returns the keys after
+// the attempt. The caller has claimed the fetch (claimFetch) or owns the verifier exclusively, as
+// NewVerifier does.
+func (v *Verifier) refreshKeys(ctx context.Context) (jwk.Set, error) {
+	attemptedAt := v.now()
+	fetched, err := fetchKeySet(ctx, v.options.HTTPClient, v.options.JWKSURL)
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+	v.attemptedAt = attemptedAt
+	if err == nil {
+		v.keys, v.fetchedAt = fetched, attemptedAt
 	}
-	v.keys = keys
-	v.fetchedAt = v.attemptedAt
-	return nil
+	return v.keys, err
 }
 
 func fetchKeySet(ctx context.Context, httpClient *http.Client, jwksURL string) (jwk.Set, error) {

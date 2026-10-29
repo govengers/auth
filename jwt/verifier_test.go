@@ -661,6 +661,57 @@ func TestVerifyFailsWhenTheRefetchForAnUnknownKeyIDFails(t *testing.T) {
 	require.Nil(t, identity)
 }
 
+func TestVerifyDoesNotWaitForARefetchWithAKnownKeyID(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	signer, rotated := newTestSigner(t, clock.now), newTestSigner(t, clock.now)
+	keySets := newKeySetServer(t, signer.JWKSHandler())
+	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
+	fetchStarted, releaseFetch := make(chan struct{}), make(chan struct{})
+	started, release := sync.OnceFunc(func() { close(fetchStarted) }), sync.OnceFunc(func() { close(releaseFetch) })
+	defer release()
+	rotatedKeys := keySetHandler(t, publishedKey(t, signer), publishedKey(t, rotated))
+	keySets.serve(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		started()
+		<-releaseFetch
+		rotatedKeys.ServeHTTP(writer, request)
+	}))
+	clock.advance(time.Minute)
+	sign := func(signer *Signer) string {
+		token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
+		require.NoError(t, err)
+		return token
+	}
+	unknownToken, knownToken, laterUnknownToken := sign(rotated), sign(signer), sign(rotated)
+
+	unknownVerified := make(chan error, 1)
+	go func() {
+		_, err := verifier.Verify(t.Context(), unknownToken)
+		unknownVerified <- err
+	}()
+	<-fetchStarted
+	knownVerified := make(chan error, 1)
+	go func() {
+		_, err := verifier.Verify(t.Context(), knownToken)
+		knownVerified <- err
+	}()
+	laterUnknownVerified := make(chan error, 1)
+	go func() {
+		_, err := verifier.Verify(t.Context(), laterUnknownToken)
+		laterUnknownVerified <- err
+	}()
+
+	select {
+	case err := <-knownVerified:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "a known key ID waited for the JWKS fetch")
+	}
+	release()
+	require.NoError(t, <-unknownVerified, "the fetch brought the rotated key")
+	require.NoError(t, <-laterUnknownVerified, "an unknown key ID during the fetch gets the fetched keys")
+	require.Equal(t, int32(2), keySets.fetches.Load(), "one refetch for all")
+}
+
 func TestVerifyIsSafeForConcurrentUse(t *testing.T) {
 	clock := &testClock{instant: signedAt}
 	signer := newTestSigner(t, clock.now)
