@@ -244,7 +244,7 @@ func TestVerifyIgnoresSymmetricKeysOfTheJWKS(t *testing.T) {
 	}
 	forged, err := jwxjwt.Sign(token, jwxjwt.WithKey(jwa.HS256(), signingKey))
 	require.NoError(t, err)
-	valid, err := signer.Sign(&auth.Identity{Subject: "42"})
+	valid, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 
 	_, err = verifier.Verify(t.Context(), string(forged))
@@ -299,6 +299,7 @@ func TestVerifyReturnsEveryIdentityField(t *testing.T) {
 		Name:            "Ada Lovelace",
 		Email:           "ada@example.com",
 		Picture:         "https://example.com/ada.png",
+		Active:          true,
 		Roles:           []string{auth.RoleAdmin},
 		OIDCRoles:       []string{"realm-role"},
 		OIDCClientRoles: []string{"client-role"},
@@ -348,7 +349,7 @@ func TestVerifyDoesNotTakePermissionsFromForgedClaims(t *testing.T) {
 	clock := &testClock{instant: signedAt}
 	signer := newTestSigner(t, clock.now)
 	verifier := newTestVerifier(t, testVerifierOptions(newKeySetServer(t, signer.JWKSHandler()).server.URL), clock)
-	token, err := signer.Sign(&auth.Identity{Subject: "42", Claims: map[string]any{"permissions": []any{"*:write"}, "roles": []any{auth.RoleAdmin}}})
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true, Claims: map[string]any{"permissions": []any{"*:write"}, "roles": []any{auth.RoleAdmin}}})
 	require.NoError(t, err)
 
 	identity, err := verifier.Verify(t.Context(), token)
@@ -377,10 +378,10 @@ func TestVerifyRejectsInvalidTokens(t *testing.T) {
 	signer := newTestSigner(t, clock.now)
 	keySets := newKeySetServer(t, signer.JWKSHandler())
 	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
-	valid, err := signer.Sign(&auth.Identity{Subject: "42"})
+	valid, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 	otherSigner := newTestSigner(t, clock.now)
-	forged, err := otherSigner.Sign(&auth.Identity{Subject: "42"})
+	forged, err := otherSigner.Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 	keyID, _ := signer.signingKey.KeyID()
 	withoutKeyID, err := jwxjwt.Sign(jwxjwt.New(), jwxjwt.WithKey(jwa.RS512(), generateKey(t, 2048)))
@@ -468,7 +469,7 @@ func TestVerifyChecksTimesWithThirtySecondsSkew(t *testing.T) {
 	clock := &testClock{instant: signedAt}
 	signer := newTestSigner(t, fixedClock(signedAt))
 	verifier := newTestVerifier(t, testVerifierOptions(newKeySetServer(t, signer.JWKSHandler()).server.URL), clock)
-	token, err := signer.Sign(&auth.Identity{Subject: "42"})
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 	testCases := []struct {
 		name       string
@@ -505,7 +506,7 @@ func TestVerifyRefetchesForAnUnknownKeyIDAtMostOncePerMinute(t *testing.T) {
 	keySets.serve(second.JWKSHandler())
 	clock.advance(time.Minute)
 	sign := func(signer *Signer) string {
-		token, err := signer.Sign(&auth.Identity{Subject: "42"})
+		token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
 		require.NoError(t, err)
 		return token
 	}
@@ -545,7 +546,7 @@ func TestVerifyFetchesARotatedKeyForACancelledRequest(t *testing.T) {
 	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
 	keySets.serve(rotated.JWKSHandler())
 	clock.advance(time.Minute)
-	token, err := rotated.Sign(&auth.Identity{Subject: "42"})
+	token, err := rotated.Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -576,7 +577,7 @@ func TestVerifyRefreshesKeysAfterTheRefreshInterval(t *testing.T) {
 		{advance: time.Hour, wantFetches: 2},
 	} {
 		clock.advance(step.advance)
-		token, err := signer.Sign(&auth.Identity{Subject: "42"})
+		token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
 		require.NoError(t, err)
 
 		_, err = verifier.Verify(t.Context(), token)
@@ -593,7 +594,7 @@ func TestVerifyKeepsTheKeysWhenARefreshFails(t *testing.T) {
 	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
 	keySets.serve(failingHandler)
 	clock.advance(time.Hour)
-	token, err := signer.Sign(&auth.Identity{Subject: "42"})
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 
 	identity, refreshError, err := verifier.verify(t.Context(), token)
@@ -620,7 +621,7 @@ func TestVerifyFailsWhenTheRefetchForAnUnknownKeyIDFails(t *testing.T) {
 	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
 	keySets.serve(failingHandler)
 	clock.advance(time.Minute)
-	token, err := newTestSigner(t, clock.now).Sign(&auth.Identity{Subject: "42"})
+	token, err := newTestSigner(t, clock.now).Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 
 	identity, err := verifier.Verify(t.Context(), token)
@@ -636,7 +637,7 @@ func TestVerifyIsSafeForConcurrentUse(t *testing.T) {
 	keySets := newKeySetServer(t, signer.JWKSHandler())
 	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
 	clock.advance(time.Hour)
-	token, err := signer.Sign(&auth.Identity{Subject: "42"})
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 
 	var waitGroup sync.WaitGroup
@@ -659,7 +660,7 @@ func TestVerifyIsSafeForConcurrentUse(t *testing.T) {
 func TestMiddleware(t *testing.T) {
 	clock := &testClock{instant: signedAt}
 	signer := newTestSigner(t, clock.now)
-	token, err := signer.Sign(&auth.Identity{Provider: "github", Subject: "42"})
+	token, err := signer.Sign(&auth.Identity{Provider: "github", Subject: "42", Active: true})
 	require.NoError(t, err)
 	testCases := []struct {
 		name       string
@@ -728,7 +729,7 @@ func TestMiddlewareAnswersAFailedKeyFetchWithInternalError(t *testing.T) {
 	verifier := newTestVerifier(t, options, clock)
 	keySets.serve(failingHandler)
 	clock.advance(time.Minute)
-	token, err := newTestSigner(t, clock.now).Sign(&auth.Identity{Subject: "42"})
+	token, err := newTestSigner(t, clock.now).Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/items", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
@@ -754,7 +755,7 @@ func TestMiddlewareReportsAFailedRefreshAsDegradedSuccess(t *testing.T) {
 	verifier := newTestVerifier(t, options, clock)
 	keySets.serve(failingHandler)
 	clock.advance(time.Hour)
-	token, err := signer.Sign(&auth.Identity{Subject: "42"})
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/items", nil)
 	request.Header.Set("Authorization", "Bearer "+token)

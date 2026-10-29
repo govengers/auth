@@ -166,7 +166,7 @@ func rfc7638Thumbprint(t *testing.T, exponent, modulus string) string {
 func TestSignWritesHeaderAndRegisteredClaims(t *testing.T) {
 	signer := newTestSigner(t, fixedClock(signedAt))
 
-	token, err := signer.Sign(&auth.Identity{Provider: "github", Subject: "42"})
+	token, err := signer.Sign(&auth.Identity{Provider: "github", Subject: "42", Active: true})
 	require.NoError(t, err)
 
 	message, err := jws.ParseString(token)
@@ -197,7 +197,7 @@ func TestSignWritesHeaderAndRegisteredClaims(t *testing.T) {
 
 func TestSignUsesAFreshTokenIDAndLeavesTheIdentityUntouched(t *testing.T) {
 	signer := newTestSigner(t, fixedClock(signedAt))
-	identity := &auth.Identity{Subject: "42", Roles: []string{"reader"}, Claims: map[string]any{"iss": "https://idp.example.com", "locale": "de"}}
+	identity := &auth.Identity{Subject: "42", Active: true, Roles: []string{"reader"}, Claims: map[string]any{"iss": "https://idp.example.com", "locale": "de"}}
 
 	first, err := signer.Sign(identity)
 	require.NoError(t, err)
@@ -205,7 +205,7 @@ func TestSignUsesAFreshTokenIDAndLeavesTheIdentityUntouched(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NotEqual(t, payloadOf(t, first)["jti"], payloadOf(t, second)["jti"])
-	require.Equal(t, &auth.Identity{Subject: "42", Roles: []string{"reader"}, Claims: map[string]any{"iss": "https://idp.example.com", "locale": "de"}}, identity)
+	require.Equal(t, &auth.Identity{Subject: "42", Active: true, Roles: []string{"reader"}, Claims: map[string]any{"iss": "https://idp.example.com", "locale": "de"}}, identity)
 }
 
 func TestSignRefusesANilIdentity(t *testing.T) {
@@ -217,10 +217,21 @@ func TestSignRefusesANilIdentity(t *testing.T) {
 	require.Empty(t, token)
 }
 
+func TestSignRefusesAnInactiveIdentity(t *testing.T) {
+	signer := newTestSigner(t, fixedClock(signedAt))
+
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Roles: []string{auth.RoleAdmin}, Permissions: []auth.Permission{{Resource: auth.AllResources, Access: auth.AccessWrite}}})
+
+	require.ErrorIs(t, err, auth.ErrForbidden, "Verify would return the identity as active, privileges and all")
+	status, _ := auth.ResponseFor(err)
+	require.Equal(t, http.StatusForbidden, status)
+	require.Empty(t, token)
+}
+
 func TestSignRefusesAnInvalidPermission(t *testing.T) {
 	signer := newTestSigner(t, fixedClock(signedAt))
 
-	token, err := signer.Sign(&auth.Identity{Subject: "42", Permissions: []auth.Permission{{Resource: "builds", Access: "admin"}}})
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true, Permissions: []auth.Permission{{Resource: "builds", Access: "admin"}}})
 
 	require.ErrorContains(t, err, "sign JWT for subject 42: permissions claim")
 	require.Empty(t, token)
@@ -229,7 +240,7 @@ func TestSignRefusesAnInvalidPermission(t *testing.T) {
 func TestSignRefusesClaimsThatDoNotEncode(t *testing.T) {
 	signer := newTestSigner(t, fixedClock(signedAt))
 
-	token, err := signer.Sign(&auth.Identity{Subject: "42", Claims: map[string]any{"channel": make(chan int)}})
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true, Claims: map[string]any{"channel": make(chan int)}})
 
 	require.ErrorContains(t, err, "sign JWT for subject 42")
 	require.Empty(t, token)
