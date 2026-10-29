@@ -129,6 +129,7 @@ type Identity struct {
 	OIDCClientRoles []string            `json:"oidcClientRoles,omitempty"` // Keycloak client roles of the configured client
 	Groups          []string            `json:"groups,omitempty"`          // OIDC groups (path or name, per IdP mapper)
 	Teams           []string            `json:"teams,omitempty"`           // GitHub "org/team-slug", lower-case
+	Permissions     []Permission        `json:"permissions,omitempty"`     // resource permissions, text form in JSON ("builds:write"); from API keys, JWTs or hooks
 	Attributes      map[string][]string `json:"attributes,omitempty"`      // Keycloak user attributes
 	Claims          map[string]any      `json:"claims,omitempty"`          // OIDC ID token claims, or all claims of a verified JWT
 	Data            map[string]any      `json:"data,omitempty"`            // application data from hooks and resolvers; JSON round trip (numbers become float64)
@@ -137,13 +138,50 @@ type Identity struct {
 
 // Real returns the identity that authenticated: the Impersonator while impersonating, the receiver otherwise. Nil-safe (nil in, nil out).
 func (i *Identity) Real() *Identity
-// Clone returns a deep copy: slices, Attributes and the Impersonator chain are copied; Claims and Data are copied one level (values shared). Nil-safe.
+// Clone returns a deep copy: slices (Permissions included), Attributes and the Impersonator chain are copied; Claims and Data are copied one level (values shared). Nil-safe.
 func (i *Identity) Clone() *Identity
 
 // WithIdentity returns a copy of ctx carrying identity (private key type) [AUTH-006].
 func WithIdentity(ctx context.Context, identity *Identity) context.Context
 // IdentityFrom returns the identity in ctx, or nil.
 func IdentityFrom(ctx context.Context) *Identity
+```
+
+Permissions (`permission.go`, implemented; binding). A generic resource permission any identity can carry (API keys, JWTs, or set by an OnLogin hook for interactive users). One text form everywhere: Go `String`, JSON (session, `IdentityResponse`), the JWT `permissions` claim and the forwardauth configuration.
+
+```go
+// Access is what a Permission allows on its resource. AccessWrite includes AccessRead.
+type Access string
+const (
+	AccessRead  Access = "read"
+	AccessWrite Access = "write"
+)
+// AllResources is the Permission resource that matches every resource.
+const AllResources = "*"
+
+// Permission grants Access on one resource, or on every resource when Resource is AllResources.
+// Its text form "<resource>:<access>" ("builds:write", "*:read") is also its JSON form.
+type Permission struct {
+	Resource string
+	Access   Access
+}
+// ParsePermission parses "<resource>:<access>". Case-sensitive: resource is "*" or matches
+// [a-z0-9][a-z0-9._-]{0,63}; access is "read" or "write". Anything else is an error (plain, not *Error).
+func ParsePermission(text string) (Permission, error)
+// Validate reports whether resource and access are valid (same rules as ParsePermission).
+func (p Permission) Validate() error
+// String returns "<resource>:<access>".
+func (p Permission) String() string
+// Allows reports whether p grants access on resource: resource equal or p.Resource == AllResources, and
+// AccessWrite includes AccessRead. Requiring AllResources needs a "*" permission. An invalid p, an empty or
+// invalid resource, or an access other than read/write allows nothing (fail closed).
+func (p Permission) Allows(resource string, access Access) bool
+// MarshalText encodes the text form; an invalid permission is an error (an identity with one cannot be stored).
+func (p Permission) MarshalText() ([]byte, error)
+// UnmarshalText decodes with ParsePermission.
+func (p *Permission) UnmarshalText(text []byte) error
+// AccessForMethod: GET, HEAD, OPTIONS need AccessRead; every other method (exact, upper-case match) AccessWrite.
+func AccessForMethod(method string) Access
 ```
 
 Errors (`errors.go`):
@@ -199,6 +237,7 @@ type IdentityResponse struct {
 	OIDCClientRoles []string          `json:"oidcClientRoles,omitempty"`
 	Groups          []string          `json:"groups,omitempty"`
 	Teams           []string          `json:"teams,omitempty"`
+	Permissions     []Permission      `json:"permissions,omitempty"` // text form: ["builds:write"]
 	Impersonator    *IdentityResponse `json:"impersonator,omitempty"`
 }
 func NewIdentityResponse(identity *Identity) IdentityResponse
@@ -429,6 +468,7 @@ Claims written by `Sign` and read back by `Verify` (binding):
 | `user_id` | `UserID` | omitted for uuid.Nil |
 | `preferred_username`, `name`, `email`, `picture` | `Username`, `Name`, `Email`, `Picture` | omitted when empty |
 | `roles`, `realm_roles`, `client_roles`, `groups`, `teams` | `Roles`, `OIDCRoles`, `OIDCClientRoles`, `Groups`, `Teams` | JSON arrays, omitted when empty |
+| `permissions` | `Permissions` | JSON array of text forms (`["builds:write","*:read"]`), omitted when empty; `Sign` fails on an invalid permission; `Verify` parses each entry with `auth.ParsePermission` and drops entries that do not parse or are not strings (fail closed per entry) |
 | every other key of `Claims` | `Claims` | copied first, then overwritten by the rows above; never copied: `iss sub aud exp nbf iat jti nonce at_hash c_hash auth_time sid azp` |
 
 `Verify` sets `Active=true`, the fields above, and `Claims` = all claims of the token. Wrong claim types are skipped, never asserted (no panics).
@@ -667,12 +707,13 @@ func (p *Provider) HTTPClient(ctx context.Context, current session.Session) (*ht
 
 ```go
 type Key struct {
-	Name   string   // required, unique, non-empty; becomes Identity.Subject and Username
-	Secret string   // required, >= 16 bytes; SHA-256 pre-hashed at construction
-	Roles  []string // optional, e.g. auth.RoleAdmin for the old "AllowedAPIKeys bypass admin" behaviour
+	Name        string            // required, unique, non-empty; becomes Identity.Subject and Username
+	Secret      string            // required, >= 16 bytes, no surrounding whitespace; SHA-256 pre-hashed at construction
+	Roles       []string          // optional, e.g. auth.RoleAdmin for the old "AllowedAPIKeys bypass admin" behaviour
+	Permissions []auth.Permission // optional, each must pass Validate (New fails otherwise); every identity of the key gets a copy
 }
 // Resolver resolves application-issued keys. Unknown or revoked: return an error matching auth.ErrUnauthenticated.
-// A returned identity with empty Provider gets "apikey".
+// A returned identity with empty Provider gets "apikey"; it carries its own Permissions (the Authenticator clones the identity).
 type Resolver func(ctx context.Context, key string) (*auth.Identity, error)
 
 type Options struct {
@@ -686,7 +727,7 @@ func New(options *Options) (*Authenticator, error)
 // Invalid key: 401 JSON, never falls through to other authenticators. Resolver error: 500.
 func (a *Authenticator) Middleware() func(http.Handler) http.Handler
 ```
-Static key identity: `{Provider: "apikey", Subject: Name, Username: Name, Active: true, Roles: clone(Roles)}`. Static keys are checked first, by comparing the SHA-256 of the presented key with every stored hash using `subtle.ConstantTimeCompare`, without early exit. Mount it before a `session.Guard`: the Guard passes requests that already carry an identity. Do not mount it in front of a `jwt.Verifier` middleware (both read `Authorization: Bearer`).
+Static key identity: `{Provider: "apikey", Subject: Name, Username: Name, Active: true, Roles: clone(Roles), Permissions: clone(Permissions)}`. A key without Permissions has none: `authorization.HasPermission` refuses it (fail closed). Static keys are checked first, by comparing the SHA-256 of the presented key with every stored hash using `subtle.ConstantTimeCompare`, without early exit. Mount it before a `session.Guard`: the Guard passes requests that already carry an identity. Do not mount it in front of a `jwt.Verifier` middleware (both read `Authorization: Bearer`).
 
 ### 3.10 `authorization`
 
@@ -709,8 +750,14 @@ func HasUserID(id uuid.UUID) Check      // active and UserID == id; uuid.Nil nev
 func HasOIDCRole(role string) Check     // active and role in OIDCRoles
 func HasOIDCGroup(group string) Check   // active and group in Groups
 func HasGitHubTeam(team string) Check   // active and lower-case team in Teams
+// HasPermission: no identity: 401; inactive: 403 (Reason "inactive"); no p in identity.Permissions with
+// p.Allows(resource, access): 403 with Reason "missing permission <resource>:<access>". An empty or invalid
+// resource or an access other than read/write refuses everything (403, fail closed). The effective identity
+// counts (wrap in Real to check the impersonator). Interactive users have no permissions unless an OnLogin
+// hook grants them: compose Any(HasRole(...), HasPermission(...)) or grant e.g. "*:write" at login.
+func HasPermission(resource string, access auth.Access) Check
 ```
-Entity checks (`CanViewX`), broadcast filters and tenant roles stay in the applications (DeepThought go-authorization-package-lineage).
+Entity checks (`CanViewX`), broadcast filters and tenant roles stay in the applications (DeepThought go-authorization-package-lineage). A Check sees only the context, so the HTTP-method-derived variant lives in `ginadapter.RequireMethodPermission`.
 
 ### 3.11 `ginadapter`
 
@@ -729,6 +776,10 @@ func Observe(ctx context.Context, outcome auth.Outcome)
 // Require runs check against the request context: allowed continues; refused aborts with auth.ResponseFor
 // (401/403/500) and records authorization.denied / authorization.reason / authorization.error and we.Failure(err).
 func Require(check authorization.Check) gin.HandlerFunc
+// RequireMethodPermission is Require(authorization.HasPermission(resource, auth.AccessForMethod(ginContext.Request.Method)))
+// evaluated per request: one gate for a route group, GET/HEAD/OPTIONS need read, everything else write
+// (build-api's read_only/read_write behaviour). Same recording and responses as Require.
+func RequireMethodPermission(resource string) gin.HandlerFunc
 ```
 
 ### 3.12 `prometheusadapter`
@@ -990,6 +1041,7 @@ Values without a default are required: `LoadConfig` fails and the process exits 
 | `SHUTDOWN_DELAY_SECONDS` | int | `5` | | readiness 503 before draining [LAY-003]; e2e sets 0 |
 | `IDENTITY_ENDPOINT_ENABLED` | bool | `false` | | mounts `{prefix}/me` |
 | `API_KEYS` | string array, sensitive | `[]` | | entries `name:secret` (split at the first ":") |
+| `API_KEY_PERMISSIONS` | string array | `[]` | | entries `<name>=<permission>[+<permission>...]`, e.g. `ci=builds:write+deployments:read,reader=*:read`; split at the first "=", then on "+", each part `auth.ParsePermission`; becomes `apikey.Key.Permissions`. Not sensitive, so `config.Print` shows it. A key without an entry has no permissions |
 | `SESSION_ENCRYPTION_KEY` | string, sensitive | - | yes | base64 of 32 bytes (`session.ParseKey`) |
 | `SESSION_COOKIE_NAME` | string | `forwardauth_session` | | |
 | `SESSION_COOKIE_DOMAIN` | string | `""` | | host-only by default |
@@ -1032,7 +1084,7 @@ Values without a default are required: `LoadConfig` fails and the process exits 
 | `JWT_LIFETIME_SECONDS` | int | `300` | | |
 | `JWT_HEADER` | string | `Authorization` | | value `Bearer <jwt>` |
 
-`validateConfiguration` also checks: EXTERNAL_URL via `redirect.ExternalURL`; PATH_PREFIX starts with "/" and has no trailing "/"; SESSION_SAME_SITE value; `none` with insecure cookie; API_KEYS entries have a name; ports in range; positive seconds.
+`validateConfiguration` also checks: EXTERNAL_URL via `redirect.ExternalURL`; PATH_PREFIX starts with "/" and has no trailing "/"; SESSION_SAME_SITE value; `none` with insecure cookie; API_KEYS entries have a name; every API_KEY_PERMISSIONS entry names a key from API_KEYS, appears once, has at least one permission and every permission parses; ports in range; positive seconds.
 
 ### 6.3 Routes (`{prefix}` = PATH_PREFIX)
 
@@ -1040,6 +1092,7 @@ Values without a default are required: `LoadConfig` fails and the process exits 
 |---|---|
 | `GET {prefix}/ui` | apikey (when keys) -> Guard.RequireUI -> forward handler (F12) |
 | `GET {prefix}/api` | apikey (when keys) -> Guard.RequireAPI -> forward handler (F13) |
+| (both checks) | forwardauth does not enforce permissions; the injected JWT carries the identity's `permissions` claim and backends enforce them (`jwt.Verifier` + `ginadapter.RequireMethodPermission` / `authorization.HasPermission`) |
 | `GET {prefix}/jwks` | `Signer.JWKSHandler()` (JWT enabled) |
 | `GET {prefix}/me` | Guard.RequireAPI -> `auth.IdentityHandler()` (IDENTITY_ENDPOINT_ENABLED) |
 | `GET {prefix}/health` | 200 `{"status":"ok"}` (liveness) [LAY-004] |
@@ -1141,6 +1194,7 @@ func (s *Server) Run(ctx context.Context) error
 | D17 | Forward-auth checks require explicit Traefik routing of `{prefix}` to the service (no github-style X-Forwarded-Uri dispatch inside the check endpoint). | Traefik forwards the original request on any 2xx, so JSON auth endpoints never worked through the check endpoint. |
 | D18 | Optional `ErrorURL` on redirect providers: callback refusals redirect with `?code=`; default JSON. | Real consumer pattern (bathroom-planner `/login?oidc=<reason>`). |
 | D19 | No retries, no rate limiting (documented, as basicauth); TOTP code replay inside one period is not prevented (as before). | RES-002; scope. Add replay protection with a Storage "last used step" when needed. |
+| D21 | Generic permissions (MaPa, 29.10.2026): `auth.Permission{Resource, Access}` with Access `read`/`write` (write includes read) and resource `*` for all; one text form `<resource>:<access>` for Go, JSON, JWT claim and config. Identities carry them (`Identity.Permissions`); API keys get them from `Key.Permissions` or the Resolver; checks via `authorization.HasPermission` and `ginadapter.RequireMethodPermission`. No permission means no access. Forward auth only transports them (JWT). | build-api's read_only/read_write keys generalised; strict lower-case grammar so a typo fails at boot, not at request time. Not built: prefix wildcards (`builds/*`), actions beyond read/write, a deny form. |
 | D20 | Not built (YAGNI): session key rotation list, JWT signing key rotation list, idle timeout, multi-host return URLs, OIDC refresh tokens, `auth.Chain` for hooks (an app closure), net/http `authorization` middleware (gin `Require` only), standalone `IsMultiFactor`. | No consumer needs them today. |
 
 ---
@@ -1151,16 +1205,16 @@ func (s *Server) Run(ctx context.Context) error
 
 | Package | Must cover |
 |---|---|
-| `auth` | context round trip and nil cases; `Real`, `Clone` (deep, nil-safe, no aliasing); `ResponseFor` table (each kind, custom code, wrapped twice, unknown -> 500, message never contains Reason or cause); `WriteError` headers; `NewIdentityResponse` excludes Claims/Attributes/Data, omits Nil userId, nests impersonator, `roles` never null; `IdentityHandler` 200/401; `RegisterRoutes`; `Error.Error`/`Unwrap` with `errors.Is`. Examples. |
+| `auth` | context round trip and nil cases; `Real`, `Clone` (deep, nil-safe, no aliasing); `ResponseFor` table (each kind, custom code, wrapped twice, unknown -> 500, message never contains Reason or cause); `WriteError` headers; `NewIdentityResponse` excludes Claims/Attributes/Data, omits Nil userId, nests impersonator, `roles` never null; `IdentityHandler` 200/401; `RegisterRoutes`; `Error.Error`/`Unwrap` with `errors.Is`; `ParsePermission` table (valid forms, charset, case, length 64/65, missing or second separator, unknown access) with `String` round trip; `Allows` table (read/write implication, wildcard, requiring `*`, fail closed on empty/invalid resource or access and on an invalid permission); JSON text form round trip and invalid permission errors on marshal and unmarshal; `AccessForMethod` table; `Clone` and `NewIdentityResponse` copy Permissions. Examples. (Implemented, 100 %.) |
 | `session` | `ParseKey` table; `NewStore`/`NewGuard`/`NewMemoryBackend` validation, defaults, caller untouched; cookie attributes; `Start` revokes the previous session; `Open` missing/malformed; Put/Get/Pop; backend sees only hashed IDs and ciphertext; AAD (value copied to another key or session is absent); tampered value absent; `SaveIdentity`/`Identity` incl. absolute expiry via clock and authenticatedAt preserved; `End` idempotent; Put after revoke -> ErrSessionRevoked; memory backend through `backendtest.Run` incl. eviction order; Guard: pass-through with identity, API 401, UI 302 with return path (request URI, header, unsafe omitted), refresh after interval (clock) with real identity, impersonator refresh, refresher 401/403 end the session, transient error keeps identity and reports error, observer outcomes. |
-| `jwt` | signer validation (missing/bad PEM, < 2048 bits, PKCS#1 and PKCS#8, missing issuer); stable kid; Sign/Verify round trip of every Identity field; reserved claims not copied; JWKS JSON (public only); verifier: wrong iss, wrong aud, expired and nbf (clock), bad signature, alg mismatch, unknown kid refetch + rate limit, refresh interval, wrong claim types without panic, middleware 401/200, observer; `NewVerifier` fails when JWKS is unreachable. |
+| `jwt` | signer validation (missing/bad PEM, < 2048 bits, PKCS#1 and PKCS#8, missing issuer); stable kid; Sign/Verify round trip of every Identity field; reserved claims not copied; `permissions` claim round trip in text form, `Sign` error on an invalid permission, `Verify` drops non-string and unparsable entries and keeps the rest; JWKS JSON (public only); verifier: wrong iss, wrong aud, expired and nbf (clock), bad signature, alg mismatch, unknown kid refetch + rate limit, refresh interval, wrong claim types without panic, middleware 401/200, observer; `NewVerifier` fails when JWKS is unreachable. |
 | `password` | port `util_test`, `legacy_password_test`, `validation_test`, `tfa_test`, `security_state_test`, `e2e_test`: Hash/Verify (limits, version, malformed); VerifyBcrypt; policy and identifier tables; login by username/email, disabled kinds, unknown user via dummy hash, wrong password; legacy upgrade CAS incl. concurrent change and degraded failure; content type, 64 KiB, unknown fields; registration off (404 on mux) and on (201, 409, 400s); TOTP challenge, verify, attempts exhaustion ends the pending session, backup code single use under `-race`, pending expiry, pending session revoked after success; Required enrollment flow; setup/enable/disable/status, impersonated session refused; logout + OnLogout; OnLogin refusal (403, no session) and failure (500); Refresh (deleted user, profile change, other fields kept); MemoryStorage contracts; outcomes per action. |
 | `oidc` | port `e2e_test`, `multi_handler_test`, `claim_mappers_test`, `token_claims_test`: validation (names, reserved, URLs, scopes order); discovery failure; login redirect has state, nonce, S256 challenge; return_to table incl. `//evil`, `/\evil`, `https://evil`, control chars; callback success (session rotated, id token stored, redirect to return path), state mismatch, expired, replay, IdP error, nonce mismatch, bad signature, exchange failure (fake checks PKCE); AllowedEmailDomains; OnLogin change/refusal; ErrorURL; logout with and without end_session_endpoint, foreign session gets no hint; front-channel table (iss/sid pairing, wrong issuer, sid mismatch, foreign provider, no session, iframe heuristic on/off, headers); two providers on one store. |
 | `oidc/keycloak` | port `gocloak_test`: validation per grant; token cached and renewed (clock); AuthenticationRealm used for the token; Enrich fills roles/client roles/groups/attributes; client UUID cached, retried after failure; each Required* missing -> ErrForbidden with Reason, generic response; API error -> plain error. |
 | `github` | port `oauth_handler_test`, `session_handler_test`, `github_connector_test`, `init_test`, `coverage_gap_test`, `fuzz_test`: validation (teams format, https/loopback, defaults, caller slices untouched); login; callback incl. state/PKCE, pagination > 100 teams, filtered teams, admin role, not allowed -> 403 without session, API failure -> 500; logout revokes token, revocation failure degraded; refresh-teams and Refresh (removal ends session, admin role toggled, other roles kept); HTTPClient sends the token, foreign session refused; fuzz team slug normalisation. |
-| `apikey` | validation; X-API-Key and Bearer; invalid -> 401 without fall-through; no key -> pass-through; resolver success/unknown/nil/error; roles cloned; outcomes. |
-| `authorization` | allowed and denied case for every primitive [TST-003]; All/Any/Not empty and nested; 401 vs 403 kinds; Real; HasUserID with Nil; inactive refused; reasons stay server-side. |
-| `ginadapter` | Middleware pass (identity visible to the next gin handler) and refuse (aborted); RegisterRoutes (FullPath equals route path); Observe fields per section 5.4 asserted with an `EmitterFunc` [LOG-014], Success/Failure rules, no event in ctx is a no-op; Require 401/403/500 with recorded fields and generic body. |
+| `apikey` | validation (incl. invalid permissions); X-API-Key and Bearer; invalid -> 401 without fall-through; no key -> pass-through; resolver success/unknown/nil/error; roles and permissions cloned per request and isolated from Options and from the resolver's identity; outcomes. (Implemented, 100 %.) |
+| `authorization` | allowed and denied case for every primitive [TST-003]; All/Any/Not empty and nested; 401 vs 403 kinds; Real; HasUserID with Nil; inactive refused; reasons stay server-side; HasPermission: exact resource, `*`, write grants read, read refuses write, no permissions, inactive, no identity (401), empty/invalid resource and invalid access refuse, Reason names the missing permission but the body does not. |
+| `ginadapter` | Middleware pass (identity visible to the next gin handler) and refuse (aborted); RegisterRoutes (FullPath equals route path); Observe fields per section 5.4 asserted with an `EmitterFunc` [LOG-014], Success/Failure rules, no event in ctx is a no-op; Require 401/403/500 with recorded fields and generic body; RequireMethodPermission: GET with `x:read` passes, POST with `x:read` 403, POST with `*:write` passes, no identity 401. |
 | `prometheusadapter` | counter moves per labels; `testutil.CollectAndLint` clean; duplicate registration returns an error [MET-007]. |
 | `session/redisbackend` | `backendtest.Run` against miniredis; key layout with hash tags; marker blocks Put; connection failure surfaces as error without a `redis.Nil` chain. |
 | `internal/redirect` | tables + `FuzzSafeReturnPath` (accepted paths never parse to a host or scheme). |
@@ -1178,7 +1232,7 @@ Coverage is measured without `cmd/`, `internal/fakeprovider/` and `test/`; `cmd/
 4. Open redirect: `return_to=//evil.example` ends at `/`.
 5. RP-initiated logout sends `id_token_hint`; afterwards `/auth/ui` redirects again. Front-channel logout with matching iss/sid ends the session.
 6. Keycloak enrichment: roles in the JWT; missing required realm role -> callback 403 `forbidden`, body without the role name.
-7. API keys: `X-API-Key` and Bearer -> 200 + JWT `sub` = key name; wrong key -> 401.
+7. API keys: `X-API-Key` and Bearer -> 200 + JWT `sub` = key name and `permissions` from `API_KEY_PERMISSIONS` (`ci=builds:write+*:read` -> `["builds:write","*:read"]`); key without an entry -> no `permissions` claim; wrong key -> 401; boot fails for an entry naming an unknown key or an unparsable permission.
 8. GitHub flow (second binary): allowed team -> 200, JWT teams filtered; not allowed -> 403; `refresh-teams` after the fake removes the team -> 403 and the session is gone; Refresher after `SESSION_REFRESH_INTERVAL_SECONDS=1` (fake clock not available here: interval of 1 s and `require.Eventually`).
 9. Multi-replica: two binaries on one miniredis; login through A, `/auth/ui` on B -> 200; logout on B, A refuses.
 10. `/auth/me` toggle; `/auth/ready` 503 during the shutdown delay (`SHUTDOWN_DELAY_SECONDS=1`); metrics port serves `forwardauth_http_requests_total` and `forwardauth_auth_outcomes_total`.
@@ -1380,7 +1434,8 @@ Follow-ups outside this repo (need MaPa's sign-off, not part of any WP): depreca
 | `Config.RedirectURI`, `AuthURL`, `TokenURL`, `DeviceAuthURL`, `GitHubAPIBaseURL`, `BaseURL` | derived, `AuthorizeURL`, `TokenURL`, removed, `APIURL`, `ExternalURL` |
 | `LoginPath`, `CallbackPath`, `UserInfoPath`, `LogoutPath`, `RefreshTeamsPath` | `PathPrefix` (`/auth/github`); userinfo -> `auth.IdentityHandler()`; logout is `GET` |
 | `AllowedTeams`, `AdminTeams`, `RelevantTeams` | same (never mutated; Teams filtered to these) |
-| `AllowedAPIKeys`, `APIKeyResolver`, `ResolvedAPIKey{Login, Teams, Data}` | `apikey.Options{Keys: []apikey.Key{Name, Secret, Roles}, Resolver}` returning `*auth.Identity{Subject/Username, Teams, Data}` |
+| `AllowedAPIKeys`, `APIKeyResolver`, `ResolvedAPIKey{Login, Teams, Data}` | `apikey.Options{Keys: []apikey.Key{Name, Secret, Roles, Permissions}, Resolver}` returning `*auth.Identity{Subject/Username, Teams, Permissions, Data}` |
+| access level in `ResolvedAPIKey.Data` (build-api `read_only` / `read_write`) + an app middleware refusing non-GET for read_only | `Identity.Permissions`: `read_only` -> `[*:read]`, `read_write` -> `[*:write]`; gate with `ginadapter.RequireMethodPermission(resource)` or `Require(authorization.HasPermission(...))`. Browser sessions have no permissions: grant them in `OnLogin` (e.g. `*:write` for allowed-team members) or compose `Any(HasRole(...), HasPermission(...))` |
 | `GetApiKeyAuthMiddleware(keys)` | `apikey.New(...).Middleware()` |
 | `SessionSecretKey`, `SessionEncryptionKey`, `CookieName`, `CookieDomain` (default localhost), `SessionMaxAge *int`, `CookieInsecure` | removed, `StoreOptions.EncryptionKey`, `CookieName`, `CookieDomain` (default host-only), `MaxAge`, `InsecureCookie` |
 | `Handle.IsAuthenticated(c)`, `IsAdmin(c)`, `GetRelevantTeams(c)` | `authorization.IsAuthenticated()`, `authorization.IsAdmin()`, `auth.IdentityFrom(ctx).Teams` |
@@ -1426,6 +1481,7 @@ Follow-ups outside this repo (need MaPa's sign-off, not part of any WP): depreca
 | `JWT_PRIVATE_KEY` (empty = generated) | `JWT_PRIVATE_KEY` | `JWT_PRIVATE_KEY` (required when enabled) |
 | `JWT_ISSUER` (default oidc-fwd-auth) | `JWT_ISSUER` | `JWT_ISSUER` (default EXTERNAL_URL) + `JWT_AUDIENCE`, `JWT_LIFETIME_SECONDS`, `JWT_HEADER` |
 | - | `API_KEYS` (secrets) | `API_KEYS` (`name:secret` entries) |
+| - | (static keys had unrestricted access) | `API_KEY_PERMISSIONS` (`name=perm+perm`); `name=*:write` reproduces the old unrestricted key for backends that check permissions |
 | `github-fwd-auth.env` dotenv | - | `.env` in the working directory (dev only) |
 
 Deployment changes: add the Traefik router for `PATH_PREFIX` on the app host (section 6.3); point forwardAuth at `/auth/ui` or `/auth/api`; backends verify JWTs at `/auth/jwks` (was `/auth/JWKS` or `/JWKS`) with the issuer from `JWT_ISSUER`; every user logs in once after the upgrade (new session format).
