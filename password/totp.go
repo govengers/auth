@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -167,18 +168,21 @@ func (p *Provider) codeValid(secret, code string) bool {
 	return err == nil && valid
 }
 
-// newBackupCodes returns the configured number of random backup codes and their Argon2id hashes; none when
-// backup codes are disabled.
+// newBackupCodes returns the configured number of distinct random backup codes and their Argon2id hashes; none
+// when backup codes are disabled.
 func (p *Provider) newBackupCodes() (codes, hashes []string, err error) {
 	if p.options.TOTP.DisableBackupCodes {
 		return []string{}, nil, nil
 	}
 	codes = make([]string, 0, p.options.TOTP.BackupCodeCount)
 	hashes = make([]string, 0, p.options.TOTP.BackupCodeCount)
-	for range p.options.TOTP.BackupCodeCount {
+	for len(codes) < p.options.TOTP.BackupCodeCount {
 		code, err := randomCode(p.backupCodeAlphabet, p.options.TOTP.BackupCodeLength)
 		if err != nil {
 			return nil, nil, err
+		}
+		if slices.Contains(codes, code) {
+			continue // a duplicate would redeem twice
 		}
 		hash, err := Hash(code, p.options.HashParameters)
 		if err != nil {

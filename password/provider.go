@@ -68,7 +68,7 @@ func newProvider(options Options) (*Provider, error) {
 	}
 	return &Provider{
 		options:            options,
-		backupCodeAlphabet: []rune(options.TOTP.BackupCodeAlphabet),
+		backupCodeAlphabet: distinctRunes(options.TOTP.BackupCodeAlphabet),
 		dummyHash:          dummyHash,
 		now:                time.Now,
 	}, nil

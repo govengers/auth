@@ -66,6 +66,14 @@ func TestNewRefusesInvalidOptions(t *testing.T) {
 		{name: "alphabet of one character", options: enabledTOTP(func(options *TOTPOptions) { options.BackupCodeAlphabet = "aaaa" })},
 		{name: "alphabet that collapses to one character", options: enabledTOTP(func(options *TOTPOptions) { options.BackupCodeAlphabet = "Aa" })},
 		{name: "alphabet with a space", options: enabledTOTP(func(options *TOTPOptions) { options.BackupCodeAlphabet = "ab c" })},
+		{name: "backup codes longer than a hash accepts", options: enabledTOTP(func(options *TOTPOptions) { options.BackupCodeLength = 129 })},
+		{name: "multibyte backup codes longer than a hash accepts", options: enabledTOTP(func(options *TOTPOptions) {
+			options.BackupCodeAlphabet = "äöü"
+			options.BackupCodeLength = 65
+		})},
+		{name: "backup codes of one character", options: enabledTOTP(func(options *TOTPOptions) { options.BackupCodeLength = 1 })},
+		{name: "fewer than a million backup codes", options: enabledTOTP(func(options *TOTPOptions) { options.BackupCodeLength = 5 })},
+		{name: "more than 20 backup codes", options: enabledTOTP(func(options *TOTPOptions) { options.BackupCodeCount = 21 })},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -91,6 +99,28 @@ func TestResolveOptionsAppliesDefaults(t *testing.T) {
 		Enabled: true, Issuer: "Example", Period: 30, Digits: 6, Skew: 1, MaximumAttempts: 5, PendingTTL: 5 * time.Minute,
 		BackupCodeCount: 10, BackupCodeLength: 10, BackupCodeAlphabet: "abcdef",
 	}, resolved.TOTP)
+}
+
+func TestNewAcceptsTheSmallestBackupCodes(t *testing.T) {
+	testCases := []struct {
+		name         string
+		alphabet     string
+		length       int
+		wantAlphabet string
+	}{
+		{name: "a million codes of 6 digits", alphabet: "0123456789", length: 6, wantAlphabet: "0123456789"},
+		{name: "128 bytes of multibyte characters", alphabet: "äöü", length: 64, wantAlphabet: "äöü"},
+		{name: "repeated characters count once", alphabet: "aAb", length: 20, wantAlphabet: "ab"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			provider, err := New(&Options{Sessions: testSessions(t), Storage: NewMemoryStorage(), TOTP: TOTPOptions{
+				Enabled: true, Issuer: "Example", BackupCodeAlphabet: testCase.alphabet, BackupCodeLength: testCase.length,
+			}})
+			require.NoError(t, err)
+			require.Equal(t, testCase.wantAlphabet, string(provider.backupCodeAlphabet))
+		})
+	}
 }
 
 func TestNewKeepsItsOwnCopy(t *testing.T) {

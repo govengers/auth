@@ -448,6 +448,21 @@ func TestEnableOnAFullSessionWritesNoSession(t *testing.T) {
 	require.True(t, fixture.storedUser(t, user.ID).TOTPEnabled)
 }
 
+func TestBackupCodesAreDistinct(t *testing.T) {
+	fixture := newFixture(t, totpOptions())
+	fixture.provider.backupCodeAlphabet = []rune("ab")
+	fixture.provider.options.TOTP.BackupCodeLength = 1
+	fixture.provider.options.TOTP.BackupCodeCount = 2
+
+	// Two codes over two characters collide half of the time, unless duplicates are drawn again.
+	for range 20 {
+		codes, hashes, err := fixture.provider.newBackupCodes()
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{"a", "b"}, codes)
+		require.Len(t, hashes, 2)
+	}
+}
+
 func TestBackupCodesUseTheConfiguredAlphabet(t *testing.T) {
 	options := totpOptions()
 	options.TOTP.BackupCodeAlphabet = "ABCDEFGH"
