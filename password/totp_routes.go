@@ -193,7 +193,7 @@ func (p *Provider) enableTOTP(writer http.ResponseWriter, request *http.Request)
 
 // setupSecret returns the secret of the session's pending TOTP setup; none is totp_setup_missing. It stays for a
 // retry after a mistyped code (the client holds the secret anyway): the session that enabling a pending enrollment
-// starts drops it, in a full session it expires.
+// starts drops it, in a full session disable drops it or it expires.
 func setupSecret(ctx context.Context, current session.Session) (string, error) {
 	encoded, found, err := current.Get(ctx, totpSetupKey)
 	if err != nil {
@@ -243,7 +243,8 @@ func (p *Provider) setTOTP(ctx context.Context, id uuid.UUID, secret string, has
 	return nil
 }
 
-// disableTOTP turns TOTP off for the user of a full session after confirming the password.
+// disableTOTP turns TOTP off for the user of a full session after confirming the password and drops a pending
+// setup.
 func (p *Provider) disableTOTP(writer http.ResponseWriter, request *http.Request) reply {
 	ctx := request.Context()
 	var body disableRequest
@@ -263,7 +264,12 @@ func (p *Provider) disableTOTP(writer http.ResponseWriter, request *http.Request
 	if err := p.options.Storage.ClearTOTP(ctx, account.user.ID); err != nil {
 		return refused(fmt.Errorf("disable TOTP of user %s: %w", account.user.ID, err))
 	}
-	return succeeded(http.StatusNoContent, nil, account.identity)
+	// A setup still in the session would let enable re-arm its old secret without a new setup.
+	_, _, popError := account.session.Pop(ctx, totpSetupKey)
+	if popError != nil {
+		popError = fmt.Errorf("drop TOTP setup of user %s: %w", account.user.ID, popError)
+	}
+	return succeeded(http.StatusNoContent, nil, account.identity).degradedBy(popError)
 }
 
 // confirmPassword refuses a password that is not the user's. It does not upgrade a legacy hash; login does.

@@ -501,6 +501,25 @@ func TestTOTPManagement(t *testing.T) {
 	require.Equal(t, auth.Outcome{Provider: "password", Action: auth.ActionTOTPDisable, Result: auth.ResultSuccess, Identity: after}, fixture.outcomes.last(t))
 	require.False(t, fixture.storedUser(t, user.ID).TOTPEnabled)
 	requireRefusal(t, browser.post(disablePath, map[string]any{"password": testPassword}), http.StatusConflict, "totp_not_enabled")
+	requireRefusal(t, browser.post(enablePath, map[string]any{"code": fixture.code(t, secret, 30*time.Second), "password": testPassword}), http.StatusBadRequest, "totp_setup_missing")
+}
+
+func TestDisableReportsAFailedSetupDrop(t *testing.T) {
+	fixture := newFixture(t, totpOptions())
+	user := fixture.createUser(t, "ada", "")
+	browser := loggedInClient(t, fixture)
+	enroll(t, fixture, browser)
+	fixture.failSessions(t, "Pop")
+	fixture.outcomes.take()
+
+	recorder := browser.post(disablePath, map[string]any{"password": testPassword})
+
+	require.Equal(t, http.StatusNoContent, recorder.Code)
+	require.False(t, fixture.storedUser(t, user.ID).TOTPEnabled)
+	outcome := fixture.outcomes.last(t)
+	require.Equal(t, auth.ResultSuccess, outcome.Result)
+	require.ErrorIs(t, outcome.Err, errStorageDown)
+	require.ErrorContains(t, outcome.Err, "drop TOTP setup of user")
 }
 
 func TestEnableWithoutBackupCodes(t *testing.T) {
