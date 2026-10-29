@@ -349,7 +349,7 @@ func (c *Client) getJSON(ctx context.Context, accessToken, endpoint string, targ
 		return fmt.Errorf("admin API %s answered HTTP %d", request.URL.Path, response.StatusCode) // the reason phrase is the server's free text
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maximumResponseBytes)).Decode(target); err != nil {
-		return fmt.Errorf("decode admin API answer of %s: %w", request.URL.Path, err)
+		return dependency.Error("decode admin API answer of "+request.URL.Path, err)
 	}
 	return nil
 }

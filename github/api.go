@@ -167,7 +167,7 @@ func (p *Provider) getJSON(ctx context.Context, client *http.Client, path string
 		return fmt.Errorf("github: GET %s answered %d", path, response.StatusCode)
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maximumResponseBytes)).Decode(target); err != nil {
-		return fmt.Errorf("github: decode %s: %w", path, err)
+		return dependency.Error("github: decode "+path, err)
 	}
 	return nil
 }
