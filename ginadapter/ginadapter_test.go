@@ -339,6 +339,49 @@ func authenticateOptionally(identity *auth.Identity) func(http.Handler) http.Han
 	}
 }
 
+func TestRequireMethodPermission(t *testing.T) {
+	withPermission := func(permission auth.Permission) *auth.Identity {
+		return &auth.Identity{Provider: "apikey", Subject: "ci", Active: true, Permissions: []auth.Permission{permission}}
+	}
+	reader := withPermission(auth.Permission{Resource: "builds", Access: auth.AccessRead})
+	writer := withPermission(auth.Permission{Resource: "*", Access: auth.AccessWrite})
+
+	testCases := []struct {
+		name       string
+		method     string
+		identity   *auth.Identity
+		wantStatus int
+		wantReason any
+	}{
+		{name: "GET with read passes", method: http.MethodGet, identity: reader, wantStatus: http.StatusOK},
+		{name: "HEAD with read passes", method: http.MethodHead, identity: reader, wantStatus: http.StatusOK},
+		{name: "OPTIONS with read passes", method: http.MethodOptions, identity: reader, wantStatus: http.StatusOK},
+		{name: "POST with read is 403", method: http.MethodPost, identity: reader, wantStatus: http.StatusForbidden, wantReason: "missing permission builds:write"},
+		{name: "DELETE with read is 403", method: http.MethodDelete, identity: reader, wantStatus: http.StatusForbidden, wantReason: "missing permission builds:write"},
+		{name: "POST with wildcard write passes", method: http.MethodPost, identity: writer, wantStatus: http.StatusOK},
+		{name: "GET with wildcard write passes", method: http.MethodGet, identity: writer, wantStatus: http.StatusOK},
+		{name: "no identity is 401", method: http.MethodGet, wantStatus: http.StatusUnauthorized, wantReason: "no identity"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			engine, emitted := newEngine(t)
+			engine.Any("/builds", ginadapter.Middleware(authenticateOptionally(testCase.identity)), ginadapter.RequireMethodPermission("builds"), func(ginContext *gin.Context) {
+				ginContext.Status(http.StatusOK)
+			})
+
+			recorder := serve(t, engine, testCase.method, "/builds")
+
+			require.Equal(t, testCase.wantStatus, recorder.Code)
+			if testCase.wantReason == nil {
+				require.NotContains(t, *emitted, "authorization")
+				return
+			}
+			require.Equal(t, map[string]any{"denied": true, "reason": testCase.wantReason}, (*emitted)["authorization"])
+			require.Equal(t, "failure", (*emitted)["outcome"])
+		})
+	}
+}
+
 func TestRequireWithoutWideEvent(t *testing.T) {
 	engine := gin.New()
 	engine.GET("/admin", ginadapter.Require(authorization.IsAdmin()))
