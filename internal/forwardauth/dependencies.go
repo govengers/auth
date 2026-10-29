@@ -26,6 +26,10 @@ const (
 // of the provider and Keycloak, in forwardauth_dependency_request_duration_seconds and, during a request,
 // summed per dependency on its wide event [LOG-004, LOG-006, MET-006]. Calls outside a request (discovery
 // at boot, JWKS refreshes) reach only the metric. It is safe for concurrent use.
+//
+// There is no OpenTelemetry tracing [OBS-001]: a check is one hop from Traefik with at most a Redis call
+// and a provider call behind it, which the wide event already sums per dependency; the binary has no
+// trace backend or trace context to join. Add otelhttp and redisotel here when a deployment traces.
 type Dependencies struct {
 	durations *prometheus.HistogramVec
 }

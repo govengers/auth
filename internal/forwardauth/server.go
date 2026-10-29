@@ -98,10 +98,15 @@ func NewServer(options *ServerOptions) (*Server, error) {
 	server.engine = server.newEngine(metrics)
 	errorLog := slog.NewLogLogger(resolved.Logger.Handler(), slog.LevelError)
 	server.httpServer = newHTTPServer(resolved.Port, server.engine, errorLog)
-	metricsRoutes := http.NewServeMux()
-	metricsRoutes.Handle("GET /metrics", promhttp.HandlerFor(resolved.MetricsRegistry, promhttp.HandlerOpts{Registry: resolved.MetricsRegistry}))
-	server.metricsServer = newHTTPServer(resolved.MetricsPort, metricsRoutes, errorLog)
+	server.metricsServer = newMetricsServer(resolved.MetricsPort, resolved.MetricsRegistry, errorLog)
 	return server, nil
+}
+
+// newMetricsServer serves only GET /metrics of registry.
+func newMetricsServer(port int, registry *prometheus.Registry, errorLog *log.Logger) *http.Server {
+	routes := http.NewServeMux()
+	routes.Handle("GET /metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{Registry: registry}))
+	return newHTTPServer(port, routes, errorLog)
 }
 
 // newHTTPServer bounds every phase of a connection, so slow or idle clients cannot hold it [LAY-006, MET-001].
@@ -186,7 +191,7 @@ func (s *Server) newEngine(metrics *httpMetrics) *gin.Engine {
 			wideevent.WithEmitter(latestValues(s.options.Emitter)),
 			wideevent.WithSampler(sampler(s.options.SampleRate)),
 			wideevent.WithPreEnricher(s.recordRequest),
-			wideevent.WithSkipPaths(s.path("/health"), s.path("/ready")),
+			wideevent.WithSkipPaths(s.path("/health")),
 		),
 		metrics.middleware,
 		recordDependencies,
@@ -253,22 +258,34 @@ func forward(ginContext *gin.Context) {
 	ginContext.Status(http.StatusOK)
 }
 
-// readiness answers 503 while the server shuts down or when the readiness check (Redis) fails.
+// readiness answers 503 while the server shuts down or when the readiness check (Redis) fails; the
+// check's error is recorded on the wide event, which the sampler keeps as a 5xx [LOG-002].
 func (s *Server) readiness(ginContext *gin.Context) {
-	if !s.ready.Load() || s.readinessCheckFails(ginContext.Request.Context()) {
-		httpjson.Write(ginContext.Writer, http.StatusServiceUnavailable, auth.ErrorResponse{Code: "unavailable", Message: "not ready"})
+	if !s.ready.Load() {
+		notReady(ginContext)
+		return
+	}
+	if err := s.checkReadiness(ginContext.Request.Context()); err != nil {
+		if we := wideevent.FromGin(ginContext); we != nil {
+			we.Failure(fmt.Errorf("readiness check: %w", err))
+		}
+		notReady(ginContext)
 		return
 	}
 	httpjson.Write(ginContext.Writer, http.StatusOK, statusResponse{Status: "ok"})
 }
 
-func (s *Server) readinessCheckFails(ctx context.Context) bool {
+func notReady(ginContext *gin.Context) {
+	httpjson.Write(ginContext.Writer, http.StatusServiceUnavailable, auth.ErrorResponse{Code: "unavailable", Message: "not ready"})
+}
+
+func (s *Server) checkReadiness(ctx context.Context) error {
 	if s.options.ReadinessCheck == nil {
-		return false
+		return nil
 	}
 	checkContext, cancel := context.WithTimeout(ctx, readinessCheckTimeout)
 	defer cancel()
-	return s.options.ReadinessCheck(checkContext) != nil
+	return s.options.ReadinessCheck(checkContext)
 }
 
 func (s *Server) path(route string) string {

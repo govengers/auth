@@ -11,6 +11,7 @@ import (
 
 	wideevent "github.com/mxcd/go-wide-event-logger"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	"github.com/govengers/auth"
@@ -118,6 +119,9 @@ func TestHTTPCallsOfARequestAreSummedOnItsEvent(t *testing.T) {
 	require.NotContains(t, github["error"], "alice", "no URL in the recorded error")
 	require.Equal(t, uint64(2), dependencyCount(t, registry, "github", http.MethodGet, "success"), "/ok and the call outside a request")
 	require.Equal(t, uint64(2), dependencyCount(t, registry, "github", http.MethodGet, "failure"))
+	problems, err := testutil.GatherAndLint(registry)
+	require.NoError(t, err)
+	require.Empty(t, problems, "the dependency histogram follows the Prometheus conventions [MET-007]")
 }
 
 // rawServer reads one request per connection, answers it with answer and closes the connection.

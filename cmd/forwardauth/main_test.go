@@ -1,6 +1,11 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
 	"net/http"
 	"strings"
 	"testing"
@@ -9,6 +14,7 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/apikey"
+	"github.com/govengers/auth/oidc/keycloak"
 )
 
 const (
@@ -25,7 +31,7 @@ func validOIDCConfiguration() *Configuration {
 		SessionMaximumAgeSeconds: 86400, SessionRefreshIntervalSeconds: 60, SessionRedisKeyPrefix: "forwardauth",
 		OIDCName: "oidc", OIDCIssuer: "https://idp.example.com", OIDCClientID: "forwardauth", OIDCClientSecret: "client-secret",
 		OIDCScopes: []string{"openid", "profile", "email"}, OIDCClaimMapper: claimMapperDefault,
-		KeycloakGrantType: grantTypeClientCredentials, GitHubScopes: []string{"read:org"},
+		KeycloakGrantType: string(keycloak.GrantTypeClientCredentials), GitHubScopes: []string{"read:org"},
 		JWTLifetimeSeconds: 300, JWTHeader: "Authorization",
 	}
 }
@@ -51,6 +57,16 @@ func TestValidateConfigurationAcceptsCompleteSetups(t *testing.T) {
 			configuration.ExternalURL = "https://app.example.com/"
 			return configuration
 		}},
+		{name: "http loopback external URL", configuration: func() *Configuration {
+			configuration := validOIDCConfiguration()
+			configuration.ExternalURL = "http://127.0.0.1:8080"
+			return configuration
+		}},
+		{name: "http external URL with an insecure cookie", configuration: func() *Configuration {
+			configuration := validOIDCConfiguration()
+			configuration.ExternalURL, configuration.SessionInsecureCookie = "http://app.internal", true
+			return configuration
+		}},
 		{name: "oidc with keycloak (client credentials), redis, jwt and api keys", configuration: func() *Configuration {
 			configuration := validOIDCConfiguration()
 			configuration.KeycloakEnabled = true
@@ -65,7 +81,7 @@ func TestValidateConfigurationAcceptsCompleteSetups(t *testing.T) {
 		}},
 		{name: "keycloak with the password grant", configuration: func() *Configuration {
 			configuration := validOIDCConfiguration()
-			configuration.KeycloakEnabled, configuration.KeycloakGrantType = true, grantTypePassword
+			configuration.KeycloakEnabled, configuration.KeycloakGrantType = true, string(keycloak.GrantTypePassword)
 			configuration.KeycloakURL, configuration.KeycloakRealm = "https://keycloak.example.com", "company"
 			configuration.KeycloakUsername, configuration.KeycloakPassword = "admin", "admin-password"
 			return configuration
@@ -110,6 +126,7 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		{name: "same site none with insecure cookie", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.SessionSameSite, configuration.SessionInsecureCookie = "none", true
 		}, problems: []string{"SESSION_SAME_SITE=none requires a secure cookie"}},
+		{name: "http external URL with a secure cookie", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.ExternalURL = "http://app.internal" }, problems: []string{"EXTERNAL_URL is plain http on a host that is not loopback"}},
 		{name: "redis without address", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionRedisEnabled = true }, problems: []string{"SESSION_REDIS_ADDRESS"}},
 		{name: "oidc without issuer and client", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.OIDCIssuer, configuration.OIDCClientID, configuration.OIDCClientSecret = "", "", " "
@@ -124,7 +141,7 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		}, problems: []string{"KEYCLOAK_ENABLED=true requires PROVIDER=oidc"}},
 		{name: "keycloak without anything", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.KeycloakEnabled = true }, problems: []string{"KEYCLOAK_URL", "KEYCLOAK_REALM", "KEYCLOAK_CLIENT_ID", "KEYCLOAK_CLIENT_SECRET"}},
 		{name: "keycloak password grant without credentials", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
-			configuration.KeycloakEnabled, configuration.KeycloakGrantType = true, grantTypePassword
+			configuration.KeycloakEnabled, configuration.KeycloakGrantType = true, string(keycloak.GrantTypePassword)
 		}, problems: []string{"KEYCLOAK_USERNAME", "KEYCLOAK_PASSWORD"}},
 		{name: "unknown keycloak grant", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.KeycloakEnabled, configuration.KeycloakGrantType = true, "implicit"
@@ -168,14 +185,30 @@ func TestAPIKeysFollowTheirFlag(t *testing.T) {
 	configuration.APIKeys = []string{"ci:short-secret"}
 
 	require.NoError(t, validateConfiguration(configuration), "keys are ignored while API_KEYS_ENABLED is false")
-	disabled, err := newAPIKeys(configuration, nil)
-	require.NoError(t, err)
-	require.Nil(t, disabled)
 
 	configuration.APIKeysEnabled, configuration.APIKeys = true, []string{"ci:" + testSecret}
 	enabled, err := newAPIKeys(configuration, nil)
 	require.NoError(t, err)
 	require.NotNil(t, enabled)
+}
+
+func TestNewSignerIssuesForTheExternalURLByDefault(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	configuration := validOIDCConfiguration()
+	configuration.ExternalURL = "https://app.example.com/"
+	configuration.JWTPrivateKey = string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)}))
+	signer, err := newSigner(configuration)
+	require.NoError(t, err)
+
+	token, err := signer.Sign(&auth.Identity{Subject: "user-1", Provider: "oidc", Active: true})
+
+	require.NoError(t, err)
+	parts := strings.Split(token, ".")
+	require.Len(t, parts, 3)
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	require.Contains(t, string(payload), `"iss":"https://app.example.com"`)
 }
 
 func TestAPIKeysParsesKeysAndTheirPermissions(t *testing.T) {

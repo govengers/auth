@@ -39,7 +39,8 @@ test-e2e:
     #!/usr/bin/env bash
     set -euo pipefail
     compose="docker compose -f test/e2e/compose/compose.yml"
-    free_port() { local port; while port=$((20000 + RANDOM % 20000)); (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; do :; done; echo "$port"; }
+    # below 32768, the start of every common ephemeral range, so no client socket of the run holds the port
+    free_port() { local port; while port=$((20000 + RANDOM % 12768)); (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; do :; done; echo "$port"; }
     export E2E_APP_PORT="$(free_port)" E2E_ISSUER_PORT="$(free_port)"
     while [ "$E2E_ISSUER_PORT" = "$E2E_APP_PORT" ]; do E2E_ISSUER_PORT="$(free_port)"; done
     export JWT_PRIVATE_KEY="$(openssl genrsa 2048 2>/dev/null)"
