@@ -69,7 +69,7 @@ func (p *Provider) login(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
 	state, err := oauthlogin.Begin(ctx, p.options.Sessions, writer, request, loginKey)
 	if err != nil {
-		p.refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogin, Err: err})
+		p.refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogin, Err: fmt.Errorf("github: begin login: %w", err)})
 		return
 	}
 	redirect.To(writer, p.oauth.AuthCodeURL(state.State, oauth2.S256ChallengeOption(state.Verifier)))

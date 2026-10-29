@@ -52,6 +52,7 @@ func TestLoginFailsWhenTheSessionCannotBeStored(t *testing.T) {
 	outcome := environment.outcomes.last(t)
 	require.Equal(t, auth.ResultError, outcome.Result)
 	require.ErrorIs(t, outcome.Err, errBackendDown)
+	require.ErrorContains(t, outcome.Err, "github: begin login: ")
 }
 
 func TestCallbackStartsTheSession(t *testing.T) {
