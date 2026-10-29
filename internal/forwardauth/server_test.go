@@ -476,6 +476,17 @@ func TestTheMetricsListenerServesOnlyGETMetrics(t *testing.T) {
 	require.Equal(t, http.StatusMethodNotAllowed, serveMetrics(http.MethodPost, "/metrics").Code)
 }
 
+func TestBothListenersBoundEveryPhaseOfAConnection(t *testing.T) {
+	testHarness := newHarness(t, harnessOptions{})
+
+	for _, server := range []*http.Server{testHarness.server.httpServer, testHarness.server.metricsServer} {
+		require.Positive(t, server.ReadHeaderTimeout, server.Addr)
+		require.Positive(t, server.ReadTimeout, server.Addr)
+		require.Positive(t, server.WriteTimeout, server.Addr)
+		require.Positive(t, server.IdleTimeout, server.Addr)
+	}
+}
+
 func TestNetHTTPErrorLinesOfBothListenersAreJSONThroughTheLogger(t *testing.T) {
 	testHarness := newHarness(t, harnessOptions{})
 

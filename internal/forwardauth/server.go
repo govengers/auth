@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -94,24 +95,24 @@ func NewServer(options *ServerOptions) (*Server, error) {
 	server.ready.Store(true)
 	server.engine = server.newEngine(metrics)
 	errorLog := slog.NewLogLogger(resolved.Logger.Handler(), slog.LevelError)
-	server.httpServer = &http.Server{
-		Addr:              ":" + strconv.Itoa(resolved.Port),
-		Handler:           server.engine,
+	server.httpServer = newHTTPServer(resolved.Port, server.engine, errorLog)
+	metricsRoutes := http.NewServeMux()
+	metricsRoutes.Handle("GET /metrics", promhttp.HandlerFor(resolved.MetricsRegistry, promhttp.HandlerOpts{Registry: resolved.MetricsRegistry}))
+	server.metricsServer = newHTTPServer(resolved.MetricsPort, metricsRoutes, errorLog)
+	return server, nil
+}
+
+// newHTTPServer bounds every phase of a connection, so slow or idle clients cannot hold it [LAY-006, MET-001].
+func newHTTPServer(port int, handler http.Handler, errorLog *log.Logger) *http.Server {
+	return &http.Server{
+		Addr:              ":" + strconv.Itoa(port),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		ErrorLog:          errorLog,
 	}
-	metricsRoutes := http.NewServeMux()
-	metricsRoutes.Handle("GET /metrics", promhttp.HandlerFor(resolved.MetricsRegistry, promhttp.HandlerOpts{Registry: resolved.MetricsRegistry}))
-	server.metricsServer = &http.Server{
-		Addr:              ":" + strconv.Itoa(resolved.MetricsPort),
-		Handler:           metricsRoutes,
-		ReadHeaderTimeout: 5 * time.Second,
-		ErrorLog:          errorLog,
-	}
-	return server, nil
 }
 
 func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
