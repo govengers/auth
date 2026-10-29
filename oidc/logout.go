@@ -74,14 +74,28 @@ func (p *Provider) isFrontChannelLogout(request *http.Request) bool {
 func (p *Provider) checkFrontChannelRequest(query url.Values, identity *auth.Identity) error {
 	issuer, sessionID := query.Get("iss"), query.Get("sid")
 	switch {
-	case query.Has("iss") != query.Has("sid") || (query.Has("iss") && (issuer == "" || sessionID == "")):
+	case !sentTogether(query):
 		return frontChannelInvalid("iss and sid must be sent together")
-	case query.Has("iss") && issuer != p.options.Issuer:
+	case issuer != "" && issuer != p.options.Issuer:
 		return frontChannelInvalid("unexpected issuer")
-	case sessionID != "" && identity != nil && p.owns(identity) && sessionID != stringClaim(identity.Real().Claims, "sid"):
+	case sessionID != "" && p.ownsDifferentSession(identity, sessionID):
 		return frontChannelInvalid("sid does not match the session")
 	}
 	return nil
+}
+
+// sentTogether reports whether iss and sid are both absent or both non-empty.
+func sentTogether(query url.Values) bool {
+	if !query.Has("iss") && !query.Has("sid") {
+		return true
+	}
+	return query.Get("iss") != "" && query.Get("sid") != ""
+}
+
+// ownsDifferentSession reports whether identity logged in here, with an IdP session (sid claim) other than
+// sessionID.
+func (p *Provider) ownsDifferentSession(identity *auth.Identity, sessionID string) bool {
+	return identity != nil && p.owns(identity) && stringClaim(identity.Real().Claims, "sid") != sessionID
 }
 
 func frontChannelInvalid(reason string) error {
