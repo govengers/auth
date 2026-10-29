@@ -41,6 +41,10 @@ const (
 // characters gin would read as a parameter or wildcard.
 var pathPattern = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
 
+// errNoRoute is the failure of a request no route matches: recorded, so the sampler keeps path scans and
+// a wrong Traefik address [LOG-002, LOG-011].
+var errNoRoute = errors.New("no route")
+
 // headerNamePattern is an RFC 9110 field name (a token); net/http silently drops a header with any other name.
 var headerNamePattern = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 
@@ -261,6 +265,9 @@ func health(ginContext *gin.Context) {
 }
 
 func routeNotFound(ginContext *gin.Context) {
+	if we := wideevent.FromGin(ginContext); we != nil {
+		we.Failure(errNoRoute)
+	}
 	httpjson.Write(ginContext.Writer, http.StatusNotFound, auth.ErrorResponse{Code: "not_found", Message: "not found"})
 }
 

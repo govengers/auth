@@ -272,6 +272,18 @@ func TestMetricsLabelRouteTemplatesUnmatchedPathsAndUnknownMethods(t *testing.T)
 	require.Empty(t, problems)
 }
 
+func TestAnUnmatchedRequestIsRecordedAsAFailureAndKeptBySampling(t *testing.T) {
+	testHarness := newHarness(t, harnessOptions{sampleRate: 1000})
+
+	response := testHarness.serve(t, http.MethodGet, "/nothing/here", nil)
+
+	require.Equal(t, http.StatusNotFound, response.Code)
+	require.Equal(t, 1, testHarness.events.count(), "failures are always kept")
+	event := testHarness.events.last(t)
+	require.Equal(t, "failure", event["outcome"])
+	require.Equal(t, "no route", event["error"])
+}
+
 // requestCount returns the forwardauth_http_requests_total sample with exactly labels, or fails.
 func requestCount(t *testing.T, registry *prometheus.Registry, labels map[string]string) float64 {
 	t.Helper()
