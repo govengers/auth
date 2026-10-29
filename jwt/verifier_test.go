@@ -675,6 +675,9 @@ func TestMiddleware(t *testing.T) {
 		{name: "empty bearer", header: http.Header{"Authorization": {"Bearer "}}, wantStatus: http.StatusUnauthorized, wantBody: `{"code":"unauthenticated","message":"authentication required"}`, wantResult: auth.ResultDenied},
 		{name: "invalid token", header: http.Header{"Authorization": {"Bearer " + token + "x"}}, wantStatus: http.StatusUnauthorized, wantBody: `{"code":"invalid_token","message":"authentication required"}`, wantResult: auth.ResultDenied},
 		{name: "valid token", header: http.Header{"Authorization": {"bearer " + token}}, wantStatus: http.StatusOK, wantBody: "42", wantResult: auth.ResultSuccess},
+		{name: "two spaces after the scheme", header: http.Header{"Authorization": {"Bearer  " + token}}, wantStatus: http.StatusOK, wantBody: "42", wantResult: auth.ResultSuccess},
+		{name: "space after the token", header: http.Header{"Authorization": {"Bearer " + token + " "}}, wantStatus: http.StatusOK, wantBody: "42", wantResult: auth.ResultSuccess},
+		{name: "only spaces after the scheme", header: http.Header{"Authorization": {"Bearer   "}}, wantStatus: http.StatusUnauthorized, wantBody: `{"code":"unauthenticated","message":"authentication required"}`, wantResult: auth.ResultDenied},
 		{name: "valid token in another header", headerName: "X-Auth-Token", header: http.Header{"X-Auth-Token": {"Bearer " + token}}, wantStatus: http.StatusOK, wantBody: "42", wantResult: auth.ResultSuccess},
 		{name: "token in the default header while another is configured", headerName: "X-Auth-Token", header: http.Header{"Authorization": {"Bearer " + token}}, wantStatus: http.StatusUnauthorized, wantBody: `{"code":"unauthenticated","message":"authentication required"}`, wantResult: auth.ResultDenied},
 	}

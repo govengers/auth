@@ -352,8 +352,11 @@ func (v *Verifier) authenticate(ctx context.Context, headerValue string) (identi
 	return v.verify(ctx, token)
 }
 
+// bearerToken returns the token of a "Bearer <token>" header value; the scheme matches case-insensitively
+// and spaces around the token are allowed (RFC 9110 section 11.4: 1*SP).
 func bearerToken(headerValue string) (string, bool) {
 	scheme, token, found := strings.Cut(headerValue, " ")
+	token = strings.TrimSpace(token)
 	if !found || !strings.EqualFold(scheme, "Bearer") || token == "" {
 		return "", false
 	}
