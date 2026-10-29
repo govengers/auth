@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -30,7 +31,7 @@ func startIssuer(t *testing.T) *fakeprovider.OIDCServer {
 }
 
 func noRedirects() *http.Client {
-	return &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
 // hop is one response of the issuer, read and closed, as a browser sees it before following it.
@@ -46,7 +47,7 @@ func get(t *testing.T, target string) hop {
 	require.NoError(t, err)
 	response, err := noRedirects().Do(request)
 	require.NoError(t, err)
-	defer func() { _ = response.Body.Close() }()
+	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
 	body, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 	return hop{status: response.StatusCode, location: response.Header.Get("Location"), body: body}
@@ -82,9 +83,9 @@ func exchange(t *testing.T, issuer *fakeprovider.OIDCServer, code, verifier stri
 	require.NoError(t, err)
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.SetBasicAuth("client", "secret")
-	response, err := http.DefaultClient.Do(request)
+	response, err := noRedirects().Do(request)
 	require.NoError(t, err)
-	defer func() { _ = response.Body.Close() }()
+	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
 	var body map[string]any
 	require.NoError(t, json.NewDecoder(response.Body).Decode(&body))
 	return response.StatusCode, body

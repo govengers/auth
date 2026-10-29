@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -149,7 +150,9 @@ func TestCallbackRefusals(t *testing.T) {
 func TestCallbackFailsWhenTheIssuerIsUnreachable(t *testing.T) {
 	issuer := startIssuer(t, nil)
 	transport := &failingTransport{failPath: "/token"}
-	app := newApp(t, issuer, func(options *oidc.Options) { options.HTTPClient = &http.Client{Transport: transport} })
+	app := newApp(t, issuer, func(options *oidc.Options) {
+		options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
+	})
 
 	response := newBrowser(t).signIn(app, prefix+"/login")
 

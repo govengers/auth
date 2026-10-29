@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -159,7 +160,7 @@ func (b *browser) issuer(target string) string {
 	b.t.Helper()
 	request, err := http.NewRequestWithContext(b.t.Context(), http.MethodGet, target, nil)
 	require.NoError(b.t, err)
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)
 	require.NoError(b.t, err)
 	defer func() { _ = response.Body.Close() }() // only the status and Location are read
