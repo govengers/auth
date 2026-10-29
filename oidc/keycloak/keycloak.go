@@ -62,8 +62,8 @@ type Options struct {
 }
 
 // Client reads users' authorization from the Keycloak Admin API. It caches its access token until 30 s
-// before expiry and the client UUID of ClientRolesClientID after the first successful lookup. It is safe
-// for concurrent use.
+// before expiry, or until the Admin API answers 401 to it (then the next call requests a new one), and the
+// client UUID of ClientRolesClientID after the first successful lookup. It is safe for concurrent use.
 type Client struct {
 	options      Options
 	requestToken func(ctx context.Context) (*oauth2.Token, error)
