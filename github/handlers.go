@@ -73,7 +73,8 @@ func (p *Provider) sessionMembership(ctx context.Context, current session.Sessio
 	return userMembership, nil
 }
 
-// login starts a fresh session holding state, nonce and PKCE verifier and redirects to GitHub.
+// login stores state, nonce and PKCE verifier in the session (oauthlogin.Begin keeps one holding a live
+// identity, else starts a new one) and redirects to GitHub.
 func (p *Provider) login(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
 	state, err := oauthlogin.Begin(ctx, p.options.Sessions, writer, request, loginKey)
