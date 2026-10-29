@@ -12,6 +12,7 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/failure"
+	"github.com/govengers/auth/internal/hook"
 	"github.com/govengers/auth/internal/httpjson"
 	"github.com/govengers/auth/internal/impersonation"
 	"github.com/govengers/auth/internal/oauthlogin"
@@ -106,7 +107,7 @@ func (p *Provider) completeLogin(ctx context.Context, request *http.Request) (co
 	if err != nil {
 		return completedLogin{identity: identity}, err
 	}
-	mapped, err := p.runOnLogin(ctx, identity)
+	mapped, err := hook.RunOnLogin(ctx, p.options.OnLogin, identity)
 	if err != nil {
 		return completedLogin{identity: identity}, err
 	}
@@ -130,20 +131,6 @@ func (p *Provider) identityOf(ctx context.Context, client *http.Client) (*auth.I
 		return identity, notAllowed()
 	}
 	return identity, nil
-}
-
-func (p *Provider) runOnLogin(ctx context.Context, identity *auth.Identity) (*auth.Identity, error) {
-	if p.options.OnLogin == nil {
-		return identity, nil
-	}
-	mapped, err := p.options.OnLogin(ctx, identity)
-	if err != nil {
-		return nil, fmt.Errorf("github: OnLogin: %w", err)
-	}
-	if mapped == nil {
-		return nil, errors.New("github: OnLogin returned no identity")
-	}
-	return mapped, nil
 }
 
 // startSession rotates the session (Store.Start revokes the login session) and stores token and identity.

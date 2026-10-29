@@ -14,6 +14,7 @@ import (
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/internal/failure"
+	"github.com/govengers/auth/internal/hook"
 	"github.com/govengers/auth/internal/oauthlogin"
 	"github.com/govengers/auth/internal/redirect"
 )
@@ -54,7 +55,7 @@ func (p *Provider) handleCallback(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	authenticated := p.newIdentity(login)
-	identity, err := p.runOnLogin(ctx, authenticated)
+	identity, err := hook.RunOnLogin(ctx, p.options.OnLogin, authenticated)
 	if err != nil {
 		p.refuseCallback(writer, request, err, authenticated)
 		return
@@ -151,21 +152,6 @@ func (p *Provider) newIdentity(login verifiedLogin) *auth.Identity {
 		Groups:          firstNonEmpty(groups(login.accessClaims), groups(login.identityClaims)),
 		Claims:          login.identityClaims,
 	}
-}
-
-// runOnLogin returns the identity OnLogin made of identity. Its refusals keep their kind (status).
-func (p *Provider) runOnLogin(ctx context.Context, identity *auth.Identity) (*auth.Identity, error) {
-	if p.options.OnLogin == nil {
-		return identity, nil
-	}
-	mapped, err := p.options.OnLogin(ctx, identity)
-	if err != nil {
-		return nil, fmt.Errorf("oidc: OnLogin: %w", err)
-	}
-	if mapped == nil {
-		return nil, errors.New("oidc: OnLogin returned no identity")
-	}
-	return mapped, nil
 }
 
 // saveSession rotates the session (fixation defense) and stores the identity and the raw ID token in it.
