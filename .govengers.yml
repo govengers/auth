@@ -1,2 +1,11 @@
 profile: library
-exceptions: []
+exceptions:
+  - rule: DES-008
+    reason: >-
+      Only password kindOf (password/validation.go). The login request has one "identifier" field, the
+      wire format of design F1 and of go-basicauth, which migrating frontends keep; users type a username
+      or an email into one input. Usernames cannot contain "@" (usernamePattern), so "@" alone tells the
+      kinds apart, and kindOf parses it once into the identifierKind enum that lookup switches on. Separate
+      username/email fields or a kind field would move the same "@" test into every client and break every
+      migrated login call; looking up both kinds would cost a second storage query and a timing difference
+      between known and unknown usernames.
