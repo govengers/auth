@@ -106,7 +106,7 @@ func TestWithMembership(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			identity := &auth.Identity{Provider: providerName, Subject: "42", Roles: testCase.roles, Teams: []string{"acme/old"}, Data: map[string]any{"plan": "pro"}}
+			identity := &auth.Identity{Provider: auth.ProviderGitHub, Subject: "42", Roles: testCase.roles, Teams: []string{"acme/old"}, Data: map[string]any{"plan": "pro"}}
 			before := identity.Clone()
 			userMembership := membership{teams: []string{"acme/new"}, allowed: true, admin: testCase.admin}
 

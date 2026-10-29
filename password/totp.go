@@ -23,8 +23,8 @@ import (
 
 // Session keys of the provider's state (reserved, see session).
 const (
-	pendingKey   = providerName + ".pending"
-	totpSetupKey = providerName + ".totp_setup"
+	pendingKey   = auth.ProviderPassword + ".pending"
+	totpSetupKey = auth.ProviderPassword + ".totp_setup"
 	totpSetupTTL = 10 * time.Minute
 )
 
@@ -297,7 +297,7 @@ func (p *Provider) sessionAccount(ctx context.Context, request *http.Request) (t
 	if identity.Impersonator != nil {
 		return totpAccount{}, &auth.Error{Kind: auth.ErrForbidden, Reason: "TOTP change while impersonating"}
 	}
-	if identity.Provider != providerName {
+	if identity.Provider != auth.ProviderPassword {
 		return totpAccount{}, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "session of provider " + identity.Provider}
 	}
 	user, err := p.knownUser(ctx, identity.UserID, "session user deleted")

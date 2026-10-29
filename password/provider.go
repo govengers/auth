@@ -17,8 +17,6 @@ import (
 	"github.com/govengers/auth/session"
 )
 
-const providerName = "password"
-
 // Client codes of the refusals (stable API for frontends).
 const (
 	codeInvalidCredentials = "invalid_credentials" //nolint:gosec // G101: a client code, not a credential
@@ -68,7 +66,7 @@ func newProvider(options Options) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("password provider: dummy hash: %w", err)
 	}
-	reporter, err := failure.NewReporter(&failure.ReporterOptions{Provider: providerName, Observer: options.Observer})
+	reporter, err := failure.NewReporter(&failure.ReporterOptions{Provider: auth.ProviderPassword, Observer: options.Observer})
 	if err != nil {
 		return nil, fmt.Errorf("password provider: %w", err)
 	}
@@ -84,7 +82,7 @@ func newProvider(options Options) (*Provider, error) {
 
 // Name returns "password", the Identity.Provider of every identity this provider creates.
 func (p *Provider) Name() string {
-	return providerName
+	return auth.ProviderPassword
 }
 
 // Routes returns the provider's endpoints below PathPrefix: login and logout always, register with
@@ -214,7 +212,7 @@ func (p *Provider) admit(writer http.ResponseWriter, request *http.Request, user
 
 func identityOf(user *User) *auth.Identity {
 	return &auth.Identity{
-		Provider: providerName,
+		Provider: auth.ProviderPassword,
 		Subject:  user.ID.String(),
 		UserID:   user.ID,
 		Username: textOf(user.Username),

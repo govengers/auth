@@ -33,6 +33,16 @@ const (
 	ResultError     Result = "error"     // an internal failure was answered (500)
 )
 
+// The fixed provider names (Identity.Provider, Outcome.Provider); an OIDC provider uses its own Name,
+// which must not be one of them.
+const (
+	ProviderPassword = "password"
+	ProviderGitHub   = "github"
+	ProviderAPIKey   = "apikey"
+	ProviderJWT      = "jwt"     // a JWT verifier's outcomes; its identities keep the provider they were signed for
+	ProviderSession  = "session" // the Guard's outcomes when it finds no identity
+)
+
 // Outcome is one authentication decision. Err is the refusal for denied, the failure for error,
 // and a handled failure for a degraded success (e.g. GitHub token revocation failed, legacy hash upgrade failed).
 type Outcome struct {

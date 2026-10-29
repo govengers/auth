@@ -15,8 +15,6 @@ import (
 
 const (
 	defaultRefreshInterval = time.Minute
-	// sessionProvider is the Outcome.Provider when the Guard finds no identity.
-	sessionProvider = "session"
 )
 
 // Refresher re-validates identities of one provider. The Guard calls it for identities whose last
@@ -142,11 +140,11 @@ func (g *Guard) authenticate(writer http.ResponseWriter, request *http.Request) 
 	ctx := request.Context()
 	current, err := g.options.Store.Open(request)
 	if err != nil {
-		return nil, g.reportFailure(ctx, auth.Outcome{Provider: sessionProvider, Action: auth.ActionAuthenticate, Err: err})
+		return nil, g.reportFailure(ctx, auth.Outcome{Provider: auth.ProviderSession, Action: auth.ActionAuthenticate, Err: err})
 	}
 	stored, err := current.envelope(ctx)
 	if err != nil {
-		return nil, g.reportFailure(ctx, auth.Outcome{Provider: sessionProvider, Action: auth.ActionAuthenticate, Err: err})
+		return nil, g.reportFailure(ctx, auth.Outcome{Provider: auth.ProviderSession, Action: auth.ActionAuthenticate, Err: err})
 	}
 	identity := stored.Identity
 	if g.refreshDue(stored) {

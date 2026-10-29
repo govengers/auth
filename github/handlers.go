@@ -239,7 +239,7 @@ func (p *Provider) refreshSession(ctx context.Context, writer http.ResponseWrite
 	if err != nil {
 		return nil, fmt.Errorf("github: refresh teams: %w", err)
 	}
-	if stored.Real().Provider != providerName {
+	if stored.Real().Provider != auth.ProviderGitHub {
 		return stored, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "not a GitHub session"}
 	}
 	userMembership, err := p.sessionMembership(ctx, current)
