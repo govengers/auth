@@ -291,14 +291,21 @@ func sameMembership(a, b *auth.Identity) bool {
 		slices.Contains(a.Roles, auth.RoleAdmin) == slices.Contains(b.Roles, auth.RoleAdmin)
 }
 
-// sessionToken returns the GitHub token stored in current; none or unreadable: ErrUnauthenticated.
+// sessionToken returns the GitHub token stored in current; none or undecodable: ErrUnauthenticated. The
+// decode error is not kept: its text can quote the stored token.
 func sessionToken(ctx context.Context, current session.Session) (*oauth2.Token, error) {
 	encoded, found, err := current.Get(ctx, tokenKey)
 	if err != nil {
 		return nil, fmt.Errorf("github: read token: %w", err)
 	}
+	if !found {
+		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "session has no GitHub token"}
+	}
 	var token oauth2.Token
-	if !found || json.Unmarshal(encoded, &token) != nil || token.AccessToken == "" {
+	if err := json.Unmarshal(encoded, &token); err != nil {
+		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "session's GitHub token does not decode"}
+	}
+	if token.AccessToken == "" {
 		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "session has no GitHub token"}
 	}
 	return &token, nil
