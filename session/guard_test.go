@@ -110,6 +110,7 @@ func TestNewGuardValidation(t *testing.T) {
 		{name: "backslash login URL", options: &GuardOptions{Store: store, LoginURL: "/\\evil.example"}, wantErr: "LoginURL must be"},
 		{name: "other scheme", options: &GuardOptions{Store: store, LoginURL: "ftp://example.com/login"}, wantErr: "LoginURL must be"},
 		{name: "absolute URL without host", options: &GuardOptions{Store: store, LoginURL: "https:///login"}, wantErr: "LoginURL must be"},
+		{name: "login URL with a fragment", options: &GuardOptions{Store: store, LoginURL: "https://auth.example.com/login#/signin"}, wantErr: "without a fragment"},
 		{name: "negative refresh interval", options: &GuardOptions{Store: store, RefreshInterval: -time.Second}, wantErr: "RefreshInterval -1s is negative"},
 		{name: "nil refresher", options: &GuardOptions{Store: store, Refreshers: []Refresher{nil}}, wantErr: "every Refresher needs a name"},
 		{name: "unnamed refresher", options: &GuardOptions{Store: store, Refreshers: []Refresher{&fakeRefresher{}}}, wantErr: "every Refresher needs a name"},

@@ -32,7 +32,7 @@ type Refresher interface {
 // GuardOptions configures NewGuard.
 type GuardOptions struct {
 	Store            *Store        // required
-	LoginURL         string        // RequireUI target; absolute http(s) URL or path starting with "/"; default "/"
+	LoginURL         string        // RequireUI target; absolute http(s) URL or path starting with "/", without a fragment; default "/"
 	ReturnPathHeader string        // header carrying the original request URI (forward auth: "X-Forwarded-Uri"); default: request.URL.RequestURI()
 	Refreshers       []Refresher   // optional; names must be unique
 	RefreshInterval  time.Duration // default 1 min
@@ -59,7 +59,7 @@ func NewGuard(options *GuardOptions) (*Guard, error) {
 		resolved.LoginURL = "/"
 	}
 	if !redirect.IsTarget(resolved.LoginURL) {
-		return nil, errors.New("session guard: LoginURL must be an absolute http(s) URL or a path starting with \"/\"")
+		return nil, errors.New("session guard: LoginURL must be an absolute http(s) URL or a path starting with \"/\", without a fragment")
 	}
 	if resolved.RefreshInterval == 0 {
 		resolved.RefreshInterval = defaultRefreshInterval
