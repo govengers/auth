@@ -692,6 +692,11 @@ func TestMiddleware(t *testing.T) {
 
 			require.Equal(t, testCase.wantStatus, recorder.Code)
 			require.Equal(t, testCase.wantBody, strings.TrimSpace(recorder.Body.String()))
+			if testCase.wantStatus == http.StatusUnauthorized {
+				require.Equal(t, "Bearer", recorder.Header().Get("WWW-Authenticate"))
+			} else {
+				require.Empty(t, recorder.Header().Get("WWW-Authenticate"))
+			}
 			require.Len(t, outcomes, 1)
 			require.Equal(t, providerName, outcomes[0].Provider)
 			require.Equal(t, auth.ActionAuthenticate, outcomes[0].Action)
@@ -733,6 +738,7 @@ func TestMiddlewareAnswersAFailedKeyFetchWithInternalError(t *testing.T) {
 
 	require.Equal(t, http.StatusInternalServerError, recorder.Code)
 	require.JSONEq(t, `{"code":"internal","message":"internal error"}`, recorder.Body.String())
+	require.Empty(t, recorder.Header().Get("WWW-Authenticate"))
 	require.Len(t, outcomes, 1)
 	require.Equal(t, auth.ResultError, outcomes[0].Result)
 	require.ErrorContains(t, outcomes[0].Err, "status 500")

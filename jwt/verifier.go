@@ -327,8 +327,8 @@ func invalidTokenReason(err error) string {
 }
 
 // Middleware requires a valid token in HeaderName ("Bearer <token>"): the identity goes into the request
-// context, a missing or invalid token is answered 401 JSON, a failed JWKS fetch 500. It reports one
-// ActionAuthenticate outcome per request to the Observer.
+// context, a missing or invalid token is answered 401 JSON with WWW-Authenticate: Bearer (RFC 6750), a
+// failed JWKS fetch 500. It reports one ActionAuthenticate outcome per request to the Observer.
 func (v *Verifier) Middleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -336,6 +336,9 @@ func (v *Verifier) Middleware() func(http.Handler) http.Handler {
 			identity, refreshError, err := v.authenticate(ctx, request.Header.Get(v.options.HeaderName))
 			v.report(ctx, outcomeOf(identity, refreshError, err))
 			if err != nil {
+				if status, _ := auth.ResponseFor(err); status == http.StatusUnauthorized {
+					writer.Header().Set("WWW-Authenticate", "Bearer")
+				}
 				auth.WriteError(writer, err)
 				return
 			}
