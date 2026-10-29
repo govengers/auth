@@ -761,3 +761,27 @@ func TestMiddlewareReportsAFailedRefreshAsDegradedSuccess(t *testing.T) {
 	require.Equal(t, auth.ResultSuccess, outcomes[0].Result)
 	require.ErrorContains(t, outcomes[0].Err, "status 500")
 }
+
+func TestMiddlewareReportsAFailedRefreshWithARefusal(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	var outcomes []auth.Outcome
+	signer := newTestSigner(t, clock.now)
+	keySets := newKeySetServer(t, signer.JWKSHandler())
+	options := testVerifierOptions(keySets.server.URL)
+	options.Observer = func(_ context.Context, outcome auth.Outcome) { outcomes = append(outcomes, outcome) }
+	verifier := newTestVerifier(t, options, clock)
+	keySets.serve(failingHandler)
+	clock.advance(time.Hour)
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/items", nil)
+	request.Header.Set("Authorization", "Bearer "+signWith(t, signer, jwa.RS512(), withClaim(validClaims(clock.now()), "iss", "https://evil.example.com")))
+	recorder := httptest.NewRecorder()
+
+	verifier.Middleware()(subjectHandler()).ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusUnauthorized, recorder.Code)
+	require.JSONEq(t, `{"code":"invalid_token","message":"authentication required"}`, recorder.Body.String())
+	require.Len(t, outcomes, 1)
+	require.Equal(t, auth.ResultDenied, outcomes[0].Result)
+	require.ErrorIs(t, outcomes[0].Err, auth.ErrUnauthenticated)
+	require.ErrorContains(t, outcomes[0].Err, "status 500")
+}

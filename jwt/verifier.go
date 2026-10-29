@@ -130,8 +130,8 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*auth.Identity, er
 	return identity, err
 }
 
-// verify is Verify that also returns, on success, the error of a failed periodic refresh it survived
-// with the previous keys.
+// verify is Verify that also returns the error of a failed periodic refresh it survived with the previous
+// keys, whether the token then verifies or not.
 func (v *Verifier) verify(ctx context.Context, token string) (identity *auth.Identity, refreshError, err error) {
 	keyID, err := keyIDOf(token)
 	if err != nil {
@@ -146,11 +146,11 @@ func (v *Verifier) verify(ctx context.Context, token string) (identity *auth.Ide
 	}
 	parsed, err := jwxjwt.ParseString(token, v.parseOptions(keys)...)
 	if err != nil {
-		return nil, nil, invalidToken(invalidTokenReason(err))
+		return nil, refreshError, invalidToken(invalidTokenReason(err))
 	}
 	claims, err := claimsOf(parsed)
 	if err != nil {
-		return nil, nil, err
+		return nil, refreshError, err
 	}
 	return identityFromClaims(claims), refreshError, nil
 }
@@ -360,10 +360,15 @@ func bearerToken(headerValue string) (string, bool) {
 	return token, true
 }
 
+// outcomeOf is the outcome of one authentication. A failed refresh is the Err of a success (degraded) and
+// joins the refusal or failure otherwise, so it is reported either way.
 func outcomeOf(identity *auth.Identity, refreshError, err error) auth.Outcome {
 	outcome := auth.Outcome{Provider: providerName, Action: auth.ActionAuthenticate, Result: auth.ResultSuccess, Err: refreshError, Identity: identity}
 	if err != nil {
 		outcome.Result, outcome.Err = failure.Result(err), err
+		if refreshError != nil {
+			outcome.Err = errors.Join(err, refreshError)
+		}
 	}
 	return outcome
 }
