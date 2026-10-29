@@ -94,12 +94,13 @@ func TestNewSessionsFailsWhenRedisDoesNotAnswer(t *testing.T) {
 func TestNewSessionsUsesRedisAndPingsItForReadiness(t *testing.T) {
 	redisServer := miniredis.RunT(t)
 
-	created, err := newSessionStore(t.Context(), redisConfiguration(redisServer.Addr()), testDependencies(t))
+	dependencies := testDependencies(t)
+	created, err := newSessionStore(t.Context(), redisConfiguration(redisServer.Addr()), dependencies)
 
 	require.NoError(t, err)
-	require.NoError(t, created.readinessCheck()(t.Context()))
+	require.NoError(t, created.readinessCheck(dependencies)(t.Context()))
 	redisServer.SetError("down")
-	require.Error(t, created.readinessCheck()(t.Context()))
+	require.Error(t, created.readinessCheck(dependencies)(t.Context()))
 	created.close(slog.New(slog.DiscardHandler))
 	require.ErrorContains(t, created.closeRedis(), "client is closed", "close released the client")
 }

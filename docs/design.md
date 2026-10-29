@@ -1334,7 +1334,7 @@ Values without a default are required: `LoadConfig` fails and the process exits 
 | `GET {prefix}/jwks` | `Signer.JWKSHandler()` (JWT enabled) |
 | `GET {prefix}/me` | Guard.RequireAPI -> `auth.IdentityHandler()` (IDENTITY_ENDPOINT_ENABLED; sessions only, no API keys) |
 | `GET {prefix}/health` | 200 `{"status":"ok"}` (liveness) [LAY-004] |
-| `GET {prefix}/ready` | 200 `{"status":"ok"}`, or 503 `{"code":"unavailable","message":"not ready"}` while shutting down or when the Redis `PING` (2 s) fails; a failed check is recorded on the wide event (`readiness check: <cause>`), a 503 during shutdown is no failure |
+| `GET {prefix}/ready` | 200 `{"status":"ok"}`, or 503 `{"code":"unavailable","message":"not ready"}` while shutting down or when the Redis `PING` (2 s) fails; a failed check is recorded on the wide event (`readiness check: <cause>`), a 503 during shutdown is no failure (`we.Success()` with `ready.shutting_down=true`) |
 | provider routes | `{prefix}/oidc/<OIDC_NAME>/{login,callback,logout,frontchannel-logout}` or `{prefix}/github/{login,callback,logout,refresh-teams}` via `ginadapter.RegisterRoutes` |
 | any other route | 404 `{"code":"not_found","message":"not found"}`, recorded as the failure `no route` (always kept by the sampler); a known route with a trailing "/" is one of them (gin's `RedirectTrailingSlash` is off, so no 301 bypasses event, metric and absolute redirects) |
 | `GET /metrics` on METRICS_PORT | `promhttp.HandlerFor(registry, ...)` [MET-001]; the only route of that listener (`/` is 404, `POST /metrics` 405) |
@@ -1407,6 +1407,8 @@ func (d *Dependencies) HTTPClient(name string) *http.Client
 // compare_and_swap, revoke; a lost swap is a success). ErrRevoked is an answer,
 // not a failure.
 func (d *Dependencies) Backend(backend session.Backend) session.Backend
+// RedisPing wraps the readiness check's Redis PING; each call is recorded as dependency "redis" (operation: ping).
+func (d *Dependencies) RedisPing(ping func(ctx context.Context) error) func(ctx context.Context) error
 ```
 - There is no `DevMode` option: gin's mode is process-wide, so main calls `gin.SetMode` (D29).
 - Both listeners (public and metrics) are `http.Server`s with ReadHeaderTimeout 10 s, ReadTimeout 30 s, WriteTimeout 60 s, IdleTimeout 120 s [LAY-006] and write their error lines through `Logger` (`slog.NewLogLogger`, level error).

@@ -3,6 +3,7 @@ package forwardauth
 import (
 	"bufio"
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -79,6 +80,35 @@ func TestACheckRecordsItsSessionStoreCallsOnTheEventAndInTheHistogram(t *testing
 	require.IsType(t, time.Duration(0), cache["duration_ms"])
 	require.NotContains(t, cache, "error")
 	require.Greater(t, dependencyCount(t, registry, "redis", "get", "success"), before)
+}
+
+func TestAReadinessCheckRecordsItsRedisPingOnTheEventAndInTheHistogram(t *testing.T) {
+	testCases := []struct {
+		name        string
+		pingError   error
+		wantStatus  int
+		wantOutcome string
+		wantFailed  int
+	}{
+		{name: "answered", wantStatus: http.StatusOK, wantOutcome: "success"},
+		{name: "failed", pingError: errors.New("connection refused"), wantStatus: http.StatusServiceUnavailable, wantOutcome: "failure", wantFailed: 1},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			dependencies, registry := newTestDependencies(t)
+			ping := dependencies.RedisPing(func(context.Context) error { return testCase.pingError })
+			testHarness := newHarness(t, harnessOptions{readinessCheck: ping})
+
+			response := testHarness.serve(t, http.MethodGet, "/auth/ready", nil)
+
+			require.Equal(t, testCase.wantStatus, response.Code)
+			cache := testHarness.events.last(t)["cache"].(map[string]any)
+			require.Equal(t, "redis", cache["backend"])
+			require.Equal(t, 1, cache["calls"])
+			require.Equal(t, testCase.wantFailed, cache["failures"])
+			require.Equal(t, uint64(1), dependencyCount(t, registry, "redis", "ping", testCase.wantOutcome))
+		})
+	}
 }
 
 func TestHTTPCallsOfARequestAreSummedOnItsEvent(t *testing.T) {

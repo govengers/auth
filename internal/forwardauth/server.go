@@ -15,6 +15,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -259,9 +260,13 @@ func forward(ginContext *gin.Context) {
 }
 
 // readiness answers 503 while the server shuts down or when the readiness check (Redis) fails; the
-// check's error is recorded on the wide event, which the sampler keeps as a 5xx [LOG-002].
+// check's error is recorded on the wide event, which the sampler keeps as a 5xx [LOG-002]. A 503 during
+// shutdown is no failure: it is recorded as a success with ready.shutting_down [LOG-011].
 func (s *Server) readiness(ginContext *gin.Context) {
 	if !s.ready.Load() {
+		if we := wideevent.FromGin(ginContext); we != nil {
+			we.Success().Bool("ready.shutting_down", true)
+		}
 		notReady(ginContext)
 		return
 	}
@@ -343,11 +348,13 @@ func recovery(ginContext *gin.Context) {
 
 // Run serves until ctx ends, then answers readiness with 503, waits ShutdownDelay so load balancers
 // drop the instance, and drains both listeners within 20 s [LAY-003]. A listener that fails to start
-// stops the other one and its error is returned.
+// stops the other one and its error is returned. Both listeners have stopped serving when Run returns [CON-006].
 func (s *Server) Run(ctx context.Context) error {
+	var serving sync.WaitGroup
+	defer serving.Wait() // after the shutdown, which ends both serve calls
 	serveErrors := make(chan error, 2)
 	for _, server := range []*http.Server{s.httpServer, s.metricsServer} {
-		go func() { serveErrors <- recovering(server.ListenAndServe)() }()
+		serving.Go(func() { serveErrors <- recovering(server.ListenAndServe)() })
 	}
 
 	select {

@@ -463,6 +463,9 @@ func TestRunAnswersNotReadyDuringTheShutdownDelayThenDrains(t *testing.T) {
 
 	require.Equal(t, 5*time.Second, <-delayStarted)
 	require.Equal(t, http.StatusServiceUnavailable, testHarness.serve(t, http.MethodGet, "/auth/ready", nil).Code)
+	event := testHarness.events.last(t)
+	require.Equal(t, "success", event["outcome"], "a 503 during shutdown is no failure")
+	require.True(t, event["ready"].(map[string]any)["shutting_down"].(bool))
 	require.Equal(t, http.StatusOK, testHarness.serve(t, http.MethodGet, "/auth/health", nil).Code, "liveness stays up")
 	close(releaseDelay)
 	require.NoError(t, <-runResult)

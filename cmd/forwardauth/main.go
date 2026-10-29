@@ -235,7 +235,7 @@ func newServer(ctx context.Context, configuration *Configuration, sessions *sess
 		Logger:           telemetry.logger,
 		SampleRate:       configuration.WideEventSampleRate,
 		MetricsRegistry:  telemetry.registry,
-		ReadinessCheck:   sessions.readinessCheck(),
+		ReadinessCheck:   sessions.readinessCheck(telemetry.dependencies),
 		ShutdownDelay:    seconds(configuration.ShutdownDelaySeconds),
 	})
 }
@@ -325,12 +325,12 @@ func newRedisClient(configuration *Configuration) *redis.Client {
 	})
 }
 
-// readinessCheck pings Redis; the in-memory backend needs no check.
-func (s *sessionStore) readinessCheck() func(ctx context.Context) error {
+// readinessCheck pings Redis and records the ping as a Redis call; the in-memory backend needs no check.
+func (s *sessionStore) readinessCheck(dependencies *forwardauth.Dependencies) func(ctx context.Context) error {
 	if s.redis == nil {
 		return nil
 	}
-	return func(ctx context.Context) error { return s.redis.Ping(ctx).Err() }
+	return dependencies.RedisPing(func(ctx context.Context) error { return s.redis.Ping(ctx).Err() })
 }
 
 func (s *sessionStore) closeRedis() error {

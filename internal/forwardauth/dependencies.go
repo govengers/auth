@@ -68,6 +68,17 @@ func (d *Dependencies) Backend(backend session.Backend) session.Backend {
 	return &recordingBackend{dependencies: d, backend: backend}
 }
 
+// RedisPing wraps ping (the readiness check's Redis PING) so each call is recorded as dependency "redis",
+// operation ping, under cache on the wide event, like the Backend's operations.
+func (d *Dependencies) RedisPing(ping func(ctx context.Context) error) func(ctx context.Context) error {
+	return func(ctx context.Context) error {
+		start := time.Now()
+		err := ping(ctx)
+		d.recordRedis(ctx, "ping", start, err)
+		return err
+	}
+}
+
 // dependencyCall is one finished outbound call.
 type dependencyCall struct {
 	dependency, operation string
@@ -157,7 +168,11 @@ func (b *recordingBackend) record(ctx context.Context, operation string, start t
 	if errors.Is(err, session.ErrRevoked) {
 		err = nil
 	}
-	b.dependencies.record(ctx, dependencyCall{
+	b.dependencies.recordRedis(ctx, operation, start, err)
+}
+
+func (d *Dependencies) recordRedis(ctx context.Context, operation string, start time.Time, err error) {
+	d.record(ctx, dependencyCall{
 		dependency: redisDependency, operation: operation, namespace: redisNamespace, backend: redisDependency,
 		duration: time.Since(start), failed: err != nil, err: err,
 	})
