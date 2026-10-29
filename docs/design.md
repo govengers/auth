@@ -496,7 +496,7 @@ func NewVerifier(ctx context.Context, options *VerifierOptions) (*Verifier, erro
 // Verify checks signature (with the JWKS key named by kid, under the key's algorithm), iss, aud, exp (required),
 // nbf and iat (30 s skew) and returns the identity.
 // Invalid token: *auth.Error{Kind: ErrUnauthenticated, Code: "invalid_token"} with a Reason from a fixed vocabulary
-// (malformed token, token header has no kid, unknown key ID, signature invalid, token expired, token not yet valid,
+// (malformed token, token has <n> signatures, token header has no kid, unknown key ID, signature invalid, token expired, token not yet valid,
 // token issued in the future, issuer mismatch, audience mismatch, expiry missing, token invalid), never jwx's message,
 // which quotes token material. JWKS fetch failure for an unknown kid: plain error. A failed periodic refresh keeps
 // the previous keys and the token verifies with them.
