@@ -61,13 +61,27 @@ func (b *referenceBackend) live(sessionID, key string) ([]byte, bool) {
 func (b *referenceBackend) Revoke(_ context.Context, sessionID string, ttl time.Duration) error {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
-	for entry := range b.values {
+	revokedUntil := b.now
+	for entry, item := range b.values {
 		if entry[0] == sessionID {
+			revokedUntil = later(revokedUntil, item.expiresAt)
 			delete(b.values, entry)
 		}
 	}
-	b.revoked[sessionID] = b.now.Add(ttl)
+	if limit := b.now.Add(ttl); limit.Before(revokedUntil) {
+		revokedUntil = limit
+	}
+	if revokedUntil.After(b.now) {
+		b.revoked[sessionID] = revokedUntil
+	}
 	return nil
+}
+
+func later(first, second time.Time) time.Time {
+	if second.After(first) {
+		return second
+	}
+	return first
 }
 
 func (b *referenceBackend) advance(duration time.Duration) {

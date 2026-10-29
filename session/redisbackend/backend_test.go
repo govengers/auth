@@ -117,6 +117,7 @@ func TestKeysOfOneSessionShareTheHashTag(t *testing.T) {
 	require.NoError(t, backend.Put(ctx, "s1", "a", []byte("1"), time.Hour))
 	require.NoError(t, backend.Put(ctx, "s1", "b:c", []byte("2"), time.Hour))
 	require.NoError(t, backend.Put(ctx, "s2", "a", []byte("3"), time.Hour))
+	require.NoError(t, backend.Put(ctx, "s3", "a", []byte("4"), time.Hour))
 	require.NoError(t, backend.Revoke(ctx, "s3", time.Hour))
 
 	for _, key := range server.Keys() {
@@ -141,6 +142,7 @@ func hashTag(t *testing.T, key string) string {
 func TestRevocationMarkerBlocksPut(t *testing.T) {
 	backend, server := newBackend(t, "")
 	ctx := t.Context()
+	require.NoError(t, backend.Put(ctx, "s1", "key", []byte("value"), time.Hour))
 	require.NoError(t, backend.Revoke(ctx, "s1", time.Hour))
 
 	err := backend.Put(ctx, "s1", "key", []byte("value"), time.Hour)
@@ -148,6 +150,24 @@ func TestRevocationMarkerBlocksPut(t *testing.T) {
 	require.ErrorIs(t, err, session.ErrSessionRevoked)
 	require.False(t, server.Exists("session:{s1}:key"), "a refused put writes nothing")
 	require.False(t, server.Exists("session:{s1}"), "a refused put indexes nothing")
+}
+
+func TestRevokeStoresNothingForAnUnknownSession(t *testing.T) {
+	backend, server := newBackend(t, "")
+
+	require.NoError(t, backend.Revoke(t.Context(), "never-used", time.Hour))
+
+	require.Empty(t, server.Keys())
+}
+
+func TestRevocationMarkerLivesAsLongAsTheRevokedValues(t *testing.T) {
+	backend, server := newBackend(t, "")
+	ctx := t.Context()
+	require.NoError(t, backend.Put(ctx, "s", "state", []byte("value"), 10*time.Minute))
+
+	require.NoError(t, backend.Revoke(ctx, "s", 24*time.Hour))
+
+	require.Equal(t, 10*time.Minute, server.TTL("session:{s}#revoked"))
 }
 
 func TestPutExtendsButNeverShortensTheIndexTTL(t *testing.T) {
@@ -202,6 +222,7 @@ func TestSubMillisecondTTLIsStoredAsOneMillisecond(t *testing.T) {
 	require.NoError(t, backend.Put(ctx, "s", "key", []byte("value"), time.Microsecond))
 	require.Equal(t, time.Millisecond, server.TTL("session:{s}:key"))
 
+	require.NoError(t, backend.Put(ctx, "other", "key", []byte("value"), time.Hour))
 	require.NoError(t, backend.Revoke(ctx, "other", time.Microsecond))
 	require.Equal(t, time.Millisecond, server.TTL("session:{other}#revoked"))
 }

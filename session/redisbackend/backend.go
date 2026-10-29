@@ -38,12 +38,14 @@ end
 return v
 `)
 
-	// revokeScript deletes every indexed value and writes the marker.
+	// revokeScript deletes every indexed value and writes the marker for ttl, or for the index's remaining
+	// lifetime (the latest value expiry) when that is shorter; without an index (nothing stored) no marker.
 	// KEYS: marker, index. ARGV: ttl in ms.
 	revokeScript = redis.NewScript(`
+local ttl = math.min(redis.call('PTTL', KEYS[2]), tonumber(ARGV[1]))
 for _, k in ipairs(redis.call('SMEMBERS', KEYS[2])) do redis.call('DEL', k) end
 redis.call('DEL', KEYS[2])
-redis.call('SET', KEYS[1], '1', 'PX', ARGV[1])
+if ttl > 0 then redis.call('SET', KEYS[1], '1', 'PX', ttl) end
 return 1
 `)
 )
@@ -117,7 +119,8 @@ func (b *Backend) Pop(ctx context.Context, sessionID, key string) ([]byte, bool,
 	return valueOrAbsent([]byte(value), err, "pop session value")
 }
 
-// Revoke deletes every key of sessionID and writes a marker that refuses Puts for ttl.
+// Revoke deletes every key of sessionID. When there was any, it writes a marker that refuses Puts for ttl,
+// or until the latest of the deleted values would have expired when that is sooner.
 func (b *Backend) Revoke(ctx context.Context, sessionID string, ttl time.Duration) error {
 	if err := validateSessionID(sessionID); err != nil {
 		return err

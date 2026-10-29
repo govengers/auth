@@ -33,6 +33,7 @@ func Run(t *testing.T, newBackend func(t *testing.T) (session.Backend, func(dura
 		{name: "values expire after their ttl", run: testExpiry},
 		{name: "revoke reaches values outliving shorter ones", run: testRevokeAfterMixedTTLs},
 		{name: "revocation marker expires after its ttl", run: testMarkerExpiry},
+		{name: "revocation marker never outlives the revoked values", run: testMarkerLifetimeFollowsTheValues},
 		{name: "concurrent pops find the value once", run: testConcurrentPop},
 		{name: "revoke racing a put leaves nothing", run: testRevokeRacingPut},
 	}
@@ -103,9 +104,11 @@ func testRevoke(t *testing.T, backend session.Backend, _ func(time.Duration)) {
 	requireAbsent(t, backend, "s1", "a")
 	requireValue(t, backend, "s2", "a", "other")
 
-	require.NoError(t, backend.Revoke(ctx, "never-used", time.Hour))
-	require.ErrorIs(t, backend.Put(ctx, "never-used", "a", []byte("1"), time.Hour), session.ErrSessionRevoked)
 	require.NoError(t, backend.Revoke(ctx, "s1", time.Hour), "revoking twice")
+	require.ErrorIs(t, backend.Put(ctx, "s1", "a", []byte("1"), time.Hour), session.ErrSessionRevoked, "revoking twice keeps the marker")
+
+	require.NoError(t, backend.Revoke(ctx, "never-used", time.Hour))
+	require.NoError(t, backend.Put(ctx, "never-used", "a", []byte("1"), time.Hour), "an ID without values gets no marker")
 }
 
 func testExpiry(t *testing.T, backend session.Backend, advance func(time.Duration)) {
@@ -138,6 +141,7 @@ func testRevokeAfterMixedTTLs(t *testing.T, backend session.Backend, advance fun
 
 func testMarkerExpiry(t *testing.T, backend session.Backend, advance func(time.Duration)) {
 	ctx := t.Context()
+	require.NoError(t, backend.Put(ctx, "s", "key", []byte("value"), time.Hour))
 	require.NoError(t, backend.Revoke(ctx, "s", time.Minute))
 
 	advance(time.Minute - time.Second)
@@ -146,6 +150,21 @@ func testMarkerExpiry(t *testing.T, backend session.Backend, advance func(time.D
 	advance(2 * time.Second)
 	require.NoError(t, backend.Put(ctx, "s", "key", []byte("value"), time.Hour))
 	requireValue(t, backend, "s", "key", "value")
+}
+
+// testMarkerLifetimeFollowsTheValues: a marker replaces the session's values and lives no longer than the
+// latest of them would have, so revoking never makes a session hold its slot longer.
+func testMarkerLifetimeFollowsTheValues(t *testing.T, backend session.Backend, advance func(time.Duration)) {
+	ctx := t.Context()
+	require.NoError(t, backend.Put(ctx, "s", "short", []byte("value"), time.Minute))
+	require.NoError(t, backend.Put(ctx, "s", "long", []byte("value"), 10*time.Minute))
+	require.NoError(t, backend.Revoke(ctx, "s", time.Hour))
+
+	advance(10*time.Minute - time.Second)
+	require.ErrorIs(t, backend.Put(ctx, "s", "key", []byte("value"), time.Hour), session.ErrSessionRevoked)
+
+	advance(2 * time.Second)
+	require.NoError(t, backend.Put(ctx, "s", "key", []byte("value"), time.Hour))
 }
 
 func testConcurrentPop(t *testing.T, backend session.Backend, _ func(time.Duration)) {
