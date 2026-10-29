@@ -189,20 +189,10 @@ func TestPopSurvivesARetryAfterALostReply(t *testing.T) {
 	other, err := redisbackend.New(&redisbackend.Options{Client: otherClient})
 	require.NoError(t, err)
 	ctx := t.Context()
-	var dropReply atomic.Bool
 	var replacementError error
-	client := redis.NewClient(&redis.Options{Addr: server.Addr(), Dialer: func(ctx context.Context, network, address string) (net.Conn, error) {
-		connection, err := (&net.Dialer{}).DialContext(ctx, network, address)
-		if err != nil {
-			return nil, err
-		}
-		return &replyDroppingConnection{Conn: connection, dropReply: &dropReply, onDrop: func() {
-			replacementError = other.Put(t.Context(), "s", "state", []byte("replacement"), time.Hour)
-		}}, nil
-	}})
-	t.Cleanup(func() { _ = client.Close() })
-	backend, err := redisbackend.New(&redisbackend.Options{Client: client})
-	require.NoError(t, err)
+	backend, dropReply := newReplyDroppingBackend(t, server, func() {
+		replacementError = other.Put(t.Context(), "s", "state", []byte("replacement"), time.Hour)
+	})
 	require.NoError(t, backend.Put(ctx, "s", "state", []byte("value"), time.Hour))
 	_, _, err = backend.Pop(ctx, "s", "warm-up") // loads the script, so the next Pop runs on its first EVALSHA
 	require.NoError(t, err)
@@ -219,6 +209,53 @@ func TestPopSurvivesARetryAfterALostReply(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found, "the retry left the value written after the lost attempt")
 	require.Equal(t, "replacement", string(value))
+}
+
+// The retried CompareAndSwap must report the swap the lost attempt made, even when another client changed
+// the value before the retry: a clean false would tell the Guard it lost its refresh claim.
+func TestCompareAndSwapSurvivesARetryAfterALostReply(t *testing.T) {
+	server := miniredis.RunT(t)
+	_, otherClient := newRedisOn(t, server)
+	other, err := redisbackend.New(&redisbackend.Options{Client: otherClient})
+	require.NoError(t, err)
+	ctx := t.Context()
+	var otherError error
+	backend, dropReply := newReplyDroppingBackend(t, server, func() {
+		_, otherError = other.CompareAndSwap(t.Context(), "s", "identity", []byte("claimed"), []byte("saved"))
+	})
+	require.NoError(t, backend.Put(ctx, "s", "identity", []byte("read"), time.Hour))
+	_, err = backend.CompareAndSwap(ctx, "s", "warm-up", nil, nil) // loads the script
+	require.NoError(t, err)
+
+	dropReply.Store(true)
+	swapped, err := backend.CompareAndSwap(ctx, "s", "identity", []byte("read"), []byte("claimed"))
+
+	require.False(t, dropReply.Load(), "a reply was dropped")
+	require.NoError(t, otherError)
+	require.NoError(t, err)
+	require.True(t, swapped, "the retry reports the swap the lost attempt made")
+	value, found, err := backend.Get(ctx, "s", "identity")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "saved", string(value), "the retry left the value swapped in after the lost attempt")
+}
+
+// newReplyDroppingBackend returns a backend on server with go-redis's default retries whose connection loses
+// the reply to the next script call once dropReply is set; onDrop runs before the client retries.
+func newReplyDroppingBackend(t *testing.T, server *miniredis.Miniredis, onDrop func()) (*redisbackend.Backend, *atomic.Bool) {
+	t.Helper()
+	dropReply := &atomic.Bool{}
+	client := redis.NewClient(&redis.Options{Addr: server.Addr(), Dialer: func(ctx context.Context, network, address string) (net.Conn, error) {
+		connection, err := (&net.Dialer{}).DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return &replyDroppingConnection{Conn: connection, dropReply: dropReply, onDrop: onDrop}, nil
+	}})
+	t.Cleanup(func() { _ = client.Close() })
+	backend, err := redisbackend.New(&redisbackend.Options{Client: client})
+	require.NoError(t, err)
+	return backend, dropReply
 }
 
 // replyDroppingConnection loses the reply to the next script call once dropReply is set: the server ran the

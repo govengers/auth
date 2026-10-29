@@ -167,7 +167,8 @@ func (g *Guard) refreshDue(stored identityEnvelope) bool {
 // (Action refresh). The claim saves the moved refreshedAt before the Refresher runs, so requests reading
 // the session meanwhile find it fresh: one Refresher call per interval. A request losing the claim (another
 // one claimed or saved first) continues with the identity it read. A refusal ends the session (when that
-// fails, the request fails with 500 and the outcome is an error, as the session stays usable); any other
+// fails, the request fails with 500, the outcome is an error and the claim is released, as the session
+// stays usable); any other
 // failure keeps the identity and is reported as a degraded success (Result success with Err set): the
 // request is still answered. The save swaps against the claim: when another request saved the session
 // meanwhile, that save wins and the request continues with it.
@@ -175,6 +176,7 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 	ctx := request.Context()
 	realIdentity := stored.Identity.Real()
 	outcome := auth.Outcome{Provider: realIdentity.Provider, Action: auth.ActionRefresh, Identity: stored.Identity}
+	readAt := stored.RefreshedAt
 	stored.RefreshedAt = g.now()
 	claimed, swapped, err := current.swapEnvelope(ctx, stored)
 	if err != nil {
@@ -191,6 +193,9 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 		if endError := g.options.Store.End(ctx, writer, request); endError != nil {
 			// The session stays usable: a 500, not the refusal (kept as text only, so it cannot decide the answer).
 			outcome.Err = fmt.Errorf("end session refused by its refresh (%s): %w", err.Error(), endError)
+			// Release the claim, so the next request refreshes (and fails) again instead of passing on it.
+			claimed.RefreshedAt = readAt
+			_, _, _ = current.swapEnvelope(ctx, claimed) // best effort: the request is a 500 already
 		}
 		return nil, g.reportFailure(ctx, outcome)
 	case err != nil:

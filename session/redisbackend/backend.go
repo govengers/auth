@@ -16,9 +16,9 @@ import (
 
 const (
 	defaultKeyPrefix = "session"
-	// popReceiptTTL keeps a popped value for a retry of the same Pop; it outlives go-redis's retries of
-	// a lost reply (MaxRetries times read timeout plus backoff, about 11 s with the defaults).
-	popReceiptTTL = time.Minute
+	// receiptTTL keeps the result of a Pop or CompareAndSwap for a retry of the same call; it outlives
+	// go-redis's retries of a lost reply (MaxRetries times read timeout plus backoff, about 11 s with the defaults).
+	receiptTTL = time.Minute
 )
 
 // Lua scripts keep each operation atomic on the slot of one session. They are read-only package values.
@@ -50,11 +50,14 @@ return v
 `)
 
 	// swapScript replaces the value, keeping its expiry, when it still equals the expected one. A revoked
-	// session holds no value, so it never swaps.
-	// KEYS: value. ARGV: expected value, new value. Returns 1 when swapped, else 0.
+	// session holds no value, so it never swaps. Like popScript it leaves a receipt under the caller's token,
+	// so a retry after a lost reply reports the swap the lost attempt made, even when the value changed since.
+	// KEYS: value, receipt. ARGV: expected value, new value, receipt ttl in ms. Returns 1 when swapped, else 0.
 	swapScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[2]) == 1 then return 1 end
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
+redis.call('SET', KEYS[2], '1', 'PX', ARGV[3])
 return 1
 `)
 
@@ -83,8 +86,8 @@ type Options struct {
 
 // Backend implements session.Backend on Redis. One string per value plus a set indexing the keys of
 // the session; the layout is <prefix>:{<sessionID>} (index), <prefix>:{<sessionID>}:<key> (value),
-// <prefix>:{<sessionID>}#revoked (revocation marker) and <prefix>:{<sessionID>}#popped:<token> (a popped
-// value kept one minute for a retried Pop). It is safe for concurrent use.
+// <prefix>:{<sessionID>}#revoked (revocation marker) and <prefix>:{<sessionID>}#popped:<token> and
+// #swapped:<token> (the result of one Pop or CompareAndSwap, kept one minute for its retry). It is safe for concurrent use.
 type Backend struct {
 	client redis.UniversalClient
 	prefix string
@@ -142,18 +145,19 @@ func (b *Backend) Pop(ctx context.Context, sessionID, key string) ([]byte, bool,
 	if err := validateSessionID(sessionID); err != nil {
 		return nil, false, err
 	}
-	keys := []string{b.valueKey(sessionID, key), b.indexKey(sessionID), b.indexKey(sessionID) + "#popped:" + rand.Text()}
-	value, err := popScript.Run(ctx, b.client, keys, popReceiptTTL.Milliseconds()).Text()
+	keys := []string{b.valueKey(sessionID, key), b.indexKey(sessionID), b.receiptKey(sessionID, "popped")}
+	value, err := popScript.Run(ctx, b.client, keys, receiptTTL.Milliseconds()).Text()
 	return valueOrAbsent([]byte(value), err, "pop session value")
 }
 
 // CompareAndSwap replaces the live value under (sessionID, key) with value, keeping its expiry, when it
-// still equals previous.
+// still equals previous; a client retry of the step after a lost reply reports the same result.
 func (b *Backend) CompareAndSwap(ctx context.Context, sessionID, key string, previous, value []byte) (bool, error) {
 	if err := validateSessionID(sessionID); err != nil {
 		return false, err
 	}
-	swapped, err := swapScript.Run(ctx, b.client, []string{b.valueKey(sessionID, key)}, previous, value).Int()
+	keys := []string{b.valueKey(sessionID, key), b.receiptKey(sessionID, "swapped")}
+	swapped, err := swapScript.Run(ctx, b.client, keys, previous, value, receiptTTL.Milliseconds()).Int()
 	if err != nil {
 		return false, dependency.Error("redis session backend: swap session value", err)
 	}
@@ -179,6 +183,11 @@ func (b *Backend) indexKey(sessionID string) string {
 
 func (b *Backend) markerKey(sessionID string) string {
 	return b.indexKey(sessionID) + "#revoked"
+}
+
+// receiptKey names the one-minute receipt of a single call, keyed by a random token.
+func (b *Backend) receiptKey(sessionID, operation string) string {
+	return b.indexKey(sessionID) + "#" + operation + ":" + rand.Text()
 }
 
 func (b *Backend) valueKey(sessionID, key string) string {

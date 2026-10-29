@@ -23,8 +23,8 @@ type MemoryBackendOptions struct {
 // correct for exactly one replica and safe for concurrent use.
 // A full backend evicts revocation markers like sessions, so a flood of login starts cannot block every new
 // session; the cost is that an evicted marker no longer refuses a Put for its revoked session. Nothing can
-// give that session an identity again (SaveIdentity needs a live one or a Start handle, the Guard refreshes
-// by CompareAndSwap), but a provider or application value may land in it. Meant for one replica at
+// give that session an identity again (SaveIdentity and the Guard swap against a live identity, and only the
+// first save of a Start handle writes without one), but a provider or application value may land in it. Meant for one replica at
 // non-production scale; use Redis in production.
 // ponytail: O(n) eviction scan when full; shard or use Redis if that ever shows in profiles.
 type MemoryBackend struct {

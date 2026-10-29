@@ -24,6 +24,10 @@ const (
 	randomTokenBytes = 32
 )
 
+// CodeLoginFailed is the refusal code of a callback whose code exchange or verification failed; the providers
+// using this package answer it, so a login page handles one code.
+const CodeLoginFailed = "login_failed"
+
 // State is what a login start stores and its callback needs back.
 type State struct {
 	State      string `json:"state"`
