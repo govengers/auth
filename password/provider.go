@@ -91,7 +91,7 @@ func (p *Provider) Routes() []auth.Route {
 	if p.options.TOTP.Enabled {
 		routes = append(routes,
 			p.route(http.MethodPost, "/totp/verify", auth.ActionTOTPVerify, p.verifyTOTP),
-			p.route(http.MethodGet, "/totp", auth.ActionAuthenticate, p.totpStatus),
+			p.route(http.MethodGet, "/totp", auth.ActionTOTPStatus, p.totpStatus),
 			p.route(http.MethodPost, "/totp/setup", auth.ActionTOTPSetup, p.setupTOTP),
 			p.route(http.MethodPost, "/totp/enable", auth.ActionTOTPEnable, p.enableTOTP),
 			p.route(http.MethodPost, "/totp/disable", auth.ActionTOTPDisable, p.disableTOTP),
