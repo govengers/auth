@@ -18,7 +18,10 @@ import (
 	"github.com/govengers/auth/internal/fakeprovider"
 )
 
-const shutdownTimeout = 5 * time.Second
+const (
+	shutdownTimeout    = 5 * time.Second
+	healthcheckTimeout = 2 * time.Second // the compose healthcheck's own timeout
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -79,7 +82,8 @@ func healthcheck() error {
 	if err != nil {
 		return err
 	}
-	response, err := http.DefaultClient.Do(request) //nolint:gosec // G704: the URL is this container's own listen address
+	client := &http.Client{Timeout: healthcheckTimeout}
+	response, err := client.Do(request) //nolint:gosec // G704: the URL is this container's own listen address
 	if err != nil {
 		return err
 	}
