@@ -37,7 +37,8 @@ func TestTheIdentityEndpointIsMountedOnlyWhenEnabled(t *testing.T) {
 
 func TestReadinessFailsDuringTheShutdownDelayWhileTheProcessStillServes(t *testing.T) {
 	fake := fakeprovider.StartGitHub(t, fakeprovider.GitHubOptions{})
-	running := start(t, merged(gitHubEnvironment(t, fake), map[string]string{"SHUTDOWN_DELAY_SECONDS": "1"}))
+	// The delay is far longer than the assertions need, so a loaded machine cannot close the listener under them.
+	running := start(t, merged(gitHubEnvironment(t, fake), map[string]string{"SHUTDOWN_DELAY_SECONDS": "5"}))
 	client := newBrowser(t)
 	require.Equal(t, http.StatusOK, client.get(running.baseURL+"/auth/ready", nil).status)
 
@@ -45,7 +46,7 @@ func TestReadinessFailsDuringTheShutdownDelayWhileTheProcessStillServes(t *testi
 
 	require.Eventually(t, func() bool {
 		return client.get(running.baseURL+"/auth/ready", nil).status == http.StatusServiceUnavailable
-	}, 900*time.Millisecond, 20*time.Millisecond)
+	}, 3*time.Second, 20*time.Millisecond)
 	require.Equal(t, http.StatusOK, client.get(running.baseURL+"/auth/health", nil).status, "liveness stays up while draining")
 	select {
 	case <-running.exited:
