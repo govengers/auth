@@ -36,7 +36,7 @@ const (
 
 // VerifierOptions configure a Verifier.
 type VerifierOptions struct {
-	JWKSURL         string        // required: absolute http(s) URL of the signer's JWKS (at most 1 MiB); only its RSA keys with an RSA signature alg (RS*, PS*) and use "sig" (or none) count
+	JWKSURL         string        // required: absolute http(s) URL of the signer's JWKS (at most 1 MiB); only its RSA keys with an RSA signature alg (RS*, PS*), a kid and use "sig" (or none) count
 	Issuer          string        // required: expected iss
 	Audience        string        // optional: when set, aud must contain it
 	RefreshInterval time.Duration // default 1 h, at least 1 min; an unknown kid triggers a refetch at most once per minute
@@ -49,7 +49,7 @@ type VerifierOptions struct {
 // cache and starts no goroutine: Verify refetches the JWKS lazily, after RefreshInterval or for an
 // unknown key ID, at most once per minute; the refetch is not cancelled with the triggering request and
 // takes at most 10 s. Meanwhile verifications with a known key ID go on with the current keys, those
-// with an unknown one wait for it. It is safe for concurrent use.
+// with an unknown one wait for it or for the end of their request. It is safe for concurrent use.
 type Verifier struct {
 	options VerifierOptions
 	now     func() time.Time
@@ -177,11 +177,14 @@ func keyIDOf(token string) (string, error) {
 // stale or lack keyID and the last fetch is at least a minute ago. A failed refetch is err when the
 // keys lack keyID, and refreshError (the previous keys are returned) when they have it.
 func (v *Verifier) keysFor(ctx context.Context, keyID string) (keys jwk.Set, refreshError, err error) {
-	keys, known, fetchDone := v.claimFetch(keyID)
-	if fetchDone == nil {
-		return keys, nil, nil
+	claim, err := v.claimFetch(ctx, keyID)
+	if err != nil {
+		return nil, nil, err
 	}
-	defer v.endFetch(fetchDone)
+	if claim.fetchDone == nil {
+		return claim.keys, nil, nil
+	}
+	defer v.endFetch(claim.fetchDone)
 	// The fetch serves every verification waiting for it and uses up the minute's attempt, so the
 	// triggering request's cancellation must not end it; it gets its own timeout instead [CON-003].
 	fetchContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultHTTPTimeout)
@@ -190,33 +193,54 @@ func (v *Verifier) keysFor(ctx context.Context, keyID string) (keys jwk.Set, ref
 	switch {
 	case fetchError == nil:
 		return keys, nil, nil
-	case known:
+	case claim.known:
 		return keys, fetchError, nil
 	default:
 		return nil, nil, fetchError
 	}
 }
 
+// fetchClaim is what claimFetch found: the current keys, whether they have the key ID, and fetchDone,
+// non-nil when the caller claimed a fetch.
+type fetchClaim struct {
+	keys      jwk.Set
+	known     bool
+	fetchDone chan struct{}
+}
+
 // claimFetch returns the current keys and whether they have keyID. When a fetch is due it claims it and
 // returns a non-nil fetchDone: the caller fetches without the mutex and ends the claim with endFetch.
 // While a fetch is in flight, a known keyID goes on with the current keys and an unknown one waits for
-// the fetch (at most 10 s), which may bring it.
-func (v *Verifier) claimFetch(keyID string) (keys jwk.Set, known bool, fetchDone chan struct{}) {
+// the fetch (at most 10 s), which may bring it, or until ctx ends; err is then ctx's error.
+func (v *Verifier) claimFetch(ctx context.Context, keyID string) (fetchClaim, error) {
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
-	_, known = v.keys.LookupKeyID(keyID)
+	_, known := v.keys.LookupKeyID(keyID)
 	for v.fetchDone != nil && !known {
 		inFlight := v.fetchDone
 		v.mutex.Unlock()
-		<-inFlight
+		err := waitFor(ctx, inFlight)
 		v.mutex.Lock()
+		if err != nil {
+			return fetchClaim{}, err
+		}
 		_, known = v.keys.LookupKeyID(keyID)
 	}
 	if v.fetchDone != nil || !v.fetchDue(known) {
-		return v.keys, known, nil
+		return fetchClaim{keys: v.keys, known: known}, nil
 	}
 	v.fetchDone = make(chan struct{})
-	return v.keys, known, v.fetchDone
+	return fetchClaim{keys: v.keys, known: known, fetchDone: v.fetchDone}, nil
+}
+
+// waitFor waits until done is closed or ctx ends [CON-005].
+func waitFor(ctx context.Context, done <-chan struct{}) error {
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("wait for JWKS fetch: %w", ctx.Err())
+	}
 }
 
 // endFetch ends the fetch claimed with fetchDone and wakes the verifications waiting for it.
@@ -258,36 +282,39 @@ func fetchKeySet(ctx context.Context, httpClient *http.Client, jwksURL string) (
 	if err != nil {
 		return nil, dependency.Error("fetch JWKS", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch JWKS %s: status %d", location, response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maximumKeySetBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read JWKS %s: %w", location, err)
+		// A body read error may quote the server's bytes (a malformed trailer line) [LOG-009].
+		return nil, fmt.Errorf("read JWKS %s: %w", location, dependency.TransportFailure(err))
 	}
 	if len(body) > maximumKeySetBytes {
 		return nil, fmt.Errorf("JWKS %s is larger than 1 MiB", location)
 	}
 	// An entry jwx cannot parse (an unknown kty, a broken modulus) is dropped like the other keys that
 	// cannot verify a token, instead of failing the whole set; signingKeys fails when none is left.
+	// jwx's parse error quotes the document, which may carry personal data, so it is dropped [LOG-009].
 	keys, err := jwk.Parse(body, jwk.WithIgnoreParseError(true))
 	if err != nil {
-		return nil, dependency.Error("parse JWKS "+location, err)
+		return nil, fmt.Errorf("parse JWKS %s: not a JSON JWK set", location)
 	}
 	return signingKeys(keys)
 }
 
 // signingKeys returns the keys of keys a token may be verified with: RSA keys for signatures (use "sig"
-// or unset) that name an RSA signature algorithm. A JWKS is public, so a symmetric key in it would let
-// anyone sign tokens; a key without alg cannot bind the token's algorithm, and one with another alg
-// verifies no token.
+// or unset) that name an RSA signature algorithm and have a kid. A JWKS is public, so a symmetric key in
+// it would let anyone sign tokens; a key without alg cannot bind the token's algorithm, one with another
+// alg verifies no token, and one without kid is never selected (Verify looks keys up by the token's kid).
 func signingKeys(keys jwk.Set) (jwk.Set, error) {
 	usable := jwk.NewSet()
 	for index := range keys.Len() {
 		key, _ := keys.Key(index)
 		usage, _ := key.KeyUsage()
-		if key.KeyType() != jwa.RSA() || (usage != "" && usage != string(jwk.ForSignature)) || !hasRSASignatureAlgorithm(key) {
+		keyID, _ := key.KeyID()
+		if key.KeyType() != jwa.RSA() || (usage != "" && usage != string(jwk.ForSignature)) || !hasRSASignatureAlgorithm(key) || keyID == "" {
 			continue
 		}
 		if err := usable.AddKey(key); err != nil {
@@ -295,7 +322,7 @@ func signingKeys(keys jwk.Set) (jwk.Set, error) {
 		}
 	}
 	if usable.Len() == 0 {
-		return nil, errors.New("JWKS has no RSA signing key with alg")
+		return nil, errors.New("JWKS has no RSA signing key with alg and kid")
 	}
 	return usable, nil
 }
