@@ -102,3 +102,15 @@ func TestACallbackWithAForgedStateIsRefused(t *testing.T) {
 	require.JSONEq(t, `{"code":"state_mismatch","message":"invalid request"}`, forged.body)
 	require.Equal(t, http.StatusFound, person.get(appURL+"/whoami", nil).status, "still not logged in")
 }
+
+func TestTheChecksAndProbesAreNotRoutedToTheBrowser(t *testing.T) {
+	person := signIn(t, "/whoami")
+
+	for _, path := range []string{"/auth/ui", "/auth/api", "/auth/health", "/auth/ready"} {
+		hop := person.get(appURL+path, nil)
+
+		require.Equal(t, http.StatusNotFound, hop.status, path)
+		require.Empty(t, hop.header.Get("Authorization"), "no bearer JWT for a script on the page")
+	}
+	require.Equal(t, http.StatusOK, person.get(appURL+"/auth/jwks", nil).status, "the JWKS stays public")
+}

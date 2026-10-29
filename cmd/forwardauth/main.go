@@ -28,6 +28,7 @@ import (
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/apikey"
 	"github.com/govengers/auth/github"
+	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/internal/forwardauth"
 	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/jwt"
@@ -52,6 +53,8 @@ const (
 	grantTypePassword          = "password"
 
 	maximumPort = 65535
+
+	redisStartupTimeout = 5 * time.Second
 )
 
 // Configuration holds every value forwardauth reads, filled once at startup.
@@ -131,8 +134,8 @@ func main() {
 	}
 }
 
-// run boots in a fixed order [LAY-002]: configuration, metrics registry, session store, provider, Guard,
-// API keys, signer, server; then it serves until SIGINT or SIGTERM.
+// run boots in a fixed order [LAY-002]: configuration, metrics registry and dependency metrics, session
+// store, provider, Guard, API keys, signer, server; then it serves until SIGINT or SIGTERM.
 func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -147,12 +150,17 @@ func run(logger *slog.Logger) error {
 	config.Print()
 	gin.SetMode(ginMode(configuration.DevMode)) // process-wide; release mode keeps gin's debug lines off stdout
 
-	sessions, err := newSessions(configuration)
+	metricsRegistry := newMetricsRegistry()
+	dependencies, err := forwardauth.NewDependencies(&forwardauth.DependenciesOptions{Registerer: metricsRegistry})
+	if err != nil {
+		return err
+	}
+	sessions, err := newSessions(ctx, configuration, dependencies)
 	if err != nil {
 		return err
 	}
 	defer sessions.close(logger)
-	server, err := newServer(ctx, configuration, sessions)
+	server, err := newServer(ctx, configuration, sessions, &telemetry{registry: metricsRegistry, dependencies: dependencies, logger: logger})
 	if err != nil {
 		return err
 	}
@@ -170,15 +178,22 @@ func ginMode(devMode bool) string {
 	return gin.ReleaseMode
 }
 
+// telemetry is what the components report to: the registry /metrics serves, the recorder of outbound
+// calls and the logger of the lines outside a request.
+type telemetry struct {
+	registry     *prometheus.Registry
+	dependencies *forwardauth.Dependencies
+	logger       *slog.Logger
+}
+
 // newServer builds every component after the session store and the server that serves them.
-func newServer(ctx context.Context, configuration *Configuration, sessions *sessions) (*forwardauth.Server, error) {
-	metricsRegistry := newMetricsRegistry()
-	outcomeCounter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: metricsRegistry, Namespace: "forwardauth"})
+func newServer(ctx context.Context, configuration *Configuration, sessions *sessions, telemetry *telemetry) (*forwardauth.Server, error) {
+	outcomeCounter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: telemetry.registry, Namespace: "forwardauth"})
 	if err != nil {
 		return nil, err
 	}
 	observer := forwardauth.NewObserver(outcomeCounter)
-	selected, err := newProvider(ctx, configuration, sessions.store, observer)
+	selected, err := newProvider(ctx, configuration, sessions.store, observer, telemetry.dependencies)
 	if err != nil {
 		return nil, err
 	}
@@ -213,8 +228,9 @@ func newServer(ctx context.Context, configuration *Configuration, sessions *sess
 		JWTHeader:        configuration.JWTHeader,
 		IdentityEndpoint: configuration.IdentityEndpointEnabled,
 		Emitter:          newEmitter(configuration.DevMode),
+		Logger:           telemetry.logger,
 		SampleRate:       configuration.WideEventSampleRate,
-		MetricsRegistry:  metricsRegistry,
+		MetricsRegistry:  telemetry.registry,
 		ReadinessCheck:   sessions.readinessCheck(),
 		ShutdownDelay:    seconds(configuration.ShutdownDelaySeconds),
 	})
@@ -245,7 +261,7 @@ type sessions struct {
 	redis *redis.Client // nil for the in-memory backend
 }
 
-func newSessions(configuration *Configuration) (*sessions, error) {
+func newSessions(ctx context.Context, configuration *Configuration, dependencies *forwardauth.Dependencies) (*sessions, error) {
 	encryptionKey, err := session.ParseKey(configuration.SessionEncryptionKey)
 	if err != nil {
 		return nil, err
@@ -255,7 +271,7 @@ func newSessions(configuration *Configuration) (*sessions, error) {
 		return nil, err
 	}
 	created := &sessions{}
-	backend, err := created.newBackend(configuration)
+	backend, err := created.newBackend(ctx, configuration, dependencies)
 	if err != nil {
 		return nil, err
 	}
@@ -274,22 +290,35 @@ func newSessions(configuration *Configuration) (*sessions, error) {
 	return created, nil
 }
 
-// newBackend opens the Redis client when SESSION_REDIS_ENABLED, otherwise the in-memory backend
-// (exactly one replica).
-func (s *sessions) newBackend(configuration *Configuration) (session.Backend, error) {
+// newBackend opens the Redis client when SESSION_REDIS_ENABLED, fails when Redis does not answer
+// [RES-007] and records its calls; otherwise it returns the in-memory backend (exactly one replica).
+func (s *sessions) newBackend(ctx context.Context, configuration *Configuration, dependencies *forwardauth.Dependencies) (session.Backend, error) {
 	if !configuration.SessionRedisEnabled {
 		return session.NewMemoryBackend(nil)
 	}
-	s.redis = redis.NewClient(&redis.Options{
-		Addr:     configuration.SessionRedisAddress,
-		Password: configuration.SessionRedisPassword,
-		DB:       configuration.SessionRedisDatabase,
-	})
+	s.redis = newRedisClient(configuration)
+	pingContext, cancel := context.WithTimeout(ctx, redisStartupTimeout)
+	defer cancel()
+	if err := s.redis.Ping(pingContext).Err(); err != nil {
+		return nil, errors.Join(dependency.Error("SESSION_REDIS_ADDRESS: ping Redis at "+configuration.SessionRedisAddress, err), s.closeRedis())
+	}
 	backend, err := redisbackend.New(&redisbackend.Options{Client: s.redis, KeyPrefix: configuration.SessionRedisKeyPrefix})
 	if err != nil {
 		return nil, errors.Join(err, s.closeRedis())
 	}
-	return backend, nil
+	return dependencies.Backend(backend), nil
+}
+
+// newRedisClient never retries, so a session Pop whose answer was lost is not run twice [RES-004], and
+// honours context deadlines, so the 2 s readiness check and a request's own deadline bound each command.
+func newRedisClient(configuration *Configuration) *redis.Client {
+	return redis.NewClient(&redis.Options{
+		Addr:                  configuration.SessionRedisAddress,
+		Password:              configuration.SessionRedisPassword,
+		DB:                    configuration.SessionRedisDatabase,
+		MaxRetries:            -1,
+		ContextTimeoutEnabled: true,
+	})
 }
 
 // readinessCheck pings Redis; the in-memory backend needs no check.
@@ -324,18 +353,19 @@ type selectedProvider struct {
 	refreshers []session.Refresher
 }
 
-// newProvider builds the provider PROVIDER names; its routes live under PATH_PREFIX.
-func newProvider(ctx context.Context, configuration *Configuration, store *session.Store, observer auth.Observer) (selectedProvider, error) {
+// newProvider builds the provider PROVIDER names; its routes live under PATH_PREFIX, its HTTP calls are
+// recorded under its name.
+func newProvider(ctx context.Context, configuration *Configuration, store *session.Store, observer auth.Observer, dependencies *forwardauth.Dependencies) (selectedProvider, error) {
 	if configuration.Provider == providerGitHub {
-		return newGitHubProvider(configuration, store, observer)
+		return newGitHubProvider(configuration, store, observer, dependencies)
 	}
-	return newOIDCProvider(ctx, configuration, store, observer)
+	return newOIDCProvider(ctx, configuration, store, observer, dependencies)
 }
 
 // newOIDCProvider runs the issuer's discovery, so an unreachable issuer fails the boot. With
 // KEYCLOAK_ENABLED, the Keycloak Admin API enriches (and may refuse) every login.
-func newOIDCProvider(ctx context.Context, configuration *Configuration, store *session.Store, observer auth.Observer) (selectedProvider, error) {
-	onLogin, err := newKeycloakHook(configuration)
+func newOIDCProvider(ctx context.Context, configuration *Configuration, store *session.Store, observer auth.Observer, dependencies *forwardauth.Dependencies) (selectedProvider, error) {
+	onLogin, err := newKeycloakHook(configuration, dependencies)
 	if err != nil {
 		return selectedProvider{}, err
 	}
@@ -352,6 +382,7 @@ func newOIDCProvider(ctx context.Context, configuration *Configuration, store *s
 		AllowedEmailDomains:          configuration.OIDCAllowedEmailDomains,
 		DisableIframeLogoutDetection: configuration.OIDCDisableIframeLogoutDetection,
 		Sessions:                     store,
+		HTTPClient:                   dependencies.HTTPClient(providerOIDC),
 		OnLogin:                      onLogin,
 		Observer:                     observer,
 	})
@@ -369,7 +400,7 @@ func claimMapper(name string) oidc.ClaimMapper {
 }
 
 // newKeycloakHook returns nil when KEYCLOAK_ENABLED is false: logins then keep the token's roles and groups.
-func newKeycloakHook(configuration *Configuration) (auth.Hook, error) {
+func newKeycloakHook(configuration *Configuration, dependencies *forwardauth.Dependencies) (auth.Hook, error) {
 	if !configuration.KeycloakEnabled {
 		return nil, nil // Keycloak disabled is not an error
 	}
@@ -386,6 +417,7 @@ func newKeycloakHook(configuration *Configuration) (auth.Hook, error) {
 		RequiredRealmRoles:  configuration.KeycloakRequiredRealmRoles,
 		RequiredClientRoles: configuration.KeycloakRequiredClientRoles,
 		RequiredGroups:      configuration.KeycloakRequiredGroups,
+		HTTPClient:          dependencies.HTTPClient("keycloak"),
 	})
 	if err != nil {
 		return nil, err
@@ -395,7 +427,7 @@ func newKeycloakHook(configuration *Configuration) (auth.Hook, error) {
 
 // newGitHubProvider builds the GitHub provider; it also refreshes the teams of a session every
 // SESSION_REFRESH_INTERVAL_SECONDS through the Guard.
-func newGitHubProvider(configuration *Configuration, store *session.Store, observer auth.Observer) (selectedProvider, error) {
+func newGitHubProvider(configuration *Configuration, store *session.Store, observer auth.Observer, dependencies *forwardauth.Dependencies) (selectedProvider, error) {
 	provider, err := github.New(&github.Options{
 		ClientID:      configuration.GitHubClientID,
 		ClientSecret:  configuration.GitHubClientSecret,
@@ -409,6 +441,7 @@ func newGitHubProvider(configuration *Configuration, store *session.Store, obser
 		AdminTeams:    configuration.GitHubAdminTeams,
 		RelevantTeams: configuration.GitHubRelevantTeams,
 		Sessions:      store,
+		HTTPClient:    dependencies.HTTPClient(providerGitHub),
 		Observer:      observer,
 	})
 	if err != nil {
@@ -575,14 +608,14 @@ func validateServer(configuration *Configuration) error {
 	if _, err := redirect.ExternalURL(configuration.ExternalURL); err != nil {
 		problems = append(problems, fmt.Errorf("EXTERNAL_URL: %w", err))
 	}
-	if !strings.HasPrefix(configuration.PathPrefix, "/") || strings.HasSuffix(configuration.PathPrefix, "/") {
-		problems = append(problems, fmt.Errorf("PATH_PREFIX %q must start with \"/\" and must not end with \"/\"", configuration.PathPrefix))
+	if !redirect.IsPathPrefix(configuration.PathPrefix) {
+		problems = append(problems, fmt.Errorf("PATH_PREFIX %q must be \"/\"-separated segments of A-Z a-z 0-9 . _ ~ - without a trailing \"/\" and without a \".\" or \"..\" segment", configuration.PathPrefix))
 	}
 	problems = append(problems,
-		portProblem("PORT", configuration.Port),
-		portProblem("METRICS_PORT", configuration.MetricsPort),
+		rangeProblem("PORT", configuration.Port, 1, maximumPort),
+		rangeProblem("METRICS_PORT", configuration.MetricsPort, 1, maximumPort),
 		minimumProblem("WIDE_EVENT_SAMPLE_RATE", configuration.WideEventSampleRate, 1),
-		minimumProblem("SHUTDOWN_DELAY_SECONDS", configuration.ShutdownDelaySeconds, 0),
+		rangeProblem("SHUTDOWN_DELAY_SECONDS", configuration.ShutdownDelaySeconds, 0, int(forwardauth.MaximumShutdownDelay/time.Second)),
 	)
 	if configuration.Port == configuration.MetricsPort {
 		problems = append(problems, fmt.Errorf("PORT and METRICS_PORT must differ, both are %d", configuration.Port))
@@ -613,9 +646,17 @@ func validateSession(configuration *Configuration) error {
 	return errors.Join(problems...)
 }
 
+// validateAPIKeys parses API_KEYS and API_KEY_PERMISSIONS and lets apikey.New judge the keys (secret
+// length, duplicates), so its problems are listed with all others.
 func validateAPIKeys(configuration *Configuration) error {
-	_, err := apiKeys(configuration.APIKeys, configuration.APIKeyPermissions)
-	return err
+	keys, err := apiKeys(configuration.APIKeys, configuration.APIKeyPermissions)
+	if err != nil || len(keys) == 0 {
+		return err
+	}
+	if _, err := apikey.New(&apikey.Options{Keys: keys}); err != nil {
+		return fmt.Errorf("API_KEYS: %w", err)
+	}
+	return nil
 }
 
 func validateProvider(configuration *Configuration) error {
@@ -685,6 +726,9 @@ func validateKeycloak(configuration *Configuration) error {
 
 func validateJWT(configuration *Configuration) error {
 	problems := []error{minimumProblem("JWT_LIFETIME_SECONDS", configuration.JWTLifetimeSeconds, 1)}
+	if err := forwardauth.ValidateJWTHeader(configuration.JWTHeader); err != nil {
+		problems = append(problems, fmt.Errorf("JWT_HEADER %w", err))
+	}
 	if configuration.JWTEnabled {
 		problems = append(problems, requireValues("JWT_ENABLED=true", namedValue{"JWT_PRIVATE_KEY", configuration.JWTPrivateKey}))
 	}
@@ -708,9 +752,9 @@ func requireValues(condition string, values ...namedValue) error {
 	return errors.Join(problems...)
 }
 
-func portProblem(name string, port int) error {
-	if port < 1 || port > maximumPort {
-		return fmt.Errorf("%s %d must be between 1 and %d", name, port, maximumPort)
+func rangeProblem(name string, value, minimum, maximum int) error {
+	if value < minimum || value > maximum {
+		return fmt.Errorf("%s %d must be between %d and %d", name, value, minimum, maximum)
 	}
 	return nil
 }
@@ -722,17 +766,18 @@ func minimumProblem(name string, value, minimum int) error {
 	return nil
 }
 
-// sameSiteMode parses SESSION_SAME_SITE.
+// sameSiteMode parses SESSION_SAME_SITE. Strict is refused: every login of the binary returns from the
+// provider's site, and a browser withholds a strict cookie, the login state with it, on that redirect.
 func sameSiteMode(value string) (http.SameSite, error) {
 	switch value {
 	case "lax":
 		return http.SameSiteLaxMode, nil
-	case "strict":
-		return http.SameSiteStrictMode, nil
 	case "none":
 		return http.SameSiteNoneMode, nil
+	case "strict":
+		return http.SameSiteDefaultMode, errors.New("SESSION_SAME_SITE=strict breaks the login: browsers withhold the cookie on the redirect back from the provider; use lax")
 	default:
-		return http.SameSiteDefaultMode, fmt.Errorf("SESSION_SAME_SITE %q must be lax, strict or none", value)
+		return http.SameSiteDefaultMode, fmt.Errorf("SESSION_SAME_SITE %q must be lax or none", value)
 	}
 }
 

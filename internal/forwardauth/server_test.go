@@ -1,9 +1,12 @@
 package forwardauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
@@ -18,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/jwt"
@@ -27,12 +31,12 @@ import (
 var errRedisDown = errors.New("redis down")
 
 func TestNewServerValidatesOptions(t *testing.T) {
-	guard, err := session.NewGuard(&session.GuardOptions{Store: newTestStore(t)})
+	guard, err := session.NewGuard(&session.GuardOptions{Store: newTestStore(t, nil)})
 	require.NoError(t, err)
 	valid := func() *ServerOptions {
 		return &ServerOptions{
 			PathPrefix: "/auth", Guard: guard, Emitter: wideevent.EmitterFunc(func(*wideevent.Event) {}),
-			SampleRate: 1, MetricsRegistry: prometheus.NewRegistry(),
+			Logger: slog.New(slog.DiscardHandler), SampleRate: 1, MetricsRegistry: prometheus.NewRegistry(),
 		}
 	}
 	testCases := []struct {
@@ -41,16 +45,21 @@ func TestNewServerValidatesOptions(t *testing.T) {
 	}{
 		{name: "no guard", change: func(options *ServerOptions) { options.Guard = nil }},
 		{name: "no emitter", change: func(options *ServerOptions) { options.Emitter = nil }},
+		{name: "no logger", change: func(options *ServerOptions) { options.Logger = nil }},
 		{name: "no metrics registry", change: func(options *ServerOptions) { options.MetricsRegistry = nil }},
 		{name: "empty path prefix", change: func(options *ServerOptions) { options.PathPrefix = "" }},
 		{name: "relative path prefix", change: func(options *ServerOptions) { options.PathPrefix = "auth" }},
 		{name: "path prefix with trailing slash", change: func(options *ServerOptions) { options.PathPrefix = "/auth/" }},
 		{name: "root path prefix", change: func(options *ServerOptions) { options.PathPrefix = "/" }},
 		{name: "path prefix with a gin parameter", change: func(options *ServerOptions) { options.PathPrefix = "/auth/:tenant" }},
+		{name: "path prefix with a dot-dot segment", change: func(options *ServerOptions) { options.PathPrefix = "/auth/.." }},
 		{name: "negative port", change: func(options *ServerOptions) { options.Port = -1 }},
 		{name: "metrics port out of range", change: func(options *ServerOptions) { options.MetricsPort = 65536 }},
 		{name: "sample rate zero", change: func(options *ServerOptions) { options.SampleRate = 0 }},
 		{name: "negative shutdown delay", change: func(options *ServerOptions) { options.ShutdownDelay = -time.Second }},
+		{name: "shutdown delay beyond the grace period", change: func(options *ServerOptions) { options.ShutdownDelay = 11 * time.Second }},
+		{name: "jwt header with a space", change: func(options *ServerOptions) { options.JWTHeader = "X Auth" }},
+		{name: "jwt header the check answer sets", change: func(options *ServerOptions) { options.JWTHeader = "cache-control" }},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -270,6 +279,18 @@ func TestMetricsLabelRouteTemplatesUnmatchedPathsAndUnknownMethods(t *testing.T)
 	require.Empty(t, problems)
 }
 
+func TestAnUnmatchedRequestIsRecordedAsAFailureAndKeptBySampling(t *testing.T) {
+	testHarness := newHarness(t, harnessOptions{sampleRate: 1000})
+
+	response := testHarness.serve(t, http.MethodGet, "/nothing/here", nil)
+
+	require.Equal(t, http.StatusNotFound, response.Code)
+	require.Equal(t, 1, testHarness.events.count(), "failures are always kept")
+	event := testHarness.events.last(t)
+	require.Equal(t, "failure", event["outcome"])
+	require.Equal(t, "no route", event["error"])
+}
+
 // requestCount returns the forwardauth_http_requests_total sample with exactly labels, or fails.
 func requestCount(t *testing.T, registry *prometheus.Registry, labels map[string]string) float64 {
 	t.Helper()
@@ -307,6 +328,30 @@ func TestTheWideEventCarriesARedactedQueryAndTheVersion(t *testing.T) {
 	encoded, err := json.Marshal(event)
 	require.NoError(t, err)
 	require.NotContains(t, string(encoded), "secret-")
+}
+
+func TestNeitherEmitterPrintsTheRawQuery(t *testing.T) {
+	callback := auth.Route{Method: http.MethodGet, Path: testRoutePath, Handler: http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusFound)
+	})}
+	testCases := []struct {
+		name       string
+		newEmitter func(writer io.Writer) wideevent.Emitter
+	}{
+		{name: "dev", newEmitter: func(writer io.Writer) wideevent.Emitter { return wideevent.DevWriterEmitter(writer) }},
+		{name: "json", newEmitter: wideevent.JSONWriterEmitter},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			output := &bytes.Buffer{}
+			testHarness := newHarness(t, harnessOptions{routes: []auth.Route{callback}, emitter: testCase.newEmitter(output)})
+
+			testHarness.serve(t, http.MethodGet, testRoutePath+"?code=secret-code&state=secret-state", nil)
+
+			require.Contains(t, output.String(), "code=redacted&state=redacted")
+			require.NotContains(t, output.String(), "secret-")
+		})
+	}
 }
 
 func TestTheSamplerKeepsFailuresRefusalsAndDegradedEvents(t *testing.T) {
@@ -397,6 +442,47 @@ func TestRunReturnsTheErrorOfAListenerThatCannotStart(t *testing.T) {
 	require.ErrorContains(t, err, "serve:")
 }
 
+func TestTheMetricsListenerServesOnlyGETMetrics(t *testing.T) {
+	testHarness := newHarness(t, harnessOptions{})
+	serveMetrics := func(method, target string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		testHarness.server.metricsServer.Handler.ServeHTTP(recorder, httptest.NewRequestWithContext(t.Context(), method, target, nil))
+		return recorder
+	}
+
+	metrics := serveMetrics(http.MethodGet, "/metrics")
+
+	require.Equal(t, http.StatusOK, metrics.Code)
+	require.Contains(t, metrics.Body.String(), "forwardauth_http_requests_in_flight")
+	require.Equal(t, http.StatusNotFound, serveMetrics(http.MethodGet, "/").Code)
+	require.Equal(t, http.StatusMethodNotAllowed, serveMetrics(http.MethodPost, "/metrics").Code)
+}
+
+func TestNetHTTPErrorLinesOfBothListenersAreJSONThroughTheLogger(t *testing.T) {
+	testHarness := newHarness(t, harnessOptions{})
+
+	testHarness.server.httpServer.ErrorLog.Print("http: Accept error: public")
+	testHarness.server.metricsServer.ErrorLog.Print("http: Accept error: metrics")
+
+	lines := strings.Split(strings.TrimSpace(testHarness.logs.String()), "\n")
+	require.Len(t, lines, 2)
+	for index, listener := range []string{"public", "metrics"} {
+		var line map[string]any
+		require.NoError(t, json.Unmarshal([]byte(lines[index]), &line))
+		require.Equal(t, "ERROR", line["level"])
+		require.Equal(t, "http: Accept error: "+listener, line["msg"])
+	}
+}
+
+func TestNewHTTPMetricsRequiresARegisterer(t *testing.T) {
+	for _, options := range []*httpMetricsOptions{nil, {pathPrefix: "/auth"}} {
+		metrics, err := newHTTPMetrics(options)
+
+		require.ErrorContains(t, err, "a registerer is required")
+		require.Nil(t, metrics)
+	}
+}
+
 func TestMethodLabelBoundsTheMethods(t *testing.T) {
 	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace} {
 		require.Equal(t, method, methodLabel(method))
@@ -405,7 +491,8 @@ func TestMethodLabelBoundsTheMethods(t *testing.T) {
 	require.Equal(t, "other", methodLabel("PROPFIND"))
 }
 
+// TestMain fails the package when a test leaves a goroutine behind, such as a listener of Run [TST-009].
 func TestMain(m *testing.M) {
 	gin.SetMode(gin.TestMode)
-	m.Run()
+	goleak.VerifyTestMain(m)
 }

@@ -5,6 +5,7 @@ package e2e
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,7 +37,8 @@ func TestTheIdentityEndpointIsMountedOnlyWhenEnabled(t *testing.T) {
 
 func TestReadinessFailsDuringTheShutdownDelayWhileTheProcessStillServes(t *testing.T) {
 	fake := fakeprovider.StartGitHub(t, fakeprovider.GitHubOptions{})
-	running := start(t, merged(gitHubEnvironment(t, fake), map[string]string{"SHUTDOWN_DELAY_SECONDS": "1"}))
+	// The delay is far longer than the assertions need, so a loaded machine cannot close the listener under them.
+	running := start(t, merged(gitHubEnvironment(t, fake), map[string]string{"SHUTDOWN_DELAY_SECONDS": "5"}))
 	client := newBrowser(t)
 	require.Equal(t, http.StatusOK, client.get(running.baseURL+"/auth/ready", nil).status)
 
@@ -44,7 +46,7 @@ func TestReadinessFailsDuringTheShutdownDelayWhileTheProcessStillServes(t *testi
 
 	require.Eventually(t, func() bool {
 		return client.get(running.baseURL+"/auth/ready", nil).status == http.StatusServiceUnavailable
-	}, 900*time.Millisecond, 20*time.Millisecond)
+	}, 3*time.Second, 20*time.Millisecond)
 	require.Equal(t, http.StatusOK, client.get(running.baseURL+"/auth/health", nil).status, "liveness stays up while draining")
 	select {
 	case <-running.exited:
@@ -68,6 +70,7 @@ func TestTheMetricsPortServesRequestAndOutcomeMetrics(t *testing.T) {
 	require.Contains(t, metrics.body, "go_goroutines")
 	require.Contains(t, metrics.body, "go_build_info")
 	require.Equal(t, http.StatusNotFound, client.get(running.baseURL+"/metrics", nil).status, "metrics never on the public port")
+	require.Equal(t, http.StatusNotFound, client.get(running.metricsURL+"/", nil).status, "only /metrics on the metrics port")
 }
 
 func TestTheWideEventsAreJSONLinesWithoutSecrets(t *testing.T) {
@@ -82,4 +85,17 @@ func TestTheWideEventsAreJSONLinesWithoutSecrets(t *testing.T) {
 	require.Contains(t, output, `"query":"code=redacted&state=redacted"`)
 	require.NotContains(t, output, fake.ClientSecret())
 	require.NotContains(t, output, "octocat@example.com", "no emails in the events")
+	require.Contains(t, output, `"http":{"github":{"calls":`, "the callback's event sums its GitHub calls")
+	require.Contains(t, person.get(running.metricsURL+"/metrics", nil).body, `forwardauth_dependency_request_duration_seconds_count{dependency="github",operation="POST",outcome="success"}`)
+}
+
+func TestTheDevEmitterPrintsNoQueryValues(t *testing.T) {
+	fake := fakeprovider.StartGitHub(t, fakeprovider.GitHubOptions{})
+	running := start(t, merged(gitHubEnvironment(t, fake), map[string]string{"DEV_MODE": "true", "WIDE_EVENT_SAMPLE_RATE": "1"}))
+
+	refused := newBrowser(t).get(running.baseURL+"/auth/github/callback?code=dev-mode-code&state=dev-mode-state", nil)
+
+	require.GreaterOrEqual(t, refused.status, http.StatusBadRequest)
+	require.Eventually(t, func() bool { return strings.Contains(running.output.String(), "code=redacted&state=redacted") }, 5*time.Second, 20*time.Millisecond)
+	require.NotContains(t, running.output.String(), "dev-mode-")
 }

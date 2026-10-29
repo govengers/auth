@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"runtime/debug"
@@ -25,6 +26,7 @@ import (
 	"github.com/govengers/auth/apikey"
 	"github.com/govengers/auth/ginadapter"
 	"github.com/govengers/auth/internal/httpjson"
+	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/jwt"
 	"github.com/govengers/auth/session"
 )
@@ -35,28 +37,36 @@ const (
 	readinessCheckTimeout = 2 * time.Second
 	shutdownTimeout       = 20 * time.Second // below the 30 s default termination grace period [LAY-003]
 	maximumPort           = 65535
+
+	// MaximumShutdownDelay keeps ShutdownDelay plus the 20 s drain within the 30 s default termination
+	// grace period of a pod [LAY-003].
+	MaximumShutdownDelay = 10 * time.Second
 )
 
-// pathPattern is an absolute path of one or more non-empty segments without a trailing "/" and without
-// characters gin would read as a parameter or wildcard.
-var pathPattern = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
+// errNoRoute is the failure of a request no route matches: recorded, so the sampler keeps path scans and
+// a wrong Traefik address [LOG-002, LOG-011].
+var errNoRoute = errors.New("no route")
+
+// headerNamePattern is an RFC 9110 field name (a token); net/http silently drops a header with any other name.
+var headerNamePattern = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 
 // ServerOptions configure a Server. main fills them from the configuration.
 type ServerOptions struct {
 	Version           string
 	Port, MetricsPort int                             // 0 picks a free port (tests)
-	PathPrefix        string                          // required: starts with "/", no trailing "/", e.g. "/auth"
+	PathPrefix        string                          // required: redirect.IsPathPrefix (no gin parameter, wildcard or "." segment), e.g. "/auth"
 	Routes            []auth.Route                    // provider routes, absolute paths
 	Guard             *session.Guard                  // required
 	APIKeys           *apikey.Authenticator           // optional; runs before the Guard on the checks
 	Signer            *jwt.Signer                     // optional; enables the JWT header and {prefix}/jwks
-	JWTHeader         string                          // default "Authorization"; value "Bearer <jwt>"
+	JWTHeader         string                          // default "Authorization"; value "Bearer <jwt>"; see ValidateJWTHeader
 	IdentityEndpoint  bool                            // mounts {prefix}/me
 	Emitter           wideevent.Emitter               // required
+	Logger            *slog.Logger                    // required: net/http's own error lines (accept errors, panics outside gin) [LOG-013]
 	SampleRate        int                             // required, >= 1: keep every Nth successful event
 	MetricsRegistry   *prometheus.Registry            // required; runtime collectors registered by main [MET-002]
 	ReadinessCheck    func(ctx context.Context) error // optional (Redis ping)
-	ShutdownDelay     time.Duration                   // readiness answers 503 this long before the listeners drain
+	ShutdownDelay     time.Duration                   // 0..MaximumShutdownDelay; readiness answers 503 this long before the listeners drain
 }
 
 // Server serves the forward-auth routes and the metrics endpoint. Build it with NewServer and call Run once.
@@ -76,13 +86,14 @@ func NewServer(options *ServerOptions) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	metrics, err := newHTTPMetrics(resolved.MetricsRegistry, resolved.PathPrefix)
+	metrics, err := newHTTPMetrics(&httpMetricsOptions{registerer: resolved.MetricsRegistry, pathPrefix: resolved.PathPrefix})
 	if err != nil {
 		return nil, err
 	}
 	server := &Server{options: resolved, delay: time.Sleep}
 	server.ready.Store(true)
 	server.engine = server.newEngine(metrics)
+	errorLog := slog.NewLogLogger(resolved.Logger.Handler(), slog.LevelError)
 	server.httpServer = &http.Server{
 		Addr:              ":" + strconv.Itoa(resolved.Port),
 		Handler:           server.engine,
@@ -90,18 +101,22 @@ func NewServer(options *ServerOptions) (*Server, error) {
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		ErrorLog:          errorLog,
 	}
+	metricsRoutes := http.NewServeMux()
+	metricsRoutes.Handle("GET /metrics", promhttp.HandlerFor(resolved.MetricsRegistry, promhttp.HandlerOpts{Registry: resolved.MetricsRegistry}))
 	server.metricsServer = &http.Server{
 		Addr:              ":" + strconv.Itoa(resolved.MetricsPort),
-		Handler:           promhttp.HandlerFor(resolved.MetricsRegistry, promhttp.HandlerOpts{Registry: resolved.MetricsRegistry}),
+		Handler:           metricsRoutes,
 		ReadHeaderTimeout: 5 * time.Second,
+		ErrorLog:          errorLog,
 	}
 	return server, nil
 }
 
 func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
-	if options == nil || options.Guard == nil || options.Emitter == nil || options.MetricsRegistry == nil {
-		return ServerOptions{}, errors.New("forwardauth server: Guard, Emitter and MetricsRegistry are required")
+	if options == nil || options.Guard == nil || options.Emitter == nil || options.Logger == nil || options.MetricsRegistry == nil {
+		return ServerOptions{}, errors.New("forwardauth server: Guard, Emitter, Logger and MetricsRegistry are required")
 	}
 	resolved := *options
 	resolved.Routes = slices.Clone(options.Routes)
@@ -109,8 +124,11 @@ func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
 		resolved.JWTHeader = defaultJWTHeader
 	}
 	var problems []error
-	if !validPathPrefix(resolved.PathPrefix) {
-		problems = append(problems, fmt.Errorf("PathPrefix %q must be an absolute path without a trailing \"/\"", resolved.PathPrefix))
+	if !redirect.IsPathPrefix(resolved.PathPrefix) {
+		problems = append(problems, fmt.Errorf("PathPrefix %q must be \"/\"-separated segments of A-Z a-z 0-9 . _ ~ - without a trailing \"/\" and without a \".\" or \"..\" segment", resolved.PathPrefix))
+	}
+	if err := ValidateJWTHeader(resolved.JWTHeader); err != nil {
+		problems = append(problems, fmt.Errorf("JWTHeader %w", err))
 	}
 	if !validPort(resolved.Port) || !validPort(resolved.MetricsPort) {
 		problems = append(problems, fmt.Errorf("ports %d and %d must be between 0 and %d", resolved.Port, resolved.MetricsPort, maximumPort))
@@ -118,8 +136,8 @@ func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
 	if resolved.SampleRate < 1 {
 		problems = append(problems, fmt.Errorf("SampleRate %d must be at least 1", resolved.SampleRate))
 	}
-	if resolved.ShutdownDelay < 0 {
-		problems = append(problems, fmt.Errorf("ShutdownDelay %s must not be negative", resolved.ShutdownDelay))
+	if resolved.ShutdownDelay < 0 || resolved.ShutdownDelay > MaximumShutdownDelay {
+		problems = append(problems, fmt.Errorf("ShutdownDelay %s must be between 0 and %s", resolved.ShutdownDelay, MaximumShutdownDelay))
 	}
 	if len(problems) > 0 {
 		return ServerOptions{}, fmt.Errorf("forwardauth server: %w", errors.Join(problems...))
@@ -127,8 +145,17 @@ func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
 	return resolved, nil
 }
 
-func validPathPrefix(pathPrefix string) bool {
-	return pathPattern.MatchString(pathPrefix)
+// ValidateJWTHeader reports why name cannot carry the JWT of a check answer: it must be a header name,
+// and not one the check answer or net/http sets itself, which would overwrite or drop the token.
+func ValidateJWTHeader(name string) error {
+	if !headerNamePattern.MatchString(name) {
+		return fmt.Errorf("%q is not an HTTP header name", name)
+	}
+	switch http.CanonicalHeaderKey(name) {
+	case "Cache-Control", "Set-Cookie", "Connection", "Content-Length", "Transfer-Encoding":
+		return fmt.Errorf("%q is set by the check answer itself", name)
+	}
+	return nil
 }
 
 func validPort(port int) bool {
@@ -136,17 +163,18 @@ func validPort(port int) bool {
 }
 
 // newEngine builds the gin engine: wide event outermost so it records the final status, then the HTTP
-// metrics, then the panic recovery, then the routes.
+// metrics, then the sums of the outbound calls, then the panic recovery, then the routes.
 func (s *Server) newEngine(metrics *httpMetrics) *gin.Engine {
 	engine := gin.New()
 	engine.Use(
 		wideevent.Middleware(
-			wideevent.WithEmitter(s.options.Emitter),
+			wideevent.WithEmitter(latestValues(s.options.Emitter)),
 			wideevent.WithSampler(sampler(s.options.SampleRate)),
 			wideevent.WithPreEnricher(s.recordRequest),
 			wideevent.WithSkipPaths(s.path("/health"), s.path("/ready")),
 		),
 		metrics.middleware,
+		recordDependencies,
 		recovery,
 	)
 	engine.NoRoute(routeNotFound)
@@ -242,6 +270,9 @@ func health(ginContext *gin.Context) {
 }
 
 func routeNotFound(ginContext *gin.Context) {
+	if we := wideevent.FromGin(ginContext); we != nil {
+		we.Failure(errNoRoute)
+	}
 	httpjson.Write(ginContext.Writer, http.StatusNotFound, auth.ErrorResponse{Code: "not_found", Message: "not found"})
 }
 

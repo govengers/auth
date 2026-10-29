@@ -37,6 +37,26 @@ func sampler(rate int) wideevent.Sampler {
 	)
 }
 
+// latestValues hands emitter a copy of every event with only the latest value of each field. The
+// pre-enricher replaces request.query by setting it again; the JSON emitter prints the latest value,
+// the dev emitter every value, the raw query included [LOG-009].
+func latestValues(emitter wideevent.Emitter) wideevent.Emitter {
+	return wideevent.EmitterFunc(func(we *wideevent.Event) {
+		fields := we.Fields()
+		latest := make(map[string]int, len(fields))
+		for index, field := range fields {
+			latest[field.Key] = index
+		}
+		deduplicated := &wideevent.Event{}
+		for index, field := range fields {
+			if latest[field.Key] == index {
+				deduplicated.Set(field.Key, field.Value)
+			}
+		}
+		emitter.Emit(deduplicated)
+	})
+}
+
 // recordRequest is the wide-event pre-enricher: it replaces the query the middleware recorded verbatim
 // (callbacks carry code and state) [LOG-009] and records the version and what Traefik asks to forward.
 // Only the path of X-Forwarded-Uri is recorded, never its query.

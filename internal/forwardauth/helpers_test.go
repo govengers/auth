@@ -1,11 +1,13 @@
 package forwardauth
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -63,6 +65,7 @@ type harness struct {
 	store    *session.Store
 	registry *prometheus.Registry
 	events   *eventRecorder
+	logs     *bytes.Buffer // what the Logger wrote; read it only after the server stopped
 }
 
 type harnessOptions struct {
@@ -74,6 +77,8 @@ type harnessOptions struct {
 	sampleRate       int
 	routes           []auth.Route
 	readinessCheck   func(ctx context.Context) error
+	emitter          wideevent.Emitter // replaces the event recorder
+	dependencies     *Dependencies     // records the session store's calls
 }
 
 func newHarness(t *testing.T, options harnessOptions) *harness {
@@ -82,10 +87,11 @@ func newHarness(t *testing.T, options harnessOptions) *harness {
 	counter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: registry, Namespace: metricsNamespace})
 	require.NoError(t, err)
 	observer := NewObserver(counter)
-	store := newTestStore(t)
+	store := newTestStore(t, options.dependencies)
 	guard, err := session.NewGuard(&session.GuardOptions{Store: store, LoginURL: testLoginURL, ReturnPathHeader: "X-Forwarded-Uri", Observer: observer})
 	require.NoError(t, err)
 	events := &eventRecorder{}
+	logs := &bytes.Buffer{}
 	serverOptions := &ServerOptions{
 		Version:          "1.2.3",
 		PathPrefix:       "/auth",
@@ -95,9 +101,13 @@ func newHarness(t *testing.T, options harnessOptions) *harness {
 		JWTHeader:        options.jwtHeader,
 		IdentityEndpoint: options.identityEndpoint,
 		Emitter:          wideevent.EmitterFunc(events.emit),
+		Logger:           slog.New(slog.NewJSONHandler(logs, nil)),
 		SampleRate:       1,
 		MetricsRegistry:  registry,
 		ReadinessCheck:   options.readinessCheck,
+	}
+	if options.emitter != nil {
+		serverOptions.Emitter = options.emitter
 	}
 	if options.sampleRate != 0 {
 		serverOptions.SampleRate = options.sampleRate
@@ -107,13 +117,18 @@ func newHarness(t *testing.T, options harnessOptions) *harness {
 	}
 	server, err := NewServer(serverOptions)
 	require.NoError(t, err)
-	return &harness{server: server, store: store, registry: registry, events: events}
+	return &harness{server: server, store: store, registry: registry, events: events, logs: logs}
 }
 
-func newTestStore(t *testing.T) *session.Store {
+// newTestStore returns a store on a memory backend; with dependencies, its calls are recorded as Redis.
+func newTestStore(t *testing.T, dependencies *Dependencies) *session.Store {
 	t.Helper()
+	var backend session.Backend
 	backend, err := session.NewMemoryBackend(nil)
 	require.NoError(t, err)
+	if dependencies != nil {
+		backend = dependencies.Backend(backend)
+	}
 	store, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: []byte("0123456789abcdef0123456789abcdef")})
 	require.NoError(t, err)
 	return store

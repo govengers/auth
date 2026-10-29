@@ -39,7 +39,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	// `docker compose up --wait` returns when the containers run; poll until the routes answer.
-	for _, target := range []string{issuerURL + "/.well-known/openid-configuration", appURL + "/auth/health"} {
+	for _, target := range []string{issuerURL + "/.well-known/openid-configuration", appURL + "/auth/jwks"} {
 		if err := waitFor(target); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
