@@ -240,15 +240,20 @@ func randomCode(alphabet []rune, length int) (string, error) {
 }
 
 // matchingBackupCode returns the hash among hashes that code verifies against. Codes are compared lower-case
-// and without surrounding white space, as they were issued.
-func matchingBackupCode(hashes []string, code string) (string, bool) {
+// and without surrounding white space, as they were issued. A hash Verify cannot read is an error: it was stored
+// by enable, so it is corrupt.
+func matchingBackupCode(hashes []string, code string) (string, bool, error) {
 	normalized := strings.ToLower(strings.TrimSpace(code))
 	for _, hash := range hashes {
-		if matched, err := Verify(normalized, hash); err == nil && matched {
-			return hash, true
+		matched, err := Verify(normalized, hash)
+		if err != nil {
+			return "", false, err
+		}
+		if matched {
+			return hash, true, nil
 		}
 	}
-	return "", false
+	return "", false, nil
 }
 
 // consumeBackupCode reports whether code is one of the user's unused backup codes, which it consumes. With backup
@@ -257,7 +262,10 @@ func (p *Provider) consumeBackupCode(ctx context.Context, user *User, code strin
 	if p.options.TOTP.DisableBackupCodes {
 		return false, nil
 	}
-	hash, found := matchingBackupCode(user.BackupCodeHashes, code)
+	hash, found, err := matchingBackupCode(user.BackupCodeHashes, code)
+	if err != nil {
+		return false, fmt.Errorf("verify backup code of user %s: %w", user.ID, err)
+	}
 	if !found {
 		return false, nil
 	}

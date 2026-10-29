@@ -206,6 +206,12 @@ func (c *client) copy() *client {
 // post sends body as JSON; a string body is sent as it is.
 func (c *client) post(path string, body any) *httptest.ResponseRecorder {
 	c.t.Helper()
+	return c.send(c.postRequest(path, body))
+}
+
+// postRequest returns the request post sends, without cookies.
+func (c *client) postRequest(path string, body any) *http.Request {
+	c.t.Helper()
 	encoded, isText := body.(string)
 	if !isText {
 		marshalled, err := json.Marshal(body)
@@ -214,7 +220,18 @@ func (c *client) post(path string, body any) *httptest.ResponseRecorder {
 	}
 	request := httptest.NewRequestWithContext(c.t.Context(), http.MethodPost, path, bytes.NewBufferString(encoded))
 	request.Header.Set("Content-Type", "application/json")
-	return c.send(request)
+	return request
+}
+
+// postStatus sends a request of postRequest and returns only its status; it neither keeps cookies nor fails the
+// test, so it may run off the test goroutine (postRequest may not).
+func (c *client) postStatus(request *http.Request) int {
+	for _, cookie := range c.cookies {
+		request.AddCookie(cookie)
+	}
+	recorder := httptest.NewRecorder()
+	c.handler.ServeHTTP(recorder, request)
+	return recorder.Code
 }
 
 func (c *client) get(path string) *httptest.ResponseRecorder {
@@ -294,6 +311,18 @@ func (f *fixture) sessionIdentity(t *testing.T, browser *client) (*auth.Identity
 		return nil, err
 	}
 	return current.Identity(t.Context())
+}
+
+// putSessionValue stores value under key in the client's session, e.g. a corrupt one.
+func (f *fixture) putSessionValue(t *testing.T, browser *client, key, value string) {
+	t.Helper()
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody)
+	for _, cookie := range browser.cookies {
+		request.AddCookie(cookie)
+	}
+	current, err := f.sessions.Open(request)
+	require.NoError(t, err)
+	require.NoError(t, current.Put(t.Context(), key, []byte(value), time.Minute))
 }
 
 // failingStorage fails the operation named in failing and delegates everything else.

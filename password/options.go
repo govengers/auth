@@ -163,10 +163,7 @@ func validateTOTPOptions(options TOTPOptions) error {
 // to resist guessing.
 func validateBackupCodes(alphabet string, length int) error {
 	characters := distinctRunes(alphabet)
-	widest := 0
-	for _, character := range characters {
-		widest = max(widest, utf8.RuneLen(character))
-	}
+	widest := widestRuneLength(characters)
 	switch {
 	case strings.ContainsFunc(alphabet, unicode.IsSpace):
 		return errors.New("BackupCodeAlphabet contains white space")
@@ -178,6 +175,15 @@ func validateBackupCodes(alphabet string, length int) error {
 		return fmt.Errorf("BackupCodeLength %d over %d characters makes fewer than %d codes", length, len(characters), minimumBackupCodeSpace)
 	}
 	return nil
+}
+
+// widestRuneLength returns the UTF-8 length in bytes of the widest of characters; 0 for none.
+func widestRuneLength(characters []rune) int {
+	widest := 0
+	for _, character := range characters {
+		widest = max(widest, utf8.RuneLen(character))
+	}
+	return widest
 }
 
 // distinctRunes returns the runes of text, each once.
