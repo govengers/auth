@@ -96,15 +96,25 @@ func resolveVerifierOptions(options *VerifierOptions) (VerifierOptions, error) {
 	return resolved, nil
 }
 
+// validateJWKSURL checks jwksURL. Its errors never quote user info or query, which may carry credentials.
 func validateJWKSURL(jwksURL string) error {
 	parsed, err := url.Parse(jwksURL)
 	if err != nil {
-		return fmt.Errorf("JWKSURL: %w", err)
+		var urlError *url.Error
+		if errors.As(err, &urlError) {
+			err = urlError.Err // without the URL
+		}
+		return fmt.Errorf("JWKSURL is no URL: %w", err)
 	}
 	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return fmt.Errorf("JWKSURL %q must be an absolute http or https URL", jwksURL)
+		return fmt.Errorf("JWKSURL %s must be an absolute http or https URL", redactedURL(parsed))
 	}
 	return nil
+}
+
+// redactedURL is location without user info, query and fragment, for error messages [LOG-009].
+func redactedURL(location *url.URL) string {
+	return (&url.URL{Scheme: location.Scheme, Host: location.Host, Path: location.Path}).String()
 }
 
 // Verify checks the token's signature (with the JWKS key named by its kid, under the key's algorithm),
@@ -209,21 +219,26 @@ func fetchKeySet(ctx context.Context, httpClient *http.Client, jwksURL string) (
 	if err != nil {
 		return nil, fmt.Errorf("build JWKS request: %w", err)
 	}
+	location := redactedURL(request.URL)
 	response, err := httpClient.Do(request)
 	if err != nil {
+		var urlError *url.Error
+		if errors.As(err, &urlError) {
+			urlError.URL = location
+		}
 		return nil, fmt.Errorf("fetch JWKS: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch JWKS %s: status %d", jwksURL, response.StatusCode)
+		return nil, fmt.Errorf("fetch JWKS %s: status %d", location, response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maximumKeySetBytes))
 	if err != nil {
-		return nil, fmt.Errorf("read JWKS %s: %w", jwksURL, err)
+		return nil, fmt.Errorf("read JWKS %s: %w", location, err)
 	}
 	keys, err := jwk.Parse(body)
 	if err != nil {
-		return nil, dependency.Error("parse JWKS "+jwksURL, err)
+		return nil, dependency.Error("parse JWKS "+location, err)
 	}
 	return signingKeys(keys)
 }

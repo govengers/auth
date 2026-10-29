@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -122,7 +123,7 @@ func TestNewVerifierRejectsInvalidOptions(t *testing.T) {
 		{name: "missing URL", options: &VerifierOptions{Issuer: testIssuer}, wantError: "absolute http or https URL"},
 		{name: "relative URL", options: &VerifierOptions{JWKSURL: "/auth/jwks", Issuer: testIssuer}, wantError: "absolute http or https URL"},
 		{name: "other scheme", options: &VerifierOptions{JWKSURL: "ftp://auth.example.com/jwks", Issuer: testIssuer}, wantError: "absolute http or https URL"},
-		{name: "unparsable URL", options: &VerifierOptions{JWKSURL: "http://auth example.com/%zz", Issuer: testIssuer}, wantError: "JWKSURL"},
+		{name: "unparsable URL", options: &VerifierOptions{JWKSURL: "http://auth example.com/%zz", Issuer: testIssuer}, wantError: "JWKSURL is no URL"},
 		{name: "missing issuer", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks"}, wantError: "Issuer is required"},
 		{name: "refresh interval in nanoseconds", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks", Issuer: testIssuer, RefreshInterval: 300}, wantError: "RefreshInterval 300ns is below 1m0s"},
 		{name: "negative refresh interval", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks", Issuer: testIssuer, RefreshInterval: -time.Hour}, wantError: "is below 1m0s"},
@@ -252,6 +253,37 @@ func TestVerifyIgnoresSymmetricKeysOfTheJWKS(t *testing.T) {
 	identity, err := verifier.Verify(t.Context(), valid)
 	require.NoError(t, err)
 	require.Equal(t, "42", identity.Subject)
+}
+
+func TestVerifierErrorsOmitCredentialsOfTheJWKSURL(t *testing.T) {
+	withCredentials := func(serverURL string) string {
+		location, err := url.Parse(serverURL)
+		require.NoError(t, err)
+		location.User = url.UserPassword("user", "secret-password")
+		location.RawQuery = "token=secret-query"
+		return location.String()
+	}
+	closed := httptest.NewServer(failingHandler)
+	closed.Close()
+	testCases := []struct {
+		name      string
+		jwksURL   string
+		wantError string
+	}{
+		{name: "unparsable", jwksURL: "http://user:secret-password@auth example.com/%zz?token=secret-query", wantError: "JWKSURL is no URL"},
+		{name: "other scheme", jwksURL: "ftp://user:secret-password@auth.example.com/jwks?token=secret-query", wantError: "JWKSURL ftp://auth.example.com/jwks must be"},
+		{name: "unreachable", jwksURL: withCredentials(closed.URL), wantError: "fetch JWKS: Get \"" + closed.URL + "\""},
+		{name: "server error", jwksURL: withCredentials(newKeySetServer(t, failingHandler).server.URL), wantError: "status 500"},
+		{name: "not a key set", jwksURL: withCredentials(newKeySetServer(t, keySetHandler(t, map[string]any{"kty": "RSA"})).server.URL), wantError: "parse JWKS http://127.0.0.1"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := NewVerifier(t.Context(), testVerifierOptions(testCase.jwksURL))
+
+			require.ErrorContains(t, err, testCase.wantError)
+			require.NotContains(t, err.Error(), "secret")
+		})
+	}
 }
 
 func TestVerifyReturnsEveryIdentityField(t *testing.T) {
