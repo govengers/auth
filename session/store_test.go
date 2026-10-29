@@ -169,9 +169,6 @@ func TestStartWithAnUnknownCookieWritesNothing(t *testing.T) {
 	requireAuthenticated(t, store, victim)
 }
 
-// An attacker chaining login starts (each one revokes the previous login state) must not evict live
-// sessions with markers: a marker lives no longer than the state it replaced and is never evicted, so the
-// attacker's own Put fails once the backend is full.
 // A chain of login starts, each revoking the previous one's 10-minute state, fills a full memory backend
 // with markers: it must neither block new sessions nor evict a real session expiring later.
 func TestAFloodOfLoginStartsBlocksNoSession(t *testing.T) {
