@@ -50,9 +50,6 @@ const (
 	claimMapperDefault = "default"
 	claimMapperGoogle  = "google"
 
-	grantTypeClientCredentials = "client_credentials"
-	grantTypePassword          = "password"
-
 	redisStartupTimeout = 5 * time.Second
 )
 
@@ -208,13 +205,17 @@ func newServer(ctx context.Context, configuration *Configuration, sessions *sess
 	if err != nil {
 		return nil, err
 	}
-	apiKeys, err := newAPIKeys(configuration, observer)
-	if err != nil {
-		return nil, err
+	var apiKeys *apikey.Authenticator // without API keys, the checks run without their middleware
+	if configuration.APIKeysEnabled {
+		if apiKeys, err = newAPIKeys(configuration, observer); err != nil {
+			return nil, err
+		}
 	}
-	signer, err := newSigner(configuration)
-	if err != nil {
-		return nil, err
+	var signer *jwt.Signer // without JWT, the checks answer without a token
+	if configuration.JWTEnabled {
+		if signer, err = newSigner(configuration); err != nil {
+			return nil, err
+		}
 	}
 	return forwardauth.NewServer(&forwardauth.ServerOptions{
 		Version:          version,
@@ -365,9 +366,13 @@ func newProvider(ctx context.Context, configuration *Configuration, store *sessi
 // newOIDCProvider runs the issuer's discovery, so an unreachable issuer fails the boot. With
 // KEYCLOAK_ENABLED, the Keycloak Admin API enriches (and may refuse) every login.
 func newOIDCProvider(ctx context.Context, configuration *Configuration, store *session.Store, observer auth.Observer, dependencies *forwardauth.Dependencies) (selectedProvider, error) {
-	onLogin, err := newKeycloakHook(configuration, dependencies)
-	if err != nil {
-		return selectedProvider{}, err
+	var onLogin auth.Hook // without Keycloak, logins keep the token's roles and groups
+	if configuration.KeycloakEnabled {
+		hook, err := newKeycloakHook(configuration, dependencies)
+		if err != nil {
+			return selectedProvider{}, err
+		}
+		onLogin = hook
 	}
 	provider, err := oidc.New(ctx, &oidc.Options{
 		Name:                         configuration.OIDCName,
@@ -399,11 +404,8 @@ func claimMapper(name string) oidc.ClaimMapper {
 	return oidc.DefaultClaimMapper
 }
 
-// newKeycloakHook returns nil when KEYCLOAK_ENABLED is false: logins then keep the token's roles and groups.
+// newKeycloakHook enriches (and may refuse) every login through the Keycloak Admin API.
 func newKeycloakHook(configuration *Configuration, dependencies *forwardauth.Dependencies) (auth.Hook, error) {
-	if !configuration.KeycloakEnabled {
-		return nil, nil // Keycloak disabled is not an error
-	}
 	client, err := keycloak.New(&keycloak.Options{
 		URL:                 configuration.KeycloakURL,
 		Realm:               configuration.KeycloakRealm,
@@ -450,11 +452,7 @@ func newGitHubProvider(configuration *Configuration, store *session.Store, obser
 	return selectedProvider{routes: provider.Routes(), loginURL: provider.LoginURL(), refreshers: []session.Refresher{provider}}, nil
 }
 
-// newAPIKeys returns nil when API_KEYS_ENABLED is false: the checks then run without the API key middleware.
 func newAPIKeys(configuration *Configuration, observer auth.Observer) (*apikey.Authenticator, error) {
-	if !configuration.APIKeysEnabled {
-		return nil, nil // API keys disabled is not an error
-	}
 	keys, err := apiKeys(configuration.APIKeys, configuration.APIKeyPermissions)
 	if err != nil {
 		return nil, err
@@ -462,11 +460,7 @@ func newAPIKeys(configuration *Configuration, observer auth.Observer) (*apikey.A
 	return apikey.New(&apikey.Options{Keys: keys, Observer: observer})
 }
 
-// newSigner returns nil when JWT_ENABLED is false: the checks then answer without a token.
 func newSigner(configuration *Configuration) (*jwt.Signer, error) {
-	if !configuration.JWTEnabled {
-		return nil, nil // JWT disabled is not an error
-	}
 	issuer := configuration.JWTIssuer
 	if issuer == "" {
 		issuer = strings.TrimSuffix(configuration.ExternalURL, "/")
@@ -554,7 +548,7 @@ func keycloakValues(configuration *Configuration) []config.Value {
 		config.String("KEYCLOAK_URL").Default("").Into(&configuration.KeycloakURL),
 		config.String("KEYCLOAK_REALM").Default("").Into(&configuration.KeycloakRealm),
 		config.String("KEYCLOAK_AUTHENTICATION_REALM").Default("").Into(&configuration.KeycloakAuthenticationRealm),
-		config.String("KEYCLOAK_GRANT_TYPE").NotEmpty().Default(grantTypeClientCredentials).Into(&configuration.KeycloakGrantType),
+		config.String("KEYCLOAK_GRANT_TYPE").NotEmpty().Default(string(keycloak.GrantTypeClientCredentials)).Into(&configuration.KeycloakGrantType),
 		config.String("KEYCLOAK_CLIENT_ID").Default("").Into(&configuration.KeycloakClientID),
 		config.String("KEYCLOAK_CLIENT_SECRET").Default("").Sensitive().Into(&configuration.KeycloakClientSecret),
 		config.String("KEYCLOAK_USERNAME").Default("").Into(&configuration.KeycloakUsername),
@@ -727,19 +721,19 @@ func validateKeycloak(configuration *Configuration) error {
 		namedValue{"KEYCLOAK_URL", configuration.KeycloakURL},
 		namedValue{"KEYCLOAK_REALM", configuration.KeycloakRealm},
 	))
-	switch configuration.KeycloakGrantType {
-	case grantTypeClientCredentials:
+	switch keycloak.GrantType(configuration.KeycloakGrantType) {
+	case keycloak.GrantTypeClientCredentials:
 		problems = append(problems, requireValues("KEYCLOAK_GRANT_TYPE=client_credentials",
 			namedValue{"KEYCLOAK_CLIENT_ID", configuration.KeycloakClientID},
 			namedValue{"KEYCLOAK_CLIENT_SECRET", configuration.KeycloakClientSecret},
 		))
-	case grantTypePassword:
+	case keycloak.GrantTypePassword:
 		problems = append(problems, requireValues("KEYCLOAK_GRANT_TYPE=password",
 			namedValue{"KEYCLOAK_USERNAME", configuration.KeycloakUsername},
 			namedValue{"KEYCLOAK_PASSWORD", configuration.KeycloakPassword},
 		))
 	default:
-		problems = append(problems, fmt.Errorf("KEYCLOAK_GRANT_TYPE %q must be %s or %s", configuration.KeycloakGrantType, grantTypeClientCredentials, grantTypePassword))
+		problems = append(problems, fmt.Errorf("KEYCLOAK_GRANT_TYPE %q must be %s or %s", configuration.KeycloakGrantType, keycloak.GrantTypeClientCredentials, keycloak.GrantTypePassword))
 	}
 	return errors.Join(problems...)
 }

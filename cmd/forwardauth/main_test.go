@@ -9,6 +9,7 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/apikey"
+	"github.com/govengers/auth/oidc/keycloak"
 )
 
 const (
@@ -25,7 +26,7 @@ func validOIDCConfiguration() *Configuration {
 		SessionMaximumAgeSeconds: 86400, SessionRefreshIntervalSeconds: 60, SessionRedisKeyPrefix: "forwardauth",
 		OIDCName: "oidc", OIDCIssuer: "https://idp.example.com", OIDCClientID: "forwardauth", OIDCClientSecret: "client-secret",
 		OIDCScopes: []string{"openid", "profile", "email"}, OIDCClaimMapper: claimMapperDefault,
-		KeycloakGrantType: grantTypeClientCredentials, GitHubScopes: []string{"read:org"},
+		KeycloakGrantType: string(keycloak.GrantTypeClientCredentials), GitHubScopes: []string{"read:org"},
 		JWTLifetimeSeconds: 300, JWTHeader: "Authorization",
 	}
 }
@@ -75,7 +76,7 @@ func TestValidateConfigurationAcceptsCompleteSetups(t *testing.T) {
 		}},
 		{name: "keycloak with the password grant", configuration: func() *Configuration {
 			configuration := validOIDCConfiguration()
-			configuration.KeycloakEnabled, configuration.KeycloakGrantType = true, grantTypePassword
+			configuration.KeycloakEnabled, configuration.KeycloakGrantType = true, string(keycloak.GrantTypePassword)
 			configuration.KeycloakURL, configuration.KeycloakRealm = "https://keycloak.example.com", "company"
 			configuration.KeycloakUsername, configuration.KeycloakPassword = "admin", "admin-password"
 			return configuration
@@ -135,7 +136,7 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		}, problems: []string{"KEYCLOAK_ENABLED=true requires PROVIDER=oidc"}},
 		{name: "keycloak without anything", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.KeycloakEnabled = true }, problems: []string{"KEYCLOAK_URL", "KEYCLOAK_REALM", "KEYCLOAK_CLIENT_ID", "KEYCLOAK_CLIENT_SECRET"}},
 		{name: "keycloak password grant without credentials", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
-			configuration.KeycloakEnabled, configuration.KeycloakGrantType = true, grantTypePassword
+			configuration.KeycloakEnabled, configuration.KeycloakGrantType = true, string(keycloak.GrantTypePassword)
 		}, problems: []string{"KEYCLOAK_USERNAME", "KEYCLOAK_PASSWORD"}},
 		{name: "unknown keycloak grant", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.KeycloakEnabled, configuration.KeycloakGrantType = true, "implicit"
@@ -179,9 +180,6 @@ func TestAPIKeysFollowTheirFlag(t *testing.T) {
 	configuration.APIKeys = []string{"ci:short-secret"}
 
 	require.NoError(t, validateConfiguration(configuration), "keys are ignored while API_KEYS_ENABLED is false")
-	disabled, err := newAPIKeys(configuration, nil)
-	require.NoError(t, err)
-	require.Nil(t, disabled)
 
 	configuration.APIKeysEnabled, configuration.APIKeys = true, []string{"ci:" + testSecret}
 	enabled, err := newAPIKeys(configuration, nil)
