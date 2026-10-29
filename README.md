@@ -107,7 +107,7 @@ The provider reads sessions itself, so its routes need no Guard. All bodies are 
 | Route | Answer |
 |---|---|
 | `POST /auth/password/login` `{"identifier","password"}` | 200 identity, or 202 `{"challenge":"totp"}` / `{"challenge":"totp_setup"}` |
-| `POST /auth/password/logout` | 204 |
+| `POST /auth/password/logout` | 204; 403 `forbidden` for a request the browser marks `Sec-Fetch-Site: cross-site` |
 | `POST /auth/password/register` (only with `EnableRegistration`) | 201 identity, or 202 `{"challenge":"totp_setup"}` with `TOTP.Required` |
 | `POST /auth/password/totp/verify` `{"code","backupCode":false}` (this and the routes below only with `TOTP.Enabled`) | 200 identity; `"backupCode":true` checks the code against the backup codes only, `false` against the TOTP codes only |
 | `GET /auth/password/totp` | 200 `{"enabled"}` |
@@ -179,7 +179,7 @@ func main() {
 - One `oidc.New` per identity provider, one shared `Store`, distinct `Name`s (`[a-z0-9-]{1,32}`; `password`, `github`, `apikey`, `session` and `jwt` are taken).
 - `PostLogoutURL` (default `ExternalURL/`) and `ErrorURL` take a path or an absolute `http(s)` URL without fragment; a path is made absolute with `ExternalURL`. With `ErrorURL`, every callback failure redirects to `ErrorURL?code=<code>` (`code=internal` for a server-side failure) instead of answering JSON.
 - The IdP rejecting the authorization code (an error answer below 500) is 401 `login_failed`; a 5xx answer or an IdP that cannot be reached is 500. An ID token without `sub` is refused.
-- `GET .../logout` ends the local session and sends the browser to the IdP's end-session endpoint with the stored ID token as hint. Without a stored ID token (the local session had already expired) it goes straight to `PostLogoutURL` and the IdP session stays.
+- `GET .../logout` ends the local session and sends the browser to the IdP's end-session endpoint with the stored ID token as hint. Without a stored ID token (the local session had already expired) it goes straight to `PostLogoutURL` and the IdP session stays. A logout link on another site (`Sec-Fetch-Site: cross-site`) gets 403 `forbidden` and ends nothing; front-channel logout from the IdP's iframe still works.
 - Front-channel logout needs `StoreOptions.SameSite: http.SameSiteNoneMode` (HTTPS only).
 
 ## GitHub login with teams
@@ -210,7 +210,7 @@ Imports are `github.com/govengers/auth/github` (package `github`) and the packag
 - `Identity.Teams` holds only teams in the allowed, admin and relevant lists (`RelevantTeams`), lower-case, sorted. `Subject` is the numeric GitHub user ID, `Username` the login.
 - The GitHub token never leaves the server: call the GitHub API as the user with `provider.HTTPClient(ctx, current)` (`current` from `store.Open(request)`). That client sends the token only to the `APIURL` host; a redirect to another host (archive downloads, `uploads.github.com`) goes without it.
 - `Scopes` (default `read:org`) must include one that lists the user's teams: `read:org`, `write:org`, `admin:org`, `user` or `repo`; `github.New` refuses others.
-- `PostLogoutURL` and `ErrorURL` work as for OIDC. GitHub refusing the code is 401 `login_failed`; a GitHub outage is 500. Logout revokes the token at GitHub (a failure only shows in the outcome).
+- `PostLogoutURL` and `ErrorURL` work as for OIDC. GitHub refusing the code is 401 `login_failed`; a GitHub outage is 500. Logout revokes the token at GitHub (a failure only shows in the outcome); like OIDC logout it refuses a cross-site request with 403.
 - GitHub Enterprise: set `AuthorizeURL`, `TokenURL` and `APIURL` (`https`, `http` only on loopback hosts).
 
 Run it as a forward-auth proxy instead of a library with `PROVIDER=github` ([image](#forward-auth-image)).
@@ -596,7 +596,7 @@ Set `GOMEMLIMIT` 5-10 % below the container memory limit in your manifests (limi
 | any other path | 404 `{"code":"not_found","message":"not found"}` |
 | `GET /metrics` on `METRICS_PORT` | Prometheus, the only route of that listener; keep this port off Traefik |
 
-Route `{prefix}` to the service with its own Traefik router, minus the checks and probes, as in the labels above: the check endpoints do not dispatch login routes by `X-Forwarded-Uri`. Link users to `{prefix}/oidc/<name>/logout` or `{prefix}/github/logout` to log out; both are plain `GET` links.
+Route `{prefix}` to the service with its own Traefik router, minus the checks and probes, as in the labels above: the check endpoints do not dispatch login routes by `X-Forwarded-Uri`. Link users to `{prefix}/oidc/<name>/logout` or `{prefix}/github/logout` to log out; both are plain `GET` links, same-site only: a link from another site (`Sec-Fetch-Site: cross-site`, e.g. a portal on another domain) is refused with 403.
 
 ### Environment variables
 
@@ -627,7 +627,7 @@ Values without a default are required. *not empty* marks values with a default t
 | `SESSION_COOKIE_DOMAIN` | empty | | | empty is a host-only cookie |
 | `SESSION_INSECURE_COOKIE` | `false` | | | drops `Secure`; local HTTP development only |
 | `SESSION_SAME_SITE` | `lax` | not empty | | `lax` or `none` (`none` for front-channel logout; not with an insecure cookie). `strict` is refused: the browser would withhold the cookie, and the login state with it, on the redirect back from the provider |
-| `SESSION_MAX_AGE_SECONDS` | `86400` | | | absolute lifetime, at least 1; refreshes never extend it |
+| `SESSION_MAXIMUM_AGE_SECONDS` | `86400` | | | absolute lifetime, at least 1; refreshes never extend it |
 | `SESSION_REFRESH_INTERVAL_SECONDS` | `60` | | | how often the GitHub provider re-checks teams; at least 1 |
 | `SESSION_REDIS_ENABLED` | `false` | | | otherwise in-memory: exactly one replica |
 | `SESSION_REDIS_ADDRESS` | empty | with Redis | | `host:port`; pinged at boot (5 s) |
@@ -647,7 +647,7 @@ Values without a default are required. *not empty* marks values with a default t
 | `OIDC_CLAIM_MAPPER` | `default` | not empty | | `default` or `google` |
 | `OIDC_ALLOWED_EMAIL_DOMAINS` | empty | | | requires `email_verified`; strongly recommended with Google |
 | `OIDC_POST_LOGOUT_URL` | empty | | | empty means `EXTERNAL_URL/`; a path or an absolute URL without fragment |
-| `OIDC_DISABLE_IFRAME_LOGOUT_DETECTION` | `false` | | | stop treating `Sec-Fetch-Dest: iframe` on `/logout` as front-channel logout |
+| `OIDC_DISABLE_IFRAME_LOGOUT_DETECTION` | `false` | | | stop treating `Sec-Fetch-Dest: iframe` on `/logout` as front-channel logout; a cross-site iframe load of `/logout` is then refused (403) |
 
 **Keycloak (optional, with `PROVIDER=oidc`)**
 
@@ -701,13 +701,13 @@ The token carries `iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`, `provider`, `
 ## Security notes
 
 - **Cookie:** `HttpOnly`, `Secure` (unless `InsecureCookie`), `SameSite=Lax` by default, `Path=/`, host-only unless `CookieDomain` is set. The value is 32 random bytes; the backend key is its SHA-256. Session values are AES-256-GCM sealed with a key derived per session (HKDF-SHA256) from `EncryptionKey`, bound to the session ID and key. There is no signing key to leak.
-- **Sessions:** the ID is rotated at every login (the previous session is revoked), logout and failed refreshes revoke server-side, the lifetime is absolute (`MaxAge` from the login), a lifetime starts only on a session the store issued itself (a planted or expired cookie, or a handle kept past its expiry, cannot get one), a revoked session cannot be written again, and a refresh never overwrites a change saved while it ran. Revoking an unknown session ID stores nothing. Changing `EncryptionKey` logs everyone out; there is no key rotation list.
-- **OAuth flows:** `state`, `nonce` (OIDC) and the PKCE S256 verifier are random, stored server-side in the login session, valid for 10 minutes and single use. ID tokens are verified for signature, issuer, audience, expiry, nonce and subject. OIDC (including the endpoints discovery names), Keycloak and GitHub URLs must be `https` (loopback hosts excepted for tests). The GitHub token is sent to the GitHub API host only. A token endpoint's error answer is recorded by its HTTP status only, never its description or body.
+- **Sessions:** the ID is rotated at every login (the previous session is revoked), logout and failed refreshes revoke server-side, the lifetime is absolute (`MaximumAge` from the login), a lifetime starts only on a session the store issued itself (a planted or expired cookie, or a handle kept past its expiry, cannot get one), a revoked session cannot be written again, and a refresh never overwrites a change saved while it ran. Revoking an unknown session ID stores nothing. Changing `EncryptionKey` logs everyone out; there is no key rotation list.
+- **OAuth flows:** `state`, `nonce` (OIDC) and the PKCE S256 verifier are random, stored server-side in the login session, valid for 10 minutes and single use. ID tokens are verified for signature, issuer, audience, expiry, nonce and subject. OIDC (including the endpoints discovery names), Keycloak and GitHub URLs must be `https` (loopback hosts excepted for tests). The GitHub token is sent to the GitHub API host only. A token endpoint's error answer is recorded by its HTTP status and OAuth error code only, never its description or body.
 - **Open redirects:** `return_to` is accepted only as a same-origin relative path (starts with `/`, not `//` or `/\`, no control characters, at most 2048 bytes); anything else becomes `/`. Redirects after login always go to `ExternalURL` plus that path. Configured targets (`LoginURL`, `ErrorURL`, `PostLogoutURL`) are validated at startup.
 - **Errors:** responses carry fixed messages and stable codes. Required role, team and domain names, causes and tokens stay in server-side `Reason`s and are never sent or put into outcomes, wide events or metric labels.
 - **Credentials:** unknown users cost the same Argon2id verification as real ones, and a stored hash nothing can verify answers like a wrong password at the same cost; API keys are compared as SHA-256 hashes in constant time without early exit; passwords are 1-128 bytes, default minimum length 12 characters. Each TOTP code is accepted once; wrong codes lock the second factor after `MaximumAttempts` in a row.
 - **JWT:** RS512 only, key ID is the RFC 7638 thumbprint, default lifetime 5 minutes, minted per request, never cached, `exp` required, never for an inactive identity. The verifier ignores JWKS keys that are not RSA signing keys with `alg`. Backends must verify the signature and issuer; do not trust headers a client could set (see the Traefik settings above).
-- **Known limits:** no rate limiting (do it at Traefik, at least on the password login and TOTP routes), no retries, logout by `GET` can be triggered cross-site (it only ends the victim's session), no idle timeout. A stale `SaveIdentity` from your own code (impersonation) racing a Guard refresh still overwrites it.
+- **Known limits:** no rate limiting (do it at Traefik, at least on the password login and TOTP routes), no retries, no idle timeout. Logout CSRF is refused only by browsers that send `Sec-Fetch-Site` (all current ones); OIDC front-channel logout stays callable cross-site by design. A stale `SaveIdentity` from your own code (impersonation) racing a Guard refresh still overwrites it.
 
 ## Release notes
 
@@ -718,13 +718,13 @@ First release of `github.com/govengers/auth`. It merges `mxcd/go-basicauth` (v1.
 Breaking changes against all three predecessors:
 
 - New import path `github.com/govengers/auth/...`; Go 1.26.
-- Sessions are server-side for every provider; the cookie holds a random ID only. **Existing sessions are invalid: every user logs in once after the upgrade.** The cookie-only mode, `gorilla/sessions` and the signing keys are gone; one 32-byte `EncryptionKey` remains (`openssl rand -base64 32`). An own `session.Backend` implements five methods, `CompareAndSwap` included.
+- Sessions are server-side for every provider; the cookie holds a random ID only; the lifetime is `StoreOptions.MaximumAge` (`Store.MaximumAge()`, `SESSION_MAXIMUM_AGE_SECONDS`). **Existing sessions are invalid: every user logs in once after the upgrade.** The cookie-only mode, `gorilla/sessions` and the signing keys are gone; one 32-byte `EncryptionKey` remains (`openssl rand -base64 32`). An own `session.Backend` implements five methods, `CompareAndSwap` included.
 - One identity type, `auth.Identity`, replaces `basicauth.User`, `oidc.SessionData`, `jwt.User` and the GitHub session user. One `session.Guard` replaces the per-provider middleware; there is no global middleware and no `PathRules`, you mount the Guard on route groups.
 - Route prefixes: `/auth/password/*`, `/auth/oidc/<name>/*`, `/auth/github/*`, each a `PathPrefix` of plain segments without a trailing `/`. Redirect URIs are derived from `ExternalURL`; register the new callback URLs at your IdP and GitHub. `ErrorURL` and `PostLogoutURL` become absolute and refuse fragments.
 - One error body `{"code","message"}` with stable codes (`tfa_*` became `totp_*`, `unauthorized` became `unauthenticated`); translated `Messages` are gone.
 - Hooks are `auth.Hook` (`OnLogin`) and `auth.LogoutHook`; `UserTransformer` is an application middleware after the Guard. Libraries no longer log; they call an optional `auth.Observer`.
 - `password`: default minimum length 12 characters without composition rules; `Storage` takes a `context.Context`, gains `UpdatePasswordHash` (compare-and-swap), `ConsumeTOTPStep` (a `totp_step` column; every TOTP code is accepted once) and `ErrUserExists`, and matches usernames and emails ignoring case; `TOTP.Required` enrolls during login and registration; TOTP routes exist only with `TOTP.Enabled`, and enrolled users cannot log in while it is off; backup codes are checked only with `"backupCode": true` (no fallthrough from a wrong TOTP code); `MaximumAttempts` is a lockout across logins until a verified code or `ResetTOTPAttempts`, with no unlimited mode; new limits `Period` <= 3600, `Skew` <= 10, `BackupCodeCount` <= 20, backup codes <= 128 bytes and >= 1,000,000 distinct codes; Argon2id hashes on outdated parameters are rehashed at login.
-- OIDC and GitHub: PKCE (and nonce) always on, GitHub logout is `GET`, GitHub `AllowedTeams` is required (an empty list no longer admits everyone), GitHub `Scopes` must include one that lists teams (`read:org`, `write:org`, `admin:org`, `user`, `repo`), the endpoints OIDC discovery names must be `https` (or loopback `http`), Keycloak enrichment moved from gocloak to `oidc/keycloak` and defaults to client credentials, GitHub `UserProfile` and friends are gone (`Identity.Teams`, `HTTPClient`).
+- OIDC and GitHub: PKCE (and nonce) always on, GitHub logout is `GET`, logout (also password logout) refuses `Sec-Fetch-Site: cross-site` with 403, so logout links must live on the app's own site, GitHub `AllowedTeams` is required (an empty list no longer admits everyone), GitHub `Scopes` must include one that lists teams (`read:org`, `write:org`, `admin:org`, `user`, `repo`), the endpoints OIDC discovery names must be `https` (or loopback `http`), Keycloak enrichment moved from gocloak to `oidc/keycloak` and defaults to client credentials, GitHub `UserProfile` and friends are gone (`Identity.Teams`, `HTTPClient`).
 - API keys are named, at least 16 bytes, unique, and grant only the roles and permissions you give them (the old "API key bypasses admin" behaviour needs `Roles: []string{auth.RoleAdmin}`). `Authorization: Bearer` is matched in any case, so a foreign bearer token on a route behind `apikey` is 401.
 - JWT: RS512 only, jwx v3, `exp` required, default lifetime 5 minutes (was 30), issuer defaults to `EXTERNAL_URL`, GitHub `sub` is the numeric user ID and the login is `preferred_username` (`uid` is gone), JWKS at `/auth/jwks`, no generated signing key, `Sign` refuses an inactive identity, the verifier uses only RSA JWKS keys with `alg` and answers 401 with `WWW-Authenticate: Bearer`.
 - Forward-auth: one image `ghcr.io/govengers/forwardauth` selected by `PROVIDER` replaces `oidc-fwd-auth` and `github-fwd-auth`; renamed environment variables, new routes (`/auth/ui`, `/auth/api`, `/auth/jwks`), an explicit Traefik router for `/auth` (without the checks and probes) is required, Google multi-provider mode is removed, `JWT_PRIVATE_KEY` is required when JWT is on, API keys carry permissions (`API_KEY_PERMISSIONS`) but no roles. `SESSION_SAME_SITE` takes `lax` or `none`, `SHUTDOWN_DELAY_SECONDS` at most 10, the boot fails when Redis does not answer.

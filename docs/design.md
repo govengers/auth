@@ -17,7 +17,7 @@ Core model, in one paragraph: every provider (password, OIDC, GitHub, API key, J
 - Constructors: `New(options *Options) (*X, error)` or `NewX(options *XOptions) (*X, error)`; nil options is an error unless the section says "nil allowed"; validate, apply defaults to a copy, store the copy unexported, clone every slice and map the component keeps (`slices.Clone`, `maps.Clone`), never write to the caller's struct [DES-001, FUN-002]. No exported fields on components [DES-006].
 - No logging of any kind, no stdout/stderr [LIB-003]. No goroutines, no `init()`, no mutable package-level state [LIB-004, DES-002, DES-003]. Compiled regexes and constants are fine.
 - `ctx context.Context` first on everything doing I/O; never store a context in a struct [CON-002]. Outbound HTTP only through the component's `HTTPClient` option, default `&http.Client{Timeout: 10 * time.Second}`, requests built with `http.NewRequestWithContext` [RES-001]. No retries anywhere [RES-002].
-- Refusals are `*auth.Error` (section 5). Third-party errors (go-oidc, oauth2, go-redis, jwx, pquerna/otp, bcrypt) never reach callers through `%w`: they pass through `internal/dependency.Error` (message only, chain dropped; `context.Canceled` and `context.DeadlineExceeded` stay detectable with `errors.Is`) or are translated [LIB-010]. An OAuth token endpoint's error answer (`*oauth2.RetrieveError`) is reported by its HTTP status only (github adds a well-formed OAuth error code), never by its description, URI or body, which are the server's free text [LOG-009]. Standard library errors (net/http, encoding/json) and own errors wrap with `%w` and say what was done [ERR-004]. No panics outside tests [ERR-001], except `RegisterRoutes` on a conflicting route (a startup wiring mistake, like `http.ServeMux.Handle`).
+- Refusals are `*auth.Error` (section 5). Third-party errors (go-oidc, oauth2, go-redis, jwx, pquerna/otp, bcrypt) never reach callers through `%w`: they pass through `internal/dependency.Error` (message only, chain dropped; `context.Canceled` and `context.DeadlineExceeded` stay detectable with `errors.Is`) or are translated [LIB-010]. An OAuth token endpoint's error answer (`*oauth2.RetrieveError`) goes through `internal/tokenendpoint.Error`: its HTTP status and a well-formed OAuth error code only, never its description, URI or body, which are the server's free text [LOG-009]. Standard library errors (net/http, encoding/json) and own errors wrap with `%w` and say what was done [ERR-004]. No panics outside tests [ERR-001], except `RegisterRoutes` on a conflicting route (a startup wiring mistake, like `http.ServeMux.Handle`).
 - Never put tokens, secrets, session IDs, passwords, codes, emails or names into an error message, an `Outcome`, a wide-event field or a metric label [LOG-009, MET-004]. IDs (`Subject`, `UserID`) are fine.
 - Every response the library writes carries `Cache-Control: no-store`; the one exception is the JWKS (`public, max-age=300`).
 - Names [NAM-001..006]: spelled out, initialisms upper-case (`ID URL URI HTTP JSON OIDC JWT JWKS API TOTP PKCE TTL UI`), no stutter, no `Get` on getters. Data-access lookups on `password.Storage` keep `Get` (NAM-006 exception).
@@ -69,7 +69,9 @@ github.com/govengers/auth
 │   ├── httpjson               strict JSON request decoding, JSON response writing
 │   ├── oauthlogin             state + nonce + PKCE login state bound to the session (shared by oidc and github)
 │   ├── dependency             LIB-010 wrapper for third-party errors
-│   ├── failure                Outcome Result of a failed action (denied vs error)
+│   ├── failure                Outcome Result of a failed action (denied vs error); Reporter answering and reporting a provider's requests
+│   ├── tokenendpoint          OAuth token endpoint errors without the endpoint's free text (oidc, keycloak, github)
+│   ├── fetchmetadata          Sec-Fetch-Site check refusing cross-site logout requests
 │   ├── hook                   runs an OnLogin hook
 │   ├── impersonation          writes a refreshed real identity back into an impersonating one
 │   ├── backendtest            conformance suite for session.Backend implementations
@@ -88,16 +90,18 @@ github.com/govengers/auth
 | `session` | `auth`, `internal/random`, `internal/redirect`, `internal/failure`, `internal/impersonation` | none | none |
 | `session/redisbackend` | `session`, `internal/dependency` | `redis/go-redis/v9` | go-redis |
 | `jwt` | `auth`, `internal/dependency`, `internal/failure` | `lestrrat-go/jwx/v3`, `google/uuid` | jwx |
-| `password` | `auth`, `session`, `internal/{httpjson, random, redirect, dependency, failure, hook}` | `golang.org/x/crypto` (argon2, bcrypt), `pquerna/otp`, `google/uuid` | x/crypto, otp |
-| `oidc` | `auth`, `session`, `internal/{oauthlogin, redirect, dependency, failure, hook}` | `coreos/go-oidc/v3`, `golang.org/x/oauth2` | go-oidc (go-jose) |
-| `oidc/keycloak` | `auth`, `internal/redirect`, `internal/dependency` | `golang.org/x/oauth2` (incl. `clientcredentials`) | none |
-| `github` | `auth`, `session`, `internal/{oauthlogin, redirect, httpjson, dependency, failure, hook, impersonation}` | `golang.org/x/oauth2` | none |
+| `password` | `auth`, `session`, `internal/{httpjson, random, redirect, dependency, failure, fetchmetadata, hook}` | `golang.org/x/crypto` (argon2, bcrypt), `pquerna/otp`, `google/uuid` | x/crypto, otp |
+| `oidc` | `auth`, `session`, `internal/{oauthlogin, redirect, dependency, failure, fetchmetadata, hook, tokenendpoint}` | `coreos/go-oidc/v3`, `golang.org/x/oauth2` | go-oidc (go-jose) |
+| `oidc/keycloak` | `auth`, `internal/{redirect, tokenendpoint}` | `golang.org/x/oauth2` (incl. `clientcredentials`) | none |
+| `github` | `auth`, `session`, `internal/{oauthlogin, redirect, httpjson, failure, fetchmetadata, hook, impersonation, tokenendpoint}` | `golang.org/x/oauth2` | none |
 | `apikey` | `auth`, `internal/{dependency, failure}` | none | none |
 | `authorization` | `auth` | `google/uuid` | none |
 | `ginadapter` | `auth`, `authorization` | `gin-gonic/gin`, `mxcd/go-wide-event-logger`, `google/uuid` | gin |
 | `prometheusadapter` | `auth` | `prometheus/client_golang` | client_golang |
 | `internal/random`, `internal/redirect`, `internal/httpjson`, `internal/dependency` | none | none | none |
-| `internal/failure`, `internal/hook`, `internal/impersonation` | `auth` | none | none |
+| `internal/hook`, `internal/impersonation`, `internal/fetchmetadata` | `auth` | none | none |
+| `internal/failure` | `auth`, `internal/redirect` | none | none |
+| `internal/tokenendpoint` | `internal/dependency` | `golang.org/x/oauth2` (apart from `internal/dependency`, so packages without OAuth do not link it [LIB-007]) | none |
 | `internal/oauthlogin` | `auth`, `session`, `internal/random`, `internal/redirect` | none (the PKCE verifier is `random.Token(32)`) | none |
 | `internal/backendtest` | `session` | testify | test-only |
 | `internal/fakeprovider` | none | none (stdlib only, RS256 fake tokens) | test-only |
@@ -380,7 +384,7 @@ type StoreOptions struct {
 	CookiePath     string        // default "/"
 	SameSite       http.SameSite // default http.SameSiteLaxMode; SameSiteNoneMode requires InsecureCookie false (front-channel logout needs None)
 	InsecureCookie bool          // drops the Secure attribute; local HTTP development only
-	MaxAge         time.Duration // default 24h, at least 1s; absolute session lifetime, also the cookie Max-Age
+	MaximumAge     time.Duration // default 24h, at least 1s; absolute session lifetime, also the cookie Max-Age
 }
 // NewStore validates options (cookie name, domain and path through http.Cookie.Valid, CookiePath starting with "/").
 func NewStore(options *StoreOptions) (*Store, error)
@@ -394,8 +398,8 @@ func (s *Store) Open(request *http.Request) (Session, error)
 // and a hung backend cannot hold the request) and expires the cookie. No cookie: only expires it.
 // The cookie is expired even when the revocation fails; that error is returned.
 func (s *Store) End(ctx context.Context, writer http.ResponseWriter, request *http.Request) error
-// MaxAge returns the configured absolute session lifetime.
-func (s *Store) MaxAge() time.Duration
+// MaximumAge returns the configured absolute session lifetime.
+func (s *Store) MaximumAge() time.Duration
 
 // Session is a handle on one server-side session (value type, unexported fields: the backend ID, the store
 // and, on a handle Start returned, the time it was issued). Values are AES-256-GCM sealed with a key derived per session
@@ -409,12 +413,12 @@ func (s Session) Get(ctx context.Context, key string) ([]byte, bool, error)
 func (s Session) Pop(ctx context.Context, key string) ([]byte, bool, error)
 // SaveIdentity stores identity under key "identity". The first save of a session sets authenticatedAt to the
 // time Start issued it; later saves (refresh, TOTP enable, impersonation) keep it. refreshedAt=now.
-// TTL = authenticatedAt + MaxAge - now; a ttl <= 0 refuses with ErrUnauthenticated.
+// TTL = authenticatedAt + MaximumAge - now; a ttl <= 0 refuses with ErrUnauthenticated.
 // Only a handle returned by Store.Start may have a first save: on a cookie-opened session without a live
 // identity (never authenticated, expired, revoked) it refuses with ErrUnauthenticated, so neither a planted
 // cookie, a save racing the expiry nor a retained or copied Start handle gets a fresh lifetime (D8, D22).
 func (s Session) SaveIdentity(ctx context.Context, identity *auth.Identity) error
-// Identity returns the stored identity; none, expired (now > authenticatedAt + MaxAge) or revoked: *auth.Error ErrUnauthenticated.
+// Identity returns the stored identity; none, expired (now > authenticatedAt + MaximumAge) or revoked: *auth.Error ErrUnauthenticated.
 func (s Session) Identity(ctx context.Context) (*auth.Identity, error)
 ```
 
@@ -680,7 +684,7 @@ type Options struct {
 	ErrorURL                     string            // optional: every callback failure (refusals and code=internal) redirects to ErrorURL?code=<code> instead of answering JSON; same rules as PostLogoutURL
 	ClaimMapper                  ClaimMapper       // default DefaultClaimMapper
 	AllowedEmailDomains          []string          // optional: requires email_verified=true and a matching domain (case-insensitive, exact)
-	DisableIframeLogoutDetection bool              // stop treating Sec-Fetch-Dest: iframe on /logout as front-channel (A-2.4)
+	DisableIframeLogoutDetection bool              // stop treating Sec-Fetch-Dest: iframe on /logout as front-channel (A-2.4); a cross-site iframe load of /logout is then refused (403)
 	Sessions                     *session.Store    // required
 	HTTPClient                   *http.Client      // default 10 s timeout; used for discovery, token exchange, JWKS
 	OnLogin                      auth.Hook         // e.g. keycloak.Client.Enrich, or an app closure calling it and then provisioning
@@ -728,7 +732,7 @@ func New(options *Options) (*Client, error)
 // a missing required role or group: *auth.Error{Kind: ErrForbidden, Reason: "missing realm role <name>"}; API failure: plain error.
 func (c *Client) Enrich(ctx context.Context, identity *auth.Identity) (*auth.Identity, error)
 ```
-Replaces gocloak with five GETs (`/admin/realms/{realm}/users/{id}/role-mappings/realm/composite`, `/clients?clientId=`, `/users/{id}/role-mappings/clients/{uuid}/composite`, `/users/{id}/groups`, `/users/{id}`) plus the token endpoint `/realms/{authRealm}/protocol/openid-connect/token` via `clientcredentials.Config.Token(ctx)` or `oauth2.Config.PasswordCredentialsToken(ctx, ...)` with `oauth2.HTTPClient` in ctx. Token cached under a mutex until 30 s before expiry; client UUID cached after the first success (retried after a failure). Errors of the admin calls' `HTTPClient.Do` (net/http) wrap with `%w`, so a cancelled context stays detectable; oauth2 errors go through `dependency.Error`.
+Replaces gocloak with five GETs (`/admin/realms/{realm}/users/{id}/role-mappings/realm/composite`, `/clients?clientId=`, `/users/{id}/role-mappings/clients/{uuid}/composite`, `/users/{id}/groups`, `/users/{id}`) plus the token endpoint `/realms/{authRealm}/protocol/openid-connect/token` via `clientcredentials.Config.Token(ctx)` or `oauth2.Config.PasswordCredentialsToken(ctx, ...)` with `oauth2.HTTPClient` in ctx. Token cached under a mutex until 30 s before expiry; client UUID cached after the first success (retried after a failure). Errors of the admin calls' `HTTPClient.Do` (net/http) wrap with `%w`, so a cancelled context stays detectable; token request errors go through `tokenendpoint.Error("request admin token", err)` and are always a plain error (500): the admin token is the server's own credential, so keycloak classifies no refusal.
 
 ### 3.8 `github`
 
@@ -767,7 +771,7 @@ func (p *Provider) HTTPClient(ctx context.Context, current session.Session) (*ht
 - URLs must be `https`, except loopback hosts (`localhost`, `127.0.0.0/8`, `::1`; no zoned IPv6) which may use `http` (tests and e2e); a host name is required.
 - GitHub DTOs are unexported and minimal (`login id name email avatar_url`; team `slug` + `organization.login`). The 40-field `UserProfile` and friends are gone; apps use `HTTPClient`.
 - API calls send `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28`, read at most 10 MiB; 401 maps to ErrUnauthenticated, other non-200 to a plain error. The provider's own API client (teams, user) uses the same host-scoped transport as `HTTPClient`.
-- Code exchange: GitHub refusing the code (an error answer below 500) is `login_failed` (401); a 5xx or an unreachable token endpoint is a plain error (500). The error reads `github: exchange code: GitHub answered <status> [<code>]`, the OAuth error code only when it is `a-z`/`_` and at most 64 bytes.
+- Code exchange: GitHub refusing the code (an error answer below 500, `tokenendpoint.Refused`) is `login_failed` (401); a 5xx or an unreachable token endpoint is a plain error (500). The error is `tokenendpoint.Error("github: exchange code", err)`.
 
 ### 3.9 `apikey`
 
@@ -944,7 +948,8 @@ func Run(t *testing.T, newBackend func(t *testing.T) (session.Backend, func(dura
 package dependency
 // Error returns "<operation>: <err>" with err's message but without its chain, so callers cannot match on a
 // third-party error (LIB-010). When err matches context.Canceled or context.DeadlineExceeded, that sentinel is
-// wrapped, so errors.Is keeps working for cancellation. Used for go-redis, go-oidc, oauth2 transport, jwx errors
+// wrapped, so errors.Is keeps working for cancellation. Used for go-redis, go-oidc, jwx errors, token requests that
+// got no answer (through tokenendpoint.Error)
 // and for apikey Resolver errors (D23).
 func Error(operation string, err error) error
 
@@ -952,6 +957,38 @@ package failure
 // Result is the Outcome Result of an action that failed with err: ResultError when auth.ResponseFor answers 500,
 // ResultDenied (a refusal) otherwise. Used by the Guard, every provider, apikey and the jwt verifier.
 func Result(err error) auth.Result
+// Reporter answers a provider's failed requests and reports the outcome of every request (password, oidc and
+// github each build one in New; oidc: Provider = Options.Name). A value type, safe for concurrent use.
+type Reporter struct {
+	Provider string        // set as Outcome.Provider
+	Observer auth.Observer // optional; nil reports nothing
+	ErrorURL string        // optional; where RefuseCallback sends the browser
+}
+// Refuse answers outcome.Err as JSON (auth.WriteError) and reports the outcome as a failure.
+func (r Reporter) Refuse(ctx context.Context, writer http.ResponseWriter, outcome auth.Outcome)
+// RefuseCallback is Refuse, except that with ErrorURL set the failure (a refusal or code=internal) redirects
+// 302 to ErrorURL?code=<code> (redirect.WithQuery).
+func (r Reporter) RefuseCallback(ctx context.Context, writer http.ResponseWriter, outcome auth.Outcome)
+// ReportFailure reports outcome with Result denied (a refusal) or error (answered with 500).
+func (r Reporter) ReportFailure(ctx context.Context, outcome auth.Outcome)
+// Report sets Provider on outcome and passes it to the Observer.
+func (r Reporter) Report(ctx context.Context, outcome auth.Outcome)
+
+package tokenendpoint
+// Error returns "<operation>: token endpoint answered HTTP <status> [<OAuth error code>]" for an error answer of
+// the endpoint (*oauth2.RetrieveError; the code only when it is a-z/"_" and at most 64 bytes, nothing of
+// ErrorDescription, ErrorURI or Body; no Response: no status). Any other err goes through dependency.Error, so a
+// cancelled or expired context stays detectable. Used by oidc, oidc/keycloak and github.
+func Error(operation string, err error) error
+// Refused reports whether err is an error answer of the endpoint below 500 (an invalid code, verifier or client),
+// as opposed to a failure or an unreachable endpoint. oidc and github answer it with 401 login_failed.
+func Refused(err error) bool
+
+package fetchmetadata
+// RefuseCrossSite refuses a request the browser marks Sec-Fetch-Site: cross-site with *auth.Error{Kind:
+// ErrForbidden, Reason: "cross-site request"} (403 forbidden); same-origin, same-site, none and requests without
+// the header (older browsers, non-browser clients) pass with nil. First step of every logout route (D14).
+func RefuseCrossSite(request *http.Request) error
 
 package hook
 // RunOnLogin returns what onLogin makes of identity, or identity itself when onLogin is nil. A hook error is
@@ -1002,7 +1039,7 @@ Wherever F2 ends the pending session (steps 2, 3, 5), a failing `Store.End` fail
 - Enable: same session rule; user already enabled: refuse `totp_already_enabled`; `Verify` password (wrong: refuse `invalid_credentials`); `Pop password.totp_setup` (missing: refuse `{ErrInvalidRequest, "totp_setup_missing"}`); validate code and `ConsumeTOTPStep` (wrong or replayed: refuse `invalid_totp_code`); generate backup codes unless disabled. Full session: `SetTOTP`, no session write. Enrollment session: identity, `OnLogin`, `Store.Start`, then `SetTOTP`, then `SaveIdentity`, so a refused or failed login leaves the account unchanged and no full session exists without the second factor (a `SaveIdentity` failure after `SetTOTP` is still a 500 with TOTP on; the user logs in with the scanned authenticator). 200 `{"backupCodes"}`.
 - Disable: full session; password check; not enabled: refuse `{ErrConflict, "totp_not_enabled"}`; `ClearTOTP`; 204.
 - Status: full session; 200 `{"enabled"}`.
-- Logout: read identity if any; `Store.End`; `OnLogout(identity)` when there was one; 204; outcome success.
+- Logout: `Sec-Fetch-Site: cross-site`: refuse 403 `forbidden`, nothing read or ended (D14); read identity if any; `Store.End`; `OnLogout(identity)` when there was one; 204; outcome success.
 - Register: decode; at least one of username/email (refuse ErrInvalidRequest); a disabled identifier kind: refuse ErrInvalidRequest; validate (`invalid_username`, `invalid_email`, `weak_password`, all ErrInvalidRequest); `Hash`; `CreateUser` with `uuid.New()`; `ErrUserExists`: refuse `{ErrConflict, "user_exists"}`; then as F1 from step 7: with `TOTP.Required` a pending enrollment session and 202 `{"challenge":"totp_setup"}`, otherwise identity, `OnLogin`, `Store.Start`, `SaveIdentity`, 201.
 
 ### F4 OIDC login
@@ -1012,19 +1049,19 @@ Wherever F2 ends the pending session (steps 2, 3, 5), a failing `Store.End` fail
 
 ### F5 OIDC callback
 1. `oauthlogin.Complete(..., Name+".login")`; refusals as listed.
-2. Exchange `code` with `oauth2.VerifierOption(verifier)` (ctx carries HTTPClient). The IdP answered with an error below 500 (`*oauth2.RetrieveError`): refuse `{ErrUnauthenticated, "login_failed", Reason "token exchange"}`; a 5xx answer: fail (500); the IdP was not reachable: fail (500, `dependency.Error`). An error answer is described as `exchange code: token endpoint answered HTTP <status>` only, never its description or body (LOG-009).
+2. Exchange `code` with `oauth2.VerifierOption(verifier)` (ctx carries HTTPClient). The IdP answered with an error below 500 (`tokenendpoint.Refused`): refuse `{ErrUnauthenticated, "login_failed", Reason "token exchange"}`; a 5xx answer or an unreachable IdP: fail (500). Either error is `tokenendpoint.Error("oidc: exchange code", err)`: status and OAuth error code only, never the IdP's description or body (LOG-009).
 3. `id_token` present and verified (`Verifier` with ClientID audience: signature, iss, aud, exp); `idToken.Nonce == state.Nonce` (constant time); a non-empty `sub`; failures refuse `login_failed`.
 4. ID token claims into a map; ClaimMapper; access token claims via the audience-free verifier (opaque token: ignored, A-2.4).
 5. AllowedEmailDomains set: `email_verified == true` and domain allowed, else refuse `{ErrForbidden, Reason "email domain not allowed"}`.
 6. Identity `{Provider Name, Subject sub, Username/Name/Email/Picture from Profile, Active true, OIDCRoles, OIDCClientRoles, Groups from tokens, Claims}`.
 7. `OnLogin` (e.g. Keycloak `Enrich` replaces roles/groups/attributes and enforces required ones).
-8. `Store.Start`; `SaveIdentity`; put `<Name>.id_token` (raw) with TTL MaxAge.
+8. `Store.Start`; `SaveIdentity`; put `<Name>.id_token` (raw) with TTL MaximumAge.
 9. 302 to `ExternalURL + state.ReturnPath`; outcome success.
 
 Every failure of steps 1-8 (refusals and 500s) is answered by the ErrorURL redirect `ErrorURL?code=<code>` (`code=internal` for a 500) when ErrorURL is set, else by JSON.
 
 ### F6 OIDC logout (RP-initiated)
-1. `GET {prefix}/logout`. When `iss` or `sid` is present, or `Sec-Fetch-Dest: iframe` and detection is not disabled: run F7 instead.
+1. `GET {prefix}/logout`. When `iss` or `sid` is present, or `Sec-Fetch-Dest: iframe` and detection is not disabled: run F7 instead. Then `Sec-Fetch-Site: cross-site`: refuse 403 `forbidden` JSON, nothing read or ended (D14); with detection disabled a cross-site iframe load of `/logout` is therefore refused.
 2. Read the session identity and, when `identity.Real().Provider == Name`, the stored ID token, both on `context.WithoutCancel(request.Context())`, so a disconnecting client skips neither the hint nor OnLogout.
 3. `Store.End` (a failure: 500 JSON); `OnLogout(identity)` with that detached context.
 4. With a discovered `end_session_endpoint` and an ID token: 302 to it with `client_id`, `id_token_hint`, `post_logout_redirect_uri=PostLogoutURL`. Otherwise (no endpoint, or no stored ID token, e.g. the local session already expired) 302 straight to PostLogoutURL: the IdP session stays.
@@ -1041,8 +1078,8 @@ Every failure of steps 1-8 (refusals and 500s) is answered by the ErrorURL redir
 1. Login: as F4 with key `github.login`, `AuthCodeURL(state, S256ChallengeOption(verifier))`.
 2. Callback: `oauthlogin.Complete`; exchange with verifier (GitHub refusing the code: 401 `login_failed`; 5xx or unreachable: 500; an error answer is reported by status and OAuth error code only, section 3.8); fetch `/user` and all `/user/teams` pages; slugs `lower(org/slug)`; none in AllowedTeams: refuse `{ErrForbidden, Reason "not in an allowed team"}` (no session; an AdminTeams membership alone is not enough).
 3. Identity `{Provider "github", Subject user.id, Username login, Name, Email (may be empty), Picture avatar_url, Active true, Teams filtered (sorted, unique), Roles [admin] when in AdminTeams}`; `OnLogin`.
-4. `Store.Start`; put `github.token` (JSON `oauth2.Token`, TTL MaxAge); `SaveIdentity` (token first, so a failed write never leaves an identity without its token); 302 `ExternalURL + returnPath`. Callback failures (steps 2-4) go to ErrorURL as in F5.
-5. Logout `GET {prefix}/logout`: read identity and token on `context.WithoutCancel` (a disconnecting client skips neither the revocation nor OnLogout; a read failure ends the session all the same and degrades the outcome: Result success, Err set); `Store.End` (a failure: 500, nothing revoked); `DELETE {APIURL}/applications/{ClientID}/token` (basic auth, body `{"access_token"}`, synchronous under `context.WithoutCancel` with its own 10 s timeout, failure only degrades the outcome); `OnLogout`; 302 PostLogoutURL.
+4. `Store.Start`; put `github.token` (JSON `oauth2.Token`, TTL MaximumAge); `SaveIdentity` (token first, so a failed write never leaves an identity without its token); 302 `ExternalURL + returnPath`. Callback failures (steps 2-4) go to ErrorURL as in F5.
+5. Logout `GET {prefix}/logout`: `Sec-Fetch-Site: cross-site`: refuse 403 `forbidden`, nothing read, ended or revoked (D14); read identity and token on `context.WithoutCancel` (a disconnecting client skips neither the revocation nor OnLogout; a read failure ends the session all the same and degrades the outcome: Result success, Err set); `Store.End` (a failure: 500, nothing revoked); `DELETE {APIURL}/applications/{ClientID}/token` (basic auth, body `{"access_token"}`, synchronous under `context.WithoutCancel` with its own 10 s timeout, failure only degrades the outcome); `OnLogout`; 302 PostLogoutURL.
 
 ### F9 GitHub refresh (route and Refresher)
 1. `POST {prefix}/refresh-teams`: `Store.Open`; identity whose `Real().Provider` is "github" (else refuse ErrUnauthenticated, session kept); token.
@@ -1157,7 +1194,7 @@ Callers branch with `errors.Is(err, auth.ErrUnauthenticated | ErrForbidden | Err
 
 ```go
 // Configuration holds every value forwardauth reads, filled once at startup.
-type Configuration struct { /* one field per row below, named after the variable in CamelCase, e.g. SessionMaxAgeSeconds int */ }
+type Configuration struct { /* one field per row below, named after the variable in CamelCase, e.g. SessionMaximumAgeSeconds int */ }
 ```
 Values without a default are required: `LoadConfig` fails and the process exits non-zero before anything starts (MaPa's prime directive). "not empty" marks values with a default that refuse an explicitly empty value (`NotEmpty`). Lists (`string array`) are comma-separated, items trimmed, empty items dropped. Provider- and feature-dependent values have empty defaults and are checked by `validateConfiguration`, which returns every problem joined (`errors.Join`) and also fails the boot [CFG-004]. `config.LoadConfig` reads `.env` in the working directory if present (dev only; the image has none) [DEP-007]. Sensitive values are masked by `config.Print`.
 
@@ -1179,7 +1216,7 @@ Values without a default are required: `LoadConfig` fails and the process exits 
 | `SESSION_COOKIE_DOMAIN` | string | `""` | | | host-only by default |
 | `SESSION_INSECURE_COOKIE` | bool | `false` | | | |
 | `SESSION_SAME_SITE` | string | `lax` | not empty | | `lax` or `none` (none for front-channel logout; not with an insecure cookie). `strict` is refused: every login returns from the provider's site, and the browser withholds a strict cookie, the login state with it, on that redirect |
-| `SESSION_MAX_AGE_SECONDS` | int | `86400` | | | >= 1 |
+| `SESSION_MAXIMUM_AGE_SECONDS` | int | `86400` | | | >= 1 |
 | `SESSION_REFRESH_INTERVAL_SECONDS` | int | `60` | | | >= 1; Guard RefreshInterval (GitHub teams) |
 | `SESSION_REDIS_ENABLED` | bool | `false` | | | otherwise in-memory: exactly one replica |
 | `SESSION_REDIS_ADDRESS` | string | `""` | when Redis | | `host:port` (`redis.NewClient`); pinged at boot (5 s), no answer fails the boot |
@@ -1289,7 +1326,8 @@ func NewDependencies(options *DependenciesOptions) (*Dependencies, error)
 // HTTPClient returns a client with the 10 s default timeout recording its calls as dependency name (operation: the
 // method; a transport error or a 5xx is a failure). main passes it to oidc ("oidc"), keycloak ("keycloak") and github ("github").
 func (d *Dependencies) HTTPClient(name string) *http.Client
-// Backend wraps the Redis backend; its operations are recorded as dependency "redis". ErrSessionRevoked is an answer,
+// Backend wraps the Redis backend; its operations are recorded as dependency "redis" (operation: put, get, pop,
+// compare_and_swap, revoke; a lost swap is a success). ErrSessionRevoked is an answer,
 // not a failure.
 func (d *Dependencies) Backend(backend session.Backend) session.Backend
 ```
@@ -1341,13 +1379,13 @@ func (d *Dependencies) Backend(backend session.Backend) session.Backend
 | D5 | **Deviation from decision 15:** no per-request hook. `UserTransformer`'s job (load the app user, refuse inactive users, put the app's own user into the context) is an app middleware after the Guard; README shows the pattern. | A hook returning `*Identity` cannot add the app's user object to the context, so apps would load users twice. |
 | D6 | gocloak replaced by `oidc/keycloak` (net/http + oauth2, ~200 lines) whose `Enrich` is an `auth.Hook`; default grant flips to client credentials; `AuthenticationRealm` added. | Drops gocloak, resty, golang-jwt; the password grant broke the FSUS intranet on 09.10.2026 (DeepThought). |
 | D7 | Freshness via `session.Refresher` (password: user still exists; GitHub: teams), every RefreshInterval (1 min, the old GitHub cache TTL). OIDC has none (as before). | Keeps "removed from team / deleted user loses access within a minute" without per-request upstream calls. |
-| D8 | Absolute session expiry (authenticatedAt + MaxAge), never extended by refreshes. | A stolen cookie cannot be kept alive. |
+| D8 | Absolute session expiry (authenticatedAt + MaximumAge), never extended by refreshes. | A stolen cookie cannot be kept alive. |
 | D9 | `TOTP.Required` enrolls during login (pending enrollment session) instead of a 403 `tfa_setup_required` on every route; no MFA flag on Identity. | No full session before MFA exists; no app route configuration needed. |
 | D10 | Password `Messages` (i18n strings) dropped; clients map stable codes. Default MinimumLength 12, composition rules opt-in, max 128 bytes. | API-002 fixed messages; NIST SP 800-63B prefers length over composition. |
 | D11 | `Storage.UpdateUser` and `DeleteUser` replaced by `UpdatePasswordHash` (compare-and-swap); storage owns uniqueness (`ErrUserExists`). | DES-004 (only what the library calls); closes the re-read window and the registration pre-check race (A-5.3.10). |
 | D12 | GitHub `Identity.Teams` filtered to allowed ∪ admin ∪ relevant; JWT `sub` = numeric GitHub ID, login in `preferred_username`. | Bounded headers (Traefik/Nginx limits), data minimisation, stable subject. |
 | D13 | JWT: RS512 only (`Algorithm` option dropped), kid = RFC 7638 thumbprint, private key required (no generated key), default lifetime 5 min, no `jku` header, no verifier cache, no goroutine. | A-5.3.3..5; LIB-004. |
-| D14 | Logout of redirect providers is `GET` (a link); logout CSRF accepted (it only ends the victim's session, as the OIDC spec accepts for front-channel logout). Password logout stays `POST`. github's Origin check (F-06) is dropped with its POST. | One navigation-friendly logout; RP-initiated logout is a navigation anyway. |
+| D14 | Logout of redirect providers is `GET` (a link); password logout stays `POST`. A request the browser marks `Sec-Fetch-Site: cross-site` is refused with 403 `forbidden` (no session read or change, outcome denied, no Identity) on password, oidc RP-initiated and github logout (`internal/fetchmetadata`); requests without the header (older browsers, non-browser clients) still work. OIDC front-channel logout stays open: the IdP calls it cross-site from an iframe. github's Origin check (F-06) is replaced by the Fetch Metadata check. | One navigation-friendly logout, without logout CSRF in current browsers; a logout link from another site (a portal on another registrable domain) gets 403 and must move onto the app's host. |
 | D15 | Redirect URIs are derived (`ExternalURL + PathPrefix + "/callback"`), end-session URL discovered, Google allowed via `AllowedEmailDomains` (email_verified + domain). | Fewer knobs that can disagree; old Google mode admitted any Google account. |
 | D16 | GitHub/OIDC URLs: https required except loopback hosts. | Keeps the SSRF/credential hardening (F-03) while e2e runs plain HTTP on 127.0.0.1. |
 | D17 | Forward-auth checks require explicit Traefik routing of `{prefix}` to the service (no github-style X-Forwarded-Uri dispatch inside the check endpoint). | Traefik forwards the original request on any 2xx, so JSON auth endpoints never worked through the check endpoint. |
@@ -1361,9 +1399,9 @@ Decisions taken during implementation (29.10.2026, settled by the lead):
 | ID | Decision | Reason |
 |---|---|---|
 | D22 | Sessions: values sealed with a per-session key (HKDF-SHA256 from `EncryptionKey`); `SaveIdentity` starts a lifetime only on a `Store.Start` handle, at the time Start issued it; `Session.Put` refuses ttl <= 0; `ReturnPathHeader`, when set, is the only return path source; `LoginURL` paths must pass `SafeReturnPath` and refuse a fragment. Guard: a Refresher's temporary failure (or nil identity) keeps the identity and is a degraded success (`Result success`, `Err` set), a backend failure is 500; the refresh is saved by `Backend.CompareAndSwap`, so it loses to a save or logout made while it ran. Revocation markers exist only for sessions that held values and never outlive them; the memory backend never evicts a live marker (a full backend refuses the Put instead). `Store.End` revokes with its own 10 s timeout. | The 2^32 random-nonce limit of GCM applies per key; a refresh racing the expiry, a retained Start handle or a planted cookie must not get a fresh lifetime (D8); a temporary GitHub outage must not log users out or turn requests into errors; a refresh must not write an old identity over a change; markers for unknown IDs would let a flood of made-up cookies evict real sessions (memory) or grow Redis without bound. |
-| D23 | LIB-010 through one helper `internal/dependency.Error` (message only, chain dropped, `context.Canceled`/`DeadlineExceeded` kept detectable), also for `apikey` Resolver errors; net/http errors wrap with `%w`. A token endpoint's error answer is described by its status (github: plus a well-formed OAuth error code), never its text. | One audited place instead of five copies; callers must still see a cancelled request; `error_description`, `error_uri` and bodies are free text that may carry personal data (LOG-009). |
+| D23 | LIB-010 through one helper `internal/dependency.Error` (message only, chain dropped, `context.Canceled`/`DeadlineExceeded` kept detectable), also for `apikey` Resolver errors; net/http errors wrap with `%w`. A token endpoint's error answer goes through one helper too, `internal/tokenendpoint.Error` (status and a well-formed OAuth error code, never its text), kept apart from `internal/dependency` so packages without OAuth do not link oauth2 (LIB-007). Providers answer and report through one `failure.Reporter`. | One audited place instead of several copies; callers must still see a cancelled request; `error_description`, `error_uri` and bodies are free text that may carry personal data (LOG-009). |
 | D24 | Redirect targets: `ErrorURL` and `PostLogoutURL` of oidc and github accept a safe path or an absolute http(s) URL without fragment, a path becomes absolute with `ExternalURL`; `ErrorURL` also receives 500s (`code=internal`). `PathPrefix` of password, oidc and github: segments of `A-Z a-z 0-9 . _ ~ -`, no trailing "/", no "." or ".." segment. URL checks require a host name. | A forward-auth redirect must be absolute to reach the browser; a fragment would swallow the appended `?code=`; prefixes must be neither mux wildcards nor removed by path cleaning. |
-| D25 | Code exchange (oidc and github alike): an error answer below 500 is 401 `login_failed`; a 5xx answer or an unreachable token endpoint is 500. The oidc auth style is fixed from discovery; discovered endpoints must be https or loopback http like the issuer (D16); an ID token without `sub` is refused; `"jwt"` is a reserved provider name. GitHub `Scopes` must include one that lists teams. | A user cannot fix an outage, monitoring must see it; oauth2's auto-detected style resends failed exchanges (RES-002); go-oidc checks only the issuer, so an http token endpoint would receive the client secret in clear; `jwt` is the verifier's Outcome.Provider; a scope that cannot list teams fails every login. |
+| D25 | Code exchange (oidc and github alike, `tokenendpoint.Refused`): an error answer below 500 is 401 `login_failed`; a 5xx answer or an unreachable token endpoint is 500. Keycloak's admin token request classifies nothing: every failure is 500. The oidc auth style is fixed from discovery; discovered endpoints must be https or loopback http like the issuer (D16); an ID token without `sub` is refused; `"jwt"` is a reserved provider name. GitHub `Scopes` must include one that lists teams. | A user cannot fix an outage, monitoring must see it; oauth2's auto-detected style resends failed exchanges (RES-002); go-oidc checks only the issuer, so an http token endpoint would receive the client secret in clear; `jwt` is the verifier's Outcome.Provider; a scope that cannot list teams fails every login. |
 | D26 | GitHub: the token goes only to `APIURL`'s scheme and host (own RoundTripper); AdminTeams members still need an allowed team; `Identity.Teams` sorted and unique; the token is stored before the identity. | oauth2's Transport sends the token on cross-host redirects (archives, `uploads.github.com`); the old library's admin rule kept; stable JWTs. |
 | D27 | Password: TOTP routes exist only with `TOTP.Enabled`, and an enrolled user's login fails (500) while it is off; registration with `TOTP.Required` answers 202 `totp_setup`; a stored hash that cannot be verified is 401 `invalid_credentials` and costs the dummy verification; only login rehashes, legacy hashes and Argon2id hashes whose parameters differ from `HashParameters`; `MinimumLength` counts runes; `Digits` 6 or 8; `MaximumAttempts` has no "unlimited"; backup codes only with `"backupCode": true`; `Period` <= 3600, `Skew` <= 10, `BackupCodeCount` <= 20, backup codes <= 128 bytes and >= 1,000,000 distinct codes; Storage matches identifiers ignoring case. | No dead routes and no silent downgrade to one factor; enrollment before any full session; a broken stored hash answers like a wrong password, in status and time; outdated cost parameters must not stay forever; a wrong TOTP code must not cost an Argon2id run; bounded step arithmetic and Argon2id work per attempt; `Alice` and `alice` are one account. |
 | D28 | JWT: claim names owned by identity fields are never copied from `Identity.Claims`; `exp` required; `iat` checked with the skew; `RefreshInterval` >= 1 min; a failed periodic refresh keeps the keys (degraded); `Sign` refuses an inactive identity; the verifier uses only RSA keys with `alg` and use `sig` (or none) from the JWKS, refetches detached from the request (10 s), keeps token material out of Reasons and credentials of the JWKS URL out of errors, and challenges 401s with `WWW-Authenticate: Bearer`. | An IdP `roles` claim must not become application roles; a token without expiry must not verify forever; a Sign/Verify round trip must not turn an inactive identity active; a published `oct` key would let anyone mint HS256 tokens; a cancelled request must not use up the refetch. |
@@ -1394,7 +1432,8 @@ Decisions taken during implementation (29.10.2026, settled by the lead):
 | `session/redisbackend` | `backendtest.Run` against miniredis; key layout with hash tags; marker blocks Put; no marker for an unknown session; a Pop retried after a lost reply (fault-injecting dialer) returns the value; connection failure surfaces as error without a `redis.Nil` chain. |
 | `internal/redirect` | tables for every function + `FuzzSafeReturnPath` (accepted paths never parse to a host or scheme). |
 | `internal/oauthlogin`, `internal/httpjson`, `internal/random` | Begin/Complete tables; Decode content types, size, unknown fields, trailing data; Write headers; token length and uniqueness. |
-| `internal/dependency`, `internal/failure`, `internal/hook`, `internal/impersonation` | chain dropped but cancellation detectable; denied vs error; nil hook, refusal kind kept, nil identity; write-back with and without impersonation, inputs untouched. |
+| `internal/dependency`, `internal/failure`, `internal/hook`, `internal/impersonation` | chain dropped but cancellation detectable; denied vs error, `Reporter` (JSON, ErrorURL redirect only for callbacks, Provider stamped, nil Observer); nil hook, refusal kind kept, nil identity; write-back with and without impersonation, inputs untouched. |
+| `internal/tokenendpoint`, `internal/fetchmetadata` | the endpoint's description, URI and body never in the error (code kept when well-formed, dropped when malformed or overlong; no Response), context errors detectable, `Refused` below 500 only; `cross-site` refused, `same-origin`, `same-site`, `none` and no header pass. Provider tests: every logout route refuses a cross-site request without touching the session, oidc front-channel logout passes it. |
 | `internal/forwardauth` | through the real gin engine with memory backend and fake issuer: ui/api checks, JWT header, jwks, me toggle, health/ready, readiness 503 during shutdown delay, metrics labels (route template, `unmatched`, method `other`), query redaction pre-enricher (dev and JSON emitter), sampler keeps 401/403 and unmatched requests, observer closure records and counts, dependency sums and histogram, JSON error lines of both listeners, metrics listener serves only `GET /metrics`; `goleak.VerifyTestMain` over the package. |
 
 Coverage is measured without `cmd/`, `internal/fakeprovider/` and `test/`; `cmd/forwardauth` is covered by the e2e suite [TST-010].
@@ -1524,7 +1563,7 @@ Follow-ups outside this repo (need MaPa's sign-off, not part of any WP): depreca
 | verify body `{"code","isBackupCode"}` (a wrong TOTP code fell through to the backup codes) | `{"code","backupCode"}`: `true` checks backup codes only, `false` TOTP codes only; every TOTP code is accepted once |
 | `TFA.Required` (403 `tfa_setup_required`) | `TOTP.Required` (202 `{"challenge":"totp_setup"}` at login) |
 | `EnableRegistration` | `EnableRegistration` |
-| `SessionName`, `SessionExpiration` | `StoreOptions.CookieName`, `MaxAge` |
+| `SessionName`, `SessionExpiration` | `StoreOptions.CookieName`, `MaximumAge` |
 | `SessionSecretKey` (64 B) | removed |
 | `SessionEncryptionKey` (32 B) | `StoreOptions.EncryptionKey` |
 | `CookieSecure`, `CookieHttpOnly`, `CookieSameSite`, `CookiePath`, `CookieDomain` | `InsecureCookie` (inverted), always HttpOnly, `SameSite`, `CookiePath`, `CookieDomain` |
@@ -1550,7 +1589,7 @@ Follow-ups outside this repo (need MaPa's sign-off, not part of any WP): depreca
 | `ProviderOptions.ClientId`, `RedirectUri`, `LogoutUri`, `Scopes`+`ExtraScopes`, `ClaimMapper` | `ClientID`, derived from ExternalURL, discovered `end_session_endpoint`, `Scopes`, `ClaimMapper` (returns `oidc.Profile`) |
 | `PostLogoutRedirectUri`, `AuthBaseUrl`, `AuthBaseContextPath` | `PostLogoutURL` (path or absolute URL, no fragment), `ExternalURL`, `PathPrefix` (default `/auth/oidc/<name>`; same segment rule as password); `Name` must not be `password`, `github`, `apikey`, `session` or `jwt` |
 | `EnableUserInfoEndpoint`, `/userinfo` | `auth.IdentityHandler()` (no raw claims) |
-| `SessionOptions{SecretSigningKey, SecretEncryptionKey, Name, Domain, MaxAge, Secure, SameSite, Backend, CacheSize, CacheTTL, Redis}` | `session.StoreOptions{-, EncryptionKey []byte, CookieName, CookieDomain, MaxAge time.Duration, InsecureCookie, SameSite, Backend, -, -, redisbackend.New}`; `CacheSize` -> `MemoryBackendOptions.MaximumSessions` |
+| `SessionOptions{SecretSigningKey, SecretEncryptionKey, Name, Domain, MaxAge, Secure, SameSite, Backend, CacheSize, CacheTTL, Redis}` | `session.StoreOptions{-, EncryptionKey []byte, CookieName, CookieDomain, MaximumAge time.Duration, InsecureCookie, SameSite, Backend, -, -, redisbackend.New}`; `CacheSize` -> `MemoryBackendOptions.MaximumSessions` |
 | `ExternalSessionStore`, `MultiHandler`, `AddProvider`, `GetHandler`, `GetDefaultHandler`, `LoginURL`, `ProviderNames` | one `oidc.New` per IdP sharing one Store; `Provider.LoginURL()` |
 | `GetUiAuthMiddleware`, `GetApiAuthMiddleware` | `guard.RequireUI()`, `guard.RequireAPI()` |
 | gin keys `sessionData`, `realmRoles`, `clientRoles`, `groups`, `attributes`, `provider` | `auth.IdentityFrom(ctx)`: `OIDCRoles`, `OIDCClientRoles`, `Groups`, `Attributes`, `Provider` |
@@ -1576,7 +1615,7 @@ Follow-ups outside this repo (need MaPa's sign-off, not part of any WP): depreca
 | `AllowedAPIKeys`, `APIKeyResolver`, `ResolvedAPIKey{Login, Teams, Data}` | `apikey.Options{Keys: []apikey.Key{Name, Secret, Roles, Permissions}, Resolver}` returning `*auth.Identity{Subject/Username, Teams, Permissions, Data}` |
 | access level in `ResolvedAPIKey.Data` (build-api `read_only` / `read_write`) + an app middleware refusing non-GET for read_only | `Identity.Permissions`: `read_only` -> `[*:read]`, `read_write` -> `[*:write]`; gate with `ginadapter.RequireMethodPermission(resource)` or `Require(authorization.HasPermission(...))`. Browser sessions have no permissions: grant them in `OnLogin` (e.g. `*:write` for allowed-team members) or compose `Any(HasRole(...), HasPermission(...))` |
 | `GetApiKeyAuthMiddleware(keys)` | `keys, err := apikey.New(...)`, then `keys.Middleware()` |
-| `SessionSecretKey`, `SessionEncryptionKey`, `CookieName`, `CookieDomain` (default localhost), `SessionMaxAge *int`, `CookieInsecure` | removed, `StoreOptions.EncryptionKey`, `CookieName`, `CookieDomain` (default host-only), `MaxAge`, `InsecureCookie` |
+| `SessionSecretKey`, `SessionEncryptionKey`, `CookieName`, `CookieDomain` (default localhost), `SessionMaxAge *int`, `CookieInsecure` | removed, `StoreOptions.EncryptionKey`, `CookieName`, `CookieDomain` (default host-only), `MaximumAge`, `InsecureCookie` |
 | `Handle.IsAuthenticated(c)`, `IsAdmin(c)`, `GetRelevantTeams(c)` | `authorization.IsAuthenticated()`, `authorization.IsAdmin()`, `auth.IdentityFrom(ctx).Teams` |
 | `GetAdminMiddleware()` | `ginadapter.Require(authorization.IsAdmin())` |
 | `GetSessionStore().GetSession(c)`, `Session.GetHttpClient(ctx)`, `GetToken` | `store.Open(request)`, `provider.HTTPClient(ctx, current)` |
@@ -1601,7 +1640,7 @@ Follow-ups outside this repo (need MaPa's sign-off, not part of any WP): depreca
 | `SESSION_ENCRYPTION_KEY` (32 chars) | `SESSION_ENCRYPTION_KEY` (base64) | `SESSION_ENCRYPTION_KEY` (base64 of 32 bytes; `printf %s "$OLD" \| base64` keeps an old 32-char key) |
 | `SESSION_NAME` | `SESSION_COOKIE_NAME` | `SESSION_COOKIE_NAME` |
 | `SESSION_DOMAIN` (default localhost) | `COOKIE_DOMAIN` (default localhost) | `SESSION_COOKIE_DOMAIN` (default host-only) |
-| `SESSION_MAX_AGE` | `SESSION_MAX_AGE` | `SESSION_MAX_AGE_SECONDS` |
+| `SESSION_MAX_AGE` | `SESSION_MAX_AGE` | `SESSION_MAXIMUM_AGE_SECONDS` |
 | `SESSION_SECURE` | `COOKIE_INSECURE` | `SESSION_INSECURE_COOKIE` |
 | `SESSION_CACHE_SIZE` | - | removed |
 | `SESSION_REDIS_ENABLED`, `_HOST` + `_PORT`, `_PASSWORD`, `_DB`, `_KEY_PREFIX` | - | `SESSION_REDIS_ENABLED`, `_ADDRESS`, `_PASSWORD`, `_DATABASE`, `_KEY_PREFIX` |
