@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -17,6 +18,7 @@ import (
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/authorization"
 	"github.com/govengers/auth/ginadapter"
+	"github.com/govengers/auth/session"
 )
 
 func TestMain(m *testing.M) {
@@ -165,7 +167,16 @@ func TestObserve(t *testing.T) {
 		{
 			name:    "refresh success leaves the outcome to the handler",
 			outcome: auth.Outcome{Provider: "password", Action: auth.ActionRefresh, Result: auth.ResultSuccess},
-			want:    map[string]any{"auth": map[string]any{"provider": "password", "action": "refresh", "result": "success"}},
+			want:    map[string]any{"auth": map[string]any{"refresh": map[string]any{"provider": "password", "action": "refresh", "result": "success"}}},
+		},
+		{
+			name:    "refresh denial records under auth.refresh without the user ID",
+			outcome: auth.Outcome{Provider: "github", Action: auth.ActionRefresh, Result: auth.ResultDenied, Err: auth.ErrForbidden, Identity: identity},
+			want: map[string]any{
+				"auth":    map[string]any{"refresh": map[string]any{"provider": "github", "action": "refresh", "result": "denied", "code": "forbidden", "subject": "42"}},
+				"outcome": "failure",
+				"error":   "forbidden",
+			},
 		},
 		{
 			name:    "impersonation records the real subject and the acting user ID",
@@ -241,6 +252,73 @@ func emittedFields(t *testing.T, record func(ctx context.Context)) map[string]an
 	delete(fields, "name")
 	delete(fields, "duration")
 	return fields
+}
+
+func TestObserveKeepsARefreshApartFromTheAuthentication(t *testing.T) {
+	identity := &auth.Identity{Provider: "github", Subject: "42", UserID: userID, Active: true}
+
+	fields := emittedFields(t, func(ctx context.Context) {
+		ginadapter.Observe(ctx, auth.Outcome{Provider: "github", Action: auth.ActionRefresh, Result: auth.ResultSuccess, Err: errors.New("github api: 503"), Identity: identity})
+		ginadapter.Observe(ctx, auth.Outcome{Provider: "github", Action: auth.ActionAuthenticate, Result: auth.ResultSuccess, Identity: identity})
+	})
+
+	require.Equal(t, map[string]any{
+		"auth": map[string]any{
+			"provider": "github", "action": "authenticate", "result": "success", "subject": "42",
+			"refresh": map[string]any{"provider": "github", "action": "refresh", "result": "success", "code": "internal", "error": "github api: 503", "subject": "42"},
+		},
+		"user":     map[string]any{"id": userID.String()},
+		"degraded": true,
+	}, fields)
+}
+
+// failingRefresher is a session.Refresher for "github" whose identity provider is down.
+type failingRefresher struct{}
+
+func (failingRefresher) Name() string { return "github" }
+
+func (failingRefresher) Refresh(context.Context, session.Session, *auth.Identity) (*auth.Identity, error) {
+	return nil, errors.New("github api: 503")
+}
+
+func TestObserveRecordsAGuardRefreshOnce(t *testing.T) {
+	backend, err := session.NewMemoryBackend(nil)
+	require.NoError(t, err)
+	store, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: make([]byte, 32)})
+	require.NoError(t, err)
+	login := httptest.NewRecorder()
+	started, err := store.Start(t.Context(), login, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
+	require.NoError(t, err)
+	require.NoError(t, started.SaveIdentity(t.Context(), &auth.Identity{Provider: "github", Subject: "42", UserID: userID, Active: true}))
+	// Every request is due for a refresh: the stored identity was refreshed more than a nanosecond ago.
+	guard, err := session.NewGuard(&session.GuardOptions{Store: store, Refreshers: []session.Refresher{failingRefresher{}}, RefreshInterval: time.Nanosecond, Observer: ginadapter.Observe})
+	require.NoError(t, err)
+	var fields []wideevent.Field
+	var emitted map[string]any
+	engine := gin.New()
+	engine.Use(wideevent.Middleware(wideevent.WithEmitter(wideevent.EmitterFunc(func(we *wideevent.Event) {
+		fields, emitted = we.Fields(), we.FieldsMap()
+	}))))
+	engine.GET("/me", ginadapter.Middleware(guard.RequireAPI()), writeSubject)
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/me", nil)
+	for _, cookie := range login.Result().Cookies() {
+		request.AddCookie(cookie)
+	}
+	recorder := httptest.NewRecorder()
+
+	engine.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	keys := map[string]bool{}
+	for _, field := range fields {
+		require.False(t, keys[field.Key], "key %s set twice", field.Key)
+		keys[field.Key] = true
+	}
+	authFields, _ := emitted["auth"].(map[string]any)
+	require.Equal(t, "authenticate", authFields["action"])
+	require.NotContains(t, authFields, "error", "the refresh's failure is not the authentication's")
+	require.Equal(t, map[string]any{"provider": "github", "action": "refresh", "result": "success", "code": "internal", "error": "github api: 503", "subject": "42"}, authFields["refresh"])
+	require.Equal(t, true, emitted["degraded"])
 }
 
 func TestObserveWithoutWideEvent(t *testing.T) {
