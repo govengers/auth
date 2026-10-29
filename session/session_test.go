@@ -269,6 +269,7 @@ func TestSwapIdentity(t *testing.T) {
 	updated := testIdentity()
 	updated.Teams = []string{"acme/admins"}
 	clock.advance(time.Hour)
+	require.NoError(t, current.SaveIdentity(ctx, previous), "moves only refreshedAt, like a Guard claim: no conflict")
 
 	swapped, err := current.SwapIdentity(ctx, previous, updated)
 

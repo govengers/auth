@@ -425,6 +425,7 @@ func TestGuardRefreshRefusalThatCannotEndTheSessionIs500(t *testing.T) {
 
 	for _, result := range []guardResult{api, ui} {
 		require.Equal(t, http.StatusInternalServerError, result.recorder.Code)
+		require.JSONEq(t, `{"code":"internal","message":"internal error"}`, result.recorder.Body.String(), "no redirect, no refusal body")
 		require.Nil(t, result.identity)
 	}
 	outcomes := fixture.observer.take()

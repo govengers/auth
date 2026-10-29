@@ -207,7 +207,8 @@ func (c *Client) userAuthorization(ctx context.Context, userID string) (userAuth
 	return authorization, nil
 }
 
-// accessToken returns the cached Admin API token, requesting a new one from 30 s before its expiry.
+// accessToken returns the cached Admin API token, requesting a new one from 30 s before its expiry or once
+// the Admin API answered 401 to it (dropAdminToken).
 func (c *Client) accessToken(ctx context.Context) (string, error) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
