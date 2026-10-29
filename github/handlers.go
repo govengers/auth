@@ -145,19 +145,22 @@ func (p *Provider) startSession(ctx context.Context, writer http.ResponseWriter,
 	if err := current.Put(ctx, tokenKey, encoded, p.options.Sessions.MaximumAge()); err != nil {
 		return fmt.Errorf("github: store token: %w", err)
 	}
-	return current.SaveIdentity(ctx, completed.identity)
+	if err := current.SaveIdentity(ctx, completed.identity); err != nil {
+		return fmt.Errorf("github: save identity: %w", err)
+	}
+	return nil
 }
 
 // logout ends the session, revokes the GitHub token (a failure only degrades the outcome), runs
 // OnLogout and redirects to PostLogoutURL. A cross-site request (logout CSRF) is refused before the
 // session is touched.
 func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) {
-	ctx := request.Context()
 	if err := fetchmetadata.RefuseCrossSite(request); err != nil {
-		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: err})
+		p.reporter.Refuse(request.Context(), writer, auth.Outcome{Action: auth.ActionLogout, Err: err})
 		return
 	}
-	identity, token, readError := p.sessionState(context.WithoutCancel(ctx), request)
+	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the reads or OnLogout
+	identity, token, readError := p.sessionState(ctx, request)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
 		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: fmt.Errorf("github: end session: %w", err), Identity: identity})
 		return
@@ -207,30 +210,34 @@ func (p *Provider) refreshTeams(writer http.ResponseWriter, request *http.Reques
 }
 
 // refreshSession refreshes and saves the real identity of the request's GitHub session. A refusal
-// (token rejected, no allowed team) ends the session; the stored identity is returned with errors after
-// the session was read.
+// (token rejected, no allowed team) ends the session; when that fails, the failure is the error (the
+// session is still usable, so it is no refusal). The stored identity is returned with errors after the
+// session was read.
 func (p *Provider) refreshSession(ctx context.Context, writer http.ResponseWriter, request *http.Request) (*auth.Identity, error) {
 	current, err := p.options.Sessions.Open(request)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("github: refresh teams: %w", err)
 	}
 	stored, err := current.Identity(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("github: refresh teams: %w", err)
 	}
 	if stored.Real().Provider != providerName {
 		return stored, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "not a GitHub session"}
 	}
 	refreshed, err := p.Refresh(ctx, current, stored.Real())
 	if errors.Is(err, auth.ErrUnauthenticated) || errors.Is(err, auth.ErrForbidden) {
-		return stored, errors.Join(err, p.options.Sessions.End(ctx, writer, request))
+		if endError := p.options.Sessions.End(ctx, writer, request); endError != nil {
+			return stored, fmt.Errorf("github: end refused session: %w", endError)
+		}
+		return stored, err
 	}
 	if err != nil {
 		return stored, err
 	}
 	updated := impersonation.WithReal(stored, refreshed)
 	if err := current.SaveIdentity(ctx, updated); err != nil {
-		return stored, err
+		return stored, fmt.Errorf("github: save refreshed identity: %w", err)
 	}
 	return updated, nil
 }
