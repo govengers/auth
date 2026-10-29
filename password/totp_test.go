@@ -164,6 +164,26 @@ func TestVerifyTOTP(t *testing.T) {
 	}
 }
 
+func TestVerifyFailsOnAnUndecodableSecret(t *testing.T) {
+	const undecodable = "not base32!"
+	fixture := newFixture(t, totpOptions())
+	user := fixture.createUser(t, "ada", "")
+	requireSetTOTP(t, fixture.storage, user.ID, undecodable, nil)
+	browser := fixture.pendingClient(t, "ada")
+
+	recorder := browser.post(verifyPath, map[string]any{"code": "123456"})
+
+	requireRefusal(t, recorder, http.StatusInternalServerError, "internal")
+	outcome := fixture.outcomes.last(t)
+	require.Equal(t, auth.ResultError, outcome.Result)
+	require.ErrorContains(t, outcome.Err, user.ID.String())
+	require.NotContains(t, outcome.Err.Error(), undecodable, "errors never carry the secret")
+
+	recorder = browser.post(verifyPath, map[string]any{"code": "12345"})
+
+	requireRefusal(t, recorder, http.StatusUnauthorized, "invalid_totp_code") // a code of the wrong length is just wrong
+}
+
 func TestTOTPCodeIsSingleUse(t *testing.T) {
 	fixture := newFixture(t, totpOptions())
 	fixture.createTOTPUser(t, "ada")
