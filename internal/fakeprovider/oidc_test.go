@@ -130,6 +130,20 @@ func TestTheTokenEndpointRejectsAWrongVerifierAndAReusedCode(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, status, "a code works once")
 }
 
+func TestTokenAnswerReplacesTheTokenEndpoint(t *testing.T) {
+	issuer := fakeprovider.StartOIDC(t, fakeprovider.OIDCOptions{
+		ClientID: "client", ClientSecret: "secret",
+		TokenAnswer: http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			http.Error(writer, `{"error":"temporarily_unavailable"}`, http.StatusServiceUnavailable)
+		}),
+	})
+
+	status, body := exchange(t, issuer, "any-code", codeVerifier)
+
+	require.Equal(t, http.StatusServiceUnavailable, status)
+	require.Equal(t, map[string]any{"error": "temporarily_unavailable"}, body)
+}
+
 func TestAuthorizeRejectsAClientThatSkipsPKCEStateOrNonce(t *testing.T) {
 	issuer := startIssuer(t)
 	for _, omitted := range []string{"code_challenge", "state", "nonce", "scope"} {

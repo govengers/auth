@@ -195,10 +195,10 @@ func TestCallbackClassifiesTokenEndpointErrorsWithoutTheirText(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			transport := &answeringTransport{path: "/token", status: testCase.status, contentType: testCase.contentType, body: testCase.body}
-			application := newApplication(t, startIssuer(t, nil), func(options *oidc.Options) {
-				options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
+			issuer := startIssuer(t, func(options *fakeprovider.OIDCOptions) {
+				options.TokenAnswer = answer(testCase.status, testCase.contentType, testCase.body)
 			})
+			application := newApplication(t, issuer, nil)
 
 			response := newBrowser(t).signIn(application, prefix+"/login")
 
@@ -440,6 +440,15 @@ func (f *failingTransport) requests() int {
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
 	return f.passed
+}
+
+// answer is a handler answering status with contentType and body.
+func answer(status int, contentType, body string) http.HandlerFunc {
+	return func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", contentType)
+		writer.WriteHeader(status)
+		_, _ = io.WriteString(writer, body) // the test reads the outcome, not this write
+	}
 }
 
 // answeringTransport answers requests to path itself and passes the others on. The reason phrase of its

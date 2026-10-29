@@ -46,7 +46,7 @@ type OIDCUser struct {
 }
 
 // OIDCOptions configures the fake issuer. Faults (the bool fields after User) make every token
-// response broken in one specific way.
+// response broken in one specific way; TokenAnswer replaces the token endpoint altogether.
 type OIDCOptions struct {
 	IssuerURL              string   // required by NewOIDCHandler, set by StartOIDC: the iss claim; endpoints are served below its path
 	ClientID               string   // required
@@ -60,6 +60,8 @@ type OIDCOptions struct {
 	OpaqueAccessToken      bool // a random access token instead of a JWT, as Google issues
 	WrongNonce             bool // the ID token carries another nonce than the authorize request
 	BadSignature           bool // ID and access token signatures do not verify
+
+	TokenAnswer http.Handler // when set, answers every /token request in place of the fake: an IdP's error or broken answers
 
 	KeycloakRealm               string // when set, also serves the Keycloak token endpoint and Admin API of this realm (keycloak.go)
 	KeycloakAuthenticationRealm string // realm whose token endpoint issues admin tokens; default KeycloakRealm
@@ -272,6 +274,10 @@ func authorizeProblem(query url.Values) string {
 }
 
 func (h *OIDCHandler) token(writer http.ResponseWriter, request *http.Request) {
+	if h.options.TokenAnswer != nil {
+		h.options.TokenAnswer.ServeHTTP(writer, request)
+		return
+	}
 	form, err := readForm(writer, request)
 	if err != nil {
 		oauthError(writer, http.StatusBadRequest, "invalid_request")
