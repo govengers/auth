@@ -471,6 +471,15 @@ func TestNetHTTPErrorLinesOfBothListenersAreJSONThroughTheLogger(t *testing.T) {
 	}
 }
 
+func TestNewHTTPMetricsRequiresARegisterer(t *testing.T) {
+	for _, options := range []*httpMetricsOptions{nil, {pathPrefix: "/auth"}} {
+		metrics, err := newHTTPMetrics(options)
+
+		require.ErrorContains(t, err, "a registerer is required")
+		require.Nil(t, metrics)
+	}
+}
+
 func TestMethodLabelBoundsTheMethods(t *testing.T) {
 	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace} {
 		require.Equal(t, method, methodLabel(method))

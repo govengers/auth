@@ -85,7 +85,7 @@ func NewServer(options *ServerOptions) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	metrics, err := newHTTPMetrics(resolved.MetricsRegistry, resolved.PathPrefix)
+	metrics, err := newHTTPMetrics(&httpMetricsOptions{registerer: resolved.MetricsRegistry, pathPrefix: resolved.PathPrefix})
 	if err != nil {
 		return nil, err
 	}

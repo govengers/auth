@@ -1,6 +1,7 @@
 package forwardauth
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -20,7 +21,16 @@ type httpMetrics struct {
 	skippedRoutes map[string]bool
 }
 
-func newHTTPMetrics(registerer prometheus.Registerer, pathPrefix string) (*httpMetrics, error) {
+// httpMetricsOptions configure the HTTP metrics of a Server.
+type httpMetricsOptions struct {
+	registerer prometheus.Registerer // required
+	pathPrefix string                // health and readiness below it are not recorded
+}
+
+func newHTTPMetrics(options *httpMetricsOptions) (*httpMetrics, error) {
+	if options == nil || options.registerer == nil {
+		return nil, errors.New("HTTP metrics: a registerer is required")
+	}
 	metrics := &httpMetrics{
 		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace, Subsystem: "http", Name: "requests_total",
@@ -34,10 +44,10 @@ func newHTTPMetrics(registerer prometheus.Registerer, pathPrefix string) (*httpM
 			Namespace: metricsNamespace, Subsystem: "http", Name: "requests_in_flight",
 			Help: "HTTP requests being served.",
 		}),
-		skippedRoutes: map[string]bool{pathPrefix + "/health": true, pathPrefix + "/ready": true},
+		skippedRoutes: map[string]bool{options.pathPrefix + "/health": true, options.pathPrefix + "/ready": true},
 	}
 	for _, collector := range []prometheus.Collector{metrics.requests, metrics.durations, metrics.inFlight} {
-		if err := registerer.Register(collector); err != nil {
+		if err := options.registerer.Register(collector); err != nil {
 			return nil, fmt.Errorf("register the HTTP metrics: %w", err)
 		}
 	}
