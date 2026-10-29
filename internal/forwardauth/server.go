@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"runtime/debug"
@@ -60,6 +61,7 @@ type ServerOptions struct {
 	JWTHeader         string                          // default "Authorization"; value "Bearer <jwt>"; see ValidateJWTHeader
 	IdentityEndpoint  bool                            // mounts {prefix}/me
 	Emitter           wideevent.Emitter               // required
+	Logger            *slog.Logger                    // required: net/http's own error lines (accept errors, panics outside gin) [LOG-013]
 	SampleRate        int                             // required, >= 1: keep every Nth successful event
 	MetricsRegistry   *prometheus.Registry            // required; runtime collectors registered by main [MET-002]
 	ReadinessCheck    func(ctx context.Context) error // optional (Redis ping)
@@ -90,6 +92,7 @@ func NewServer(options *ServerOptions) (*Server, error) {
 	server := &Server{options: resolved, delay: time.Sleep}
 	server.ready.Store(true)
 	server.engine = server.newEngine(metrics)
+	errorLog := slog.NewLogLogger(resolved.Logger.Handler(), slog.LevelError)
 	server.httpServer = &http.Server{
 		Addr:              ":" + strconv.Itoa(resolved.Port),
 		Handler:           server.engine,
@@ -97,6 +100,7 @@ func NewServer(options *ServerOptions) (*Server, error) {
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		ErrorLog:          errorLog,
 	}
 	metricsRoutes := http.NewServeMux()
 	metricsRoutes.Handle("GET /metrics", promhttp.HandlerFor(resolved.MetricsRegistry, promhttp.HandlerOpts{Registry: resolved.MetricsRegistry}))
@@ -104,13 +108,14 @@ func NewServer(options *ServerOptions) (*Server, error) {
 		Addr:              ":" + strconv.Itoa(resolved.MetricsPort),
 		Handler:           metricsRoutes,
 		ReadHeaderTimeout: 5 * time.Second,
+		ErrorLog:          errorLog,
 	}
 	return server, nil
 }
 
 func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
-	if options == nil || options.Guard == nil || options.Emitter == nil || options.MetricsRegistry == nil {
-		return ServerOptions{}, errors.New("forwardauth server: Guard, Emitter and MetricsRegistry are required")
+	if options == nil || options.Guard == nil || options.Emitter == nil || options.Logger == nil || options.MetricsRegistry == nil {
+		return ServerOptions{}, errors.New("forwardauth server: Guard, Emitter, Logger and MetricsRegistry are required")
 	}
 	resolved := *options
 	resolved.Routes = slices.Clone(options.Routes)

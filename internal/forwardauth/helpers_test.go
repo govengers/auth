@@ -1,11 +1,13 @@
 package forwardauth
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -63,6 +65,7 @@ type harness struct {
 	store    *session.Store
 	registry *prometheus.Registry
 	events   *eventRecorder
+	logs     *bytes.Buffer // what the Logger wrote; read it only after the server stopped
 }
 
 type harnessOptions struct {
@@ -86,6 +89,7 @@ func newHarness(t *testing.T, options harnessOptions) *harness {
 	guard, err := session.NewGuard(&session.GuardOptions{Store: store, LoginURL: testLoginURL, ReturnPathHeader: "X-Forwarded-Uri", Observer: observer})
 	require.NoError(t, err)
 	events := &eventRecorder{}
+	logs := &bytes.Buffer{}
 	serverOptions := &ServerOptions{
 		Version:          "1.2.3",
 		PathPrefix:       "/auth",
@@ -95,6 +99,7 @@ func newHarness(t *testing.T, options harnessOptions) *harness {
 		JWTHeader:        options.jwtHeader,
 		IdentityEndpoint: options.identityEndpoint,
 		Emitter:          wideevent.EmitterFunc(events.emit),
+		Logger:           slog.New(slog.NewJSONHandler(logs, nil)),
 		SampleRate:       1,
 		MetricsRegistry:  registry,
 		ReadinessCheck:   options.readinessCheck,
@@ -107,7 +112,7 @@ func newHarness(t *testing.T, options harnessOptions) *harness {
 	}
 	server, err := NewServer(serverOptions)
 	require.NoError(t, err)
-	return &harness{server: server, store: store, registry: registry, events: events}
+	return &harness{server: server, store: store, registry: registry, events: events, logs: logs}
 }
 
 func newTestStore(t *testing.T) *session.Store {

@@ -152,7 +152,7 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	defer sessions.close(logger)
-	server, err := newServer(ctx, configuration, sessions)
+	server, err := newServer(ctx, configuration, sessions, logger)
 	if err != nil {
 		return err
 	}
@@ -171,7 +171,7 @@ func ginMode(devMode bool) string {
 }
 
 // newServer builds every component after the session store and the server that serves them.
-func newServer(ctx context.Context, configuration *Configuration, sessions *sessions) (*forwardauth.Server, error) {
+func newServer(ctx context.Context, configuration *Configuration, sessions *sessions, logger *slog.Logger) (*forwardauth.Server, error) {
 	metricsRegistry := newMetricsRegistry()
 	outcomeCounter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: metricsRegistry, Namespace: "forwardauth"})
 	if err != nil {
@@ -213,6 +213,7 @@ func newServer(ctx context.Context, configuration *Configuration, sessions *sess
 		JWTHeader:        configuration.JWTHeader,
 		IdentityEndpoint: configuration.IdentityEndpointEnabled,
 		Emitter:          newEmitter(configuration.DevMode),
+		Logger:           logger,
 		SampleRate:       configuration.WideEventSampleRate,
 		MetricsRegistry:  metricsRegistry,
 		ReadinessCheck:   sessions.readinessCheck(),

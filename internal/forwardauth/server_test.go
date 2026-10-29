@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
@@ -32,7 +33,7 @@ func TestNewServerValidatesOptions(t *testing.T) {
 	valid := func() *ServerOptions {
 		return &ServerOptions{
 			PathPrefix: "/auth", Guard: guard, Emitter: wideevent.EmitterFunc(func(*wideevent.Event) {}),
-			SampleRate: 1, MetricsRegistry: prometheus.NewRegistry(),
+			Logger: slog.New(slog.DiscardHandler), SampleRate: 1, MetricsRegistry: prometheus.NewRegistry(),
 		}
 	}
 	testCases := []struct {
@@ -41,6 +42,7 @@ func TestNewServerValidatesOptions(t *testing.T) {
 	}{
 		{name: "no guard", change: func(options *ServerOptions) { options.Guard = nil }},
 		{name: "no emitter", change: func(options *ServerOptions) { options.Emitter = nil }},
+		{name: "no logger", change: func(options *ServerOptions) { options.Logger = nil }},
 		{name: "no metrics registry", change: func(options *ServerOptions) { options.MetricsRegistry = nil }},
 		{name: "empty path prefix", change: func(options *ServerOptions) { options.PathPrefix = "" }},
 		{name: "relative path prefix", change: func(options *ServerOptions) { options.PathPrefix = "auth" }},
@@ -425,6 +427,22 @@ func TestTheMetricsListenerServesOnlyGETMetrics(t *testing.T) {
 	require.Contains(t, metrics.Body.String(), "forwardauth_http_requests_in_flight")
 	require.Equal(t, http.StatusNotFound, serveMetrics(http.MethodGet, "/").Code)
 	require.Equal(t, http.StatusMethodNotAllowed, serveMetrics(http.MethodPost, "/metrics").Code)
+}
+
+func TestNetHTTPErrorLinesOfBothListenersAreJSONThroughTheLogger(t *testing.T) {
+	testHarness := newHarness(t, harnessOptions{})
+
+	testHarness.server.httpServer.ErrorLog.Print("http: Accept error: public")
+	testHarness.server.metricsServer.ErrorLog.Print("http: Accept error: metrics")
+
+	lines := strings.Split(strings.TrimSpace(testHarness.logs.String()), "\n")
+	require.Len(t, lines, 2)
+	for index, listener := range []string{"public", "metrics"} {
+		var line map[string]any
+		require.NoError(t, json.Unmarshal([]byte(lines[index]), &line))
+		require.Equal(t, "ERROR", line["level"])
+		require.Equal(t, "http: Accept error: "+listener, line["msg"])
+	}
 }
 
 func TestMethodLabelBoundsTheMethods(t *testing.T) {
