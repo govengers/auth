@@ -221,27 +221,55 @@ func TestTheIssuerKeepsNoSliceOrMapOfTheCaller(t *testing.T) {
 	require.Equal(t, map[string]any{"team": []any{"chassis"}}, keycloakAttributes(t, issuer))
 }
 
+func TestRevokedKeycloakTokensAreRefused(t *testing.T) {
+	issuer := fakeprovider.StartOIDC(t, fakeprovider.OIDCOptions{
+		ClientID: "client", ClientSecret: "secret", User: fakeprovider.OIDCUser{Subject: "sub-alice"},
+		KeycloakRealm: "staff", KeycloakClientID: "service", KeycloakClientSecret: "service-secret",
+	})
+	token := keycloakAdminToken(t, issuer)
+	status, _ := keycloakUser(t, issuer, token)
+	require.Equal(t, http.StatusOK, status)
+
+	issuer.RevokeKeycloakTokens()
+
+	status, _ = keycloakUser(t, issuer, token)
+	require.Equal(t, http.StatusUnauthorized, status)
+}
+
 // keycloakAttributes reads the user's attributes from the Admin API of the issuer's realm "staff".
 func keycloakAttributes(t *testing.T, issuer *fakeprovider.OIDCServer) any {
 	t.Helper()
+	_, user := keycloakUser(t, issuer, keycloakAdminToken(t, issuer))
+	return user["attributes"]
+}
+
+// keycloakAdminToken requests an admin token for the service account "service" of realm "staff".
+func keycloakAdminToken(t *testing.T, issuer *fakeprovider.OIDCServer) string {
+	t.Helper()
 	form := url.Values{"grant_type": {"client_credentials"}, "client_id": {"service"}, "client_secret": {"service-secret"}}
-	tokenRequest, err := http.NewRequestWithContext(t.Context(), http.MethodPost, issuer.URL()+"/realms/staff/protocol/openid-connect/token", strings.NewReader(form.Encode()))
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, issuer.URL()+"/realms/staff/protocol/openid-connect/token", strings.NewReader(form.Encode()))
 	require.NoError(t, err)
-	tokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	tokenResponse, err := noRedirects().Do(tokenRequest)
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response, err := noRedirects().Do(request)
 	require.NoError(t, err)
-	defer func() { _ = tokenResponse.Body.Close() }() // read-only response, close error carries no information
+	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
 	var token struct {
 		AccessToken string `json:"access_token"`
 	}
-	require.NoError(t, json.NewDecoder(tokenResponse.Body).Decode(&token))
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&token))
+	return token.AccessToken
+}
+
+// keycloakUser gets user "sub-alice" of realm "staff" from the Admin API with token.
+func keycloakUser(t *testing.T, issuer *fakeprovider.OIDCServer, token string) (int, map[string]any) {
+	t.Helper()
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, issuer.URL()+"/admin/realms/staff/users/sub-alice", nil)
 	require.NoError(t, err)
-	request.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	request.Header.Set("Authorization", "Bearer "+token)
 	response, err := noRedirects().Do(request)
 	require.NoError(t, err)
 	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
 	var user map[string]any
 	require.NoError(t, json.NewDecoder(response.Body).Decode(&user))
-	return user["attributes"]
+	return response.StatusCode, user
 }
