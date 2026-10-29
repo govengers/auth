@@ -18,6 +18,7 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/dependency"
+	"github.com/govengers/auth/internal/failure"
 )
 
 const (
@@ -290,12 +291,8 @@ func bearerToken(headerValue string) (string, bool) {
 
 func outcomeOf(identity *auth.Identity, refreshError, err error) auth.Outcome {
 	outcome := auth.Outcome{Provider: providerName, Action: auth.ActionAuthenticate, Result: auth.ResultSuccess, Err: refreshError, Identity: identity}
-	var refusal *auth.Error
-	switch {
-	case errors.As(err, &refusal):
-		outcome.Result, outcome.Err = auth.ResultDenied, err
-	case err != nil:
-		outcome.Result, outcome.Err = auth.ResultError, err
+	if err != nil {
+		outcome.Result, outcome.Err = failure.Result(err), err
 	}
 	return outcome
 }

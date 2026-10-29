@@ -11,6 +11,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/failure"
 	"github.com/govengers/auth/internal/httpjson"
 	"github.com/govengers/auth/internal/impersonation"
 	"github.com/govengers/auth/internal/oauthlogin"
@@ -268,10 +269,7 @@ func (p *Provider) refuseCallback(ctx context.Context, writer http.ResponseWrite
 
 // reportFailure reports outcome as denied (a refusal) or error (answered with 500).
 func (p *Provider) reportFailure(ctx context.Context, outcome auth.Outcome) {
-	outcome.Result = auth.ResultDenied
-	if status, _ := auth.ResponseFor(outcome.Err); status == http.StatusInternalServerError {
-		outcome.Result = auth.ResultError
-	}
+	outcome.Result = failure.Result(outcome.Err)
 	p.report(ctx, outcome)
 }
 

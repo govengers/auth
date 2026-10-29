@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/failure"
 	"github.com/govengers/auth/internal/impersonation"
 	"github.com/govengers/auth/internal/redirect"
 )
@@ -193,10 +194,7 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 
 // reportFailure reports outcome as denied (a refusal) or error (anything answered with 500) and returns its Err.
 func (g *Guard) reportFailure(ctx context.Context, outcome auth.Outcome) error {
-	outcome.Result = auth.ResultDenied
-	if status, _ := auth.ResponseFor(outcome.Err); status == http.StatusInternalServerError {
-		outcome.Result = auth.ResultError
-	}
+	outcome.Result = failure.Result(outcome.Err)
 	g.report(ctx, outcome)
 	return outcome.Err
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/dependency"
+	"github.com/govengers/auth/internal/failure"
 	"github.com/govengers/auth/internal/oauthlogin"
 	"github.com/govengers/auth/internal/redirect"
 )
@@ -203,10 +204,7 @@ func (p *Provider) refuse(writer http.ResponseWriter, request *http.Request, out
 
 // reportFailure reports outcome as denied (a refusal) or error (answered with 500).
 func (p *Provider) reportFailure(ctx context.Context, outcome auth.Outcome) {
-	outcome.Result = auth.ResultDenied
-	if status, _ := auth.ResponseFor(outcome.Err); status >= http.StatusInternalServerError {
-		outcome.Result = auth.ResultError
-	}
+	outcome.Result = failure.Result(outcome.Err)
 	p.report(ctx, outcome)
 }
 

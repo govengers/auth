@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/failure"
 	"github.com/govengers/auth/internal/httpjson"
 	"github.com/govengers/auth/internal/random"
 	"github.com/govengers/auth/session"
@@ -127,10 +128,7 @@ type reply struct {
 
 // refused answers err: a refusal with its status, anything else with 500.
 func refused(err error) reply {
-	if status, _ := auth.ResponseFor(err); status == http.StatusInternalServerError {
-		return reply{result: auth.ResultError, err: err}
-	}
-	return reply{result: auth.ResultDenied, err: err}
+	return reply{result: failure.Result(err), err: err}
 }
 
 func succeeded(status int, body any, identity *auth.Identity) reply {
