@@ -50,6 +50,8 @@ func TestNewRefusesInvalidOptions(t *testing.T) {
 		{name: "ftp token URL", change: func(options *Options) { options.TokenURL = "ftp://github.example.com/token" }},
 		{name: "relative API URL", change: func(options *Options) { options.APIURL = "/api/v3" }},
 		{name: "API URL with user info", change: func(options *Options) { options.APIURL = "https://user:secret@ghe.example.com/api/v3" }},
+		{name: "API URL with query", change: func(options *Options) { options.APIURL = "https://ghe.example.com/api/v3?x=1" }},
+		{name: "API URL with fragment", change: func(options *Options) { options.APIURL = "https://ghe.example.com/api/v3#frag" }},
 		{name: "plain http API URL on a lookalike host", change: func(options *Options) { options.APIURL = "http://127.0.0.1.example.com" }},
 		{name: "path prefix with trailing slash", change: func(options *Options) { options.PathPrefix = "/auth/github/" }},
 		{name: "path prefix without leading slash", change: func(options *Options) { options.PathPrefix = "auth/github" }},

@@ -35,7 +35,7 @@ type Options struct {
 	Scopes                 []string        // default ["read:org"]; must include read:org or a scope that also lists the user's teams (write:org, admin:org, user, repo)
 	AuthorizeURL           string          // default "https://github.com/login/oauth/authorize"
 	TokenURL               string          // default "https://github.com/login/oauth/access_token"
-	APIURL                 string          // default "https://api.github.com"; GHE e.g. https://ghe.example.com/api/v3
+	APIURL                 string          // default "https://api.github.com"; GHE e.g. https://ghe.example.com/api/v3; no query or fragment
 	ExternalURL            string          // required: absolute public base URL; redirect URI = ExternalURL + PathPrefix + "/callback"
 	PathPrefix             string          // default "/auth/github"; segments of A-Z a-z 0-9 . _ ~ -, no trailing "/", no "." or ".." segment
 	PostLogoutURL          string          // default ExternalURL + "/"; path or absolute http(s) URL, no fragment; a path is made absolute with ExternalURL
@@ -132,7 +132,8 @@ func withDefaults(options Options) Options {
 	return options
 }
 
-// withURLs validates the endpoints and the path prefix and makes PostLogoutURL and ErrorURL absolute.
+// withURLs validates the endpoints (APIURL is a base URL: no query or fragment) and the path prefix and
+// makes PostLogoutURL and ErrorURL absolute.
 func withURLs(options Options) (Options, error) {
 	for _, endpoint := range []struct{ field, value string }{
 		{"AuthorizeURL", options.AuthorizeURL}, {"TokenURL", options.TokenURL}, {"APIURL", options.APIURL},
@@ -140,6 +141,9 @@ func withURLs(options Options) (Options, error) {
 		if !redirect.IsSecureURL(endpoint.value) {
 			return Options{}, fmt.Errorf("%s must be an absolute https URL without user info (http only on a loopback host)", endpoint.field)
 		}
+	}
+	if strings.ContainsAny(options.APIURL, "?#") {
+		return Options{}, errors.New("APIURL must not contain a query or a fragment: API paths are appended to it")
 	}
 	if !redirect.IsPathPrefix(options.PathPrefix) {
 		return Options{}, errors.New("PathPrefix must be a path like \"/auth/github\" without a trailing \"/\"")
