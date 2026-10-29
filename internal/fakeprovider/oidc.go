@@ -259,11 +259,17 @@ func (h *OIDCHandler) authorize(writer http.ResponseWriter, request *http.Reques
 		redirectWith(writer, request, redirectURI, url.Values{"error": {string(invalidRequest)}, "error_description": {problem}, "state": {query.Get("state")}})
 		return
 	}
+	code := h.issueCode(authorizationGrant{nonce: query.Get("nonce"), challenge: query.Get("code_challenge"), redirectURI: redirectURI})
+	redirectWith(writer, request, redirectURI, url.Values{"code": {code}, "state": {query.Get("state")}})
+}
+
+// issueCode returns a new authorization code the token endpoint redeems once for grant.
+func (h *OIDCHandler) issueCode(grant authorizationGrant) string {
 	code := rand.Text()
 	h.mutex.Lock()
-	h.codes[code] = authorizationGrant{nonce: query.Get("nonce"), challenge: query.Get("code_challenge"), redirectURI: redirectURI}
-	h.mutex.Unlock()
-	redirectWith(writer, request, redirectURI, url.Values{"code": {code}, "state": {query.Get("state")}})
+	defer h.mutex.Unlock()
+	h.codes[code] = grant
+	return code
 }
 
 // authorizeProblem names what a strict client must not omit, or returns "".
@@ -384,9 +390,7 @@ func (h *OIDCHandler) accessToken(now time.Time) (string, error) {
 func (h *OIDCHandler) endSession(writer http.ResponseWriter, request *http.Request) {
 	query := request.URL.Query()
 	if hint := query.Get("id_token_hint"); hint != "" {
-		h.mutex.Lock()
-		h.identityTokenHints = append(h.identityTokenHints, hint)
-		h.mutex.Unlock()
+		h.recordTokenHint(hint)
 	}
 	target := query.Get("post_logout_redirect_uri")
 	if target == "" || !registered(h.options.PostLogoutRedirectURIs, target) {
@@ -399,6 +403,12 @@ func (h *OIDCHandler) endSession(writer http.ResponseWriter, request *http.Reque
 		values.Set("state", state)
 	}
 	redirectWith(writer, request, target, values)
+}
+
+func (h *OIDCHandler) recordTokenHint(hint string) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	h.identityTokenHints = append(h.identityTokenHints, hint)
 }
 
 // sign returns a compact RS256 JWT. With BadSignature the last signature bit is flipped.

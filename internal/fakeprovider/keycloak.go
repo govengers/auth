@@ -50,9 +50,7 @@ func (h *OIDCHandler) RevokeKeycloakTokens() {
 }
 
 func (h *OIDCHandler) keycloakToken(writer http.ResponseWriter, request *http.Request) {
-	h.mutex.Lock()
-	h.keycloakTokenRequests++
-	h.mutex.Unlock()
+	h.countTokenRequest()
 	if request.PathValue("realm") != h.options.KeycloakAuthenticationRealm {
 		http.NotFound(writer, request)
 		return
@@ -66,11 +64,28 @@ func (h *OIDCHandler) keycloakToken(writer http.ResponseWriter, request *http.Re
 		oauthError(writer, http.StatusUnauthorized, invalidGrant)
 		return
 	}
+	writeJSON(writer, http.StatusOK, map[string]any{"access_token": h.issueAdminToken(), "token_type": "Bearer", "expires_in": int(tokenLifetime.Seconds())})
+}
+
+func (h *OIDCHandler) countTokenRequest() {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	h.keycloakTokenRequests++
+}
+
+// issueAdminToken returns a new admin token the Admin API accepts until RevokeKeycloakTokens.
+func (h *OIDCHandler) issueAdminToken() string {
 	token := rand.Text()
 	h.mutex.Lock()
+	defer h.mutex.Unlock()
 	h.adminTokens[token] = true
-	h.mutex.Unlock()
-	writeJSON(writer, http.StatusOK, map[string]any{"access_token": token, "token_type": "Bearer", "expires_in": int(tokenLifetime.Seconds())})
+	return token
+}
+
+func (h *OIDCHandler) adminTokenValid(token string) bool {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	return h.adminTokens[token]
 }
 
 func (h *OIDCHandler) adminGrantValid(request *http.Request, form url.Values) bool {
@@ -89,10 +104,7 @@ func (h *OIDCHandler) adminGrantValid(request *http.Request, form url.Values) bo
 func (h *OIDCHandler) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		token, _ := strings.CutPrefix(request.Header.Get("Authorization"), "Bearer ")
-		h.mutex.Lock()
-		valid := h.adminTokens[token]
-		h.mutex.Unlock()
-		if !valid {
+		if !h.adminTokenValid(token) {
 			writeJSON(writer, http.StatusUnauthorized, map[string]string{"error": "HTTP 401 Unauthorized"})
 			return
 		}
@@ -110,14 +122,18 @@ func (h *OIDCHandler) keycloakRealmRoles(writer http.ResponseWriter, _ *http.Req
 }
 
 func (h *OIDCHandler) keycloakClients(writer http.ResponseWriter, request *http.Request) {
-	h.mutex.Lock()
-	h.keycloakClientLookups++
-	h.mutex.Unlock()
+	h.countClientLookup()
 	clients := []map[string]string{}
 	if request.URL.Query().Get("clientId") == h.options.ClientID {
 		clients = append(clients, map[string]string{"id": keycloakClientUUID, "clientId": h.options.ClientID})
 	}
 	writeJSON(writer, http.StatusOK, clients)
+}
+
+func (h *OIDCHandler) countClientLookup() {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+	h.keycloakClientLookups++
 }
 
 func (h *OIDCHandler) keycloakClientRoles(writer http.ResponseWriter, request *http.Request) {

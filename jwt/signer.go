@@ -184,17 +184,26 @@ func (s *Signer) Sign(identity *auth.Identity) (string, error) {
 		return "", fmt.Errorf("sign JWT for subject %s: %w", identity.Subject, err)
 	}
 	maps.Copy(claims, s.registeredClaims(tokenID))
-	token := jwxjwt.New()
-	for name, value := range claims {
-		if err := token.Set(name, value); err != nil {
-			return "", dependency.Error("sign JWT: set claim "+name, err)
-		}
+	token, err := tokenWithClaims(claims)
+	if err != nil {
+		return "", err
 	}
 	signed, err := jwxjwt.Sign(token, jwxjwt.WithKey(jwa.RS512(), s.signingKey))
 	if err != nil {
 		return "", dependency.Error("sign JWT for subject "+identity.Subject, err)
 	}
 	return string(signed), nil
+}
+
+// tokenWithClaims returns an unsigned token carrying every claim.
+func tokenWithClaims(claims map[string]any) (jwxjwt.Token, error) {
+	token := jwxjwt.New()
+	for name, value := range claims {
+		if err := token.Set(name, value); err != nil {
+			return nil, dependency.Error("sign JWT: set claim "+name, err)
+		}
+	}
+	return token, nil
 }
 
 func (s *Signer) registeredClaims(tokenID uuid.UUID) map[string]any {

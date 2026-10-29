@@ -188,12 +188,9 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 	switch {
 	case errors.Is(err, auth.ErrUnauthenticated) || errors.Is(err, auth.ErrForbidden):
 		outcome.Err = err
-		if endError := g.options.Store.End(ctx, writer, request); endError != nil {
+		if endError := g.endRefusedSession(writer, request, current, claimed, readAt); endError != nil {
 			// The session stays usable: a 500, not the refusal (kept as text only, so it cannot decide the answer).
 			outcome.Err = fmt.Errorf("end session refused by its refresh (%s): %w", err.Error(), endError)
-			// Release the claim, so the next request refreshes (and fails) again instead of passing on it.
-			claimed.RefreshedAt = readAt
-			_, _, _ = current.swapEnvelope(ctx, claimed) // best effort: the request is a 500 already
 		}
 		return nil, g.reportFailure(ctx, outcome)
 	case err != nil:
@@ -215,6 +212,19 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 	outcome.Identity, outcome.Result = saved.Identity, auth.ResultSuccess
 	g.report(ctx, outcome)
 	return saved.Identity, nil
+}
+
+// endRefusedSession ends the session whose refresh was refused and returns the error of ending it. When
+// that fails, the session stays usable, so it releases the claim (refreshedAt back to readAt): the next
+// request refreshes (and fails) again instead of passing on it.
+func (g *Guard) endRefusedSession(writer http.ResponseWriter, request *http.Request, current Session, claimed identityEnvelope, readAt time.Time) error {
+	ctx := request.Context()
+	if err := g.options.Store.End(ctx, writer, request); err != nil {
+		claimed.RefreshedAt = readAt
+		_, _, _ = current.swapEnvelope(ctx, claimed) // best effort: the request is a 500 already
+		return err
+	}
+	return nil
 }
 
 // reportFailure reports outcome as denied (a refusal) or error (anything answered with 500) and returns its Err.
