@@ -18,7 +18,7 @@ import (
 
 const (
 	defaultCookieName = "auth_session"
-	defaultMaxAge     = 24 * time.Hour
+	defaultMaximumAge = 24 * time.Hour
 	cookieValueBytes  = 32
 	// revokeTimeout bounds End's revocation, which a disconnecting client cannot cancel.
 	revokeTimeout = 10 * time.Second
@@ -70,7 +70,7 @@ func withStoreDefaults(options StoreOptions) StoreOptions {
 		options.SameSite = http.SameSiteLaxMode
 	}
 	if options.MaxAge == 0 {
-		options.MaxAge = defaultMaxAge
+		options.MaxAge = defaultMaximumAge
 	}
 	return options
 }
@@ -164,13 +164,13 @@ func sessionIDOf(cookieValue string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func sessionCookie(options StoreOptions, value string, maxAge int) *http.Cookie {
+func sessionCookie(options StoreOptions, value string, maximumAge int) *http.Cookie {
 	return &http.Cookie{ //nolint:gosec // G124: Secure is dropped only when the caller opts into InsecureCookie for local HTTP
 		Name:     options.CookieName,
 		Value:    value,
 		Path:     options.CookiePath,
 		Domain:   options.CookieDomain,
-		MaxAge:   maxAge,
+		MaxAge:   maximumAge,
 		Secure:   !options.InsecureCookie,
 		HttpOnly: true,
 		SameSite: options.SameSite,
