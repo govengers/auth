@@ -233,9 +233,9 @@ func TestTheIdentityEndpointIsMountedOnlyWhenEnabled(t *testing.T) {
 	require.Equal(t, "success", enabled.events.last(t)["outcome"])
 }
 
-func TestHealthAndReadinessAnswerWithoutWideEventsOrMetrics(t *testing.T) {
+func TestHealthAndReadinessAnswerWithoutMetricsAndAFailedReadinessCheckIsRecorded(t *testing.T) {
 	readinessError := error(nil)
-	testHarness := newHarness(t, harnessOptions{readinessCheck: func(ctx context.Context) error {
+	testHarness := newHarness(t, harnessOptions{sampleRate: 1000, readinessCheck: func(ctx context.Context) error {
 		_, hasDeadline := ctx.Deadline()
 		require.True(t, hasDeadline, "the readiness check runs with a timeout")
 		return readinessError
@@ -251,7 +251,10 @@ func TestHealthAndReadinessAnswerWithoutWideEventsOrMetrics(t *testing.T) {
 	require.Equal(t, http.StatusOK, ready.Code)
 	require.Equal(t, http.StatusServiceUnavailable, notReady.Code)
 	require.JSONEq(t, `{"code":"unavailable","message":"not ready"}`, notReady.Body.String())
-	require.Zero(t, testHarness.events.count())
+	require.Equal(t, 1, testHarness.events.count(), "only the failed readiness check, kept by sampling")
+	event := testHarness.events.last(t)
+	require.Equal(t, "failure", event["outcome"])
+	require.Equal(t, "readiness check: "+errRedisDown.Error(), event["error"])
 	requests, err := testutil.GatherAndCount(testHarness.registry, "forwardauth_http_requests_total")
 	require.NoError(t, err)
 	require.Zero(t, requests)
