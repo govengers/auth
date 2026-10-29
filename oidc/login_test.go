@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -160,6 +162,39 @@ func TestCallbackFailsWhenTheIssuerIsUnreachable(t *testing.T) {
 	require.JSONEq(t, `{"code":"internal","message":"internal error"}`, response.Body.String())
 	require.Equal(t, auth.ResultError, app.outcomes.last(t).Result)
 	require.Positive(t, transport.requests(), "discovery went through HTTPClient")
+}
+
+func TestCallbackClassifiesTokenEndpointErrorsWithoutTheirText(t *testing.T) {
+	const marker = "alice@example.com"
+	testCases := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+		wantStatus  int
+		wantResult  auth.Result
+	}{
+		{name: "refusal with a description", status: http.StatusBadRequest, contentType: "application/json", body: `{"error":"invalid_grant","error_description":"` + marker + `","error_uri":"https://idp.example.com/` + marker + `"}`, wantStatus: http.StatusUnauthorized, wantResult: auth.ResultDenied},
+		{name: "refusal as a page", status: http.StatusUnauthorized, contentType: "text/html", body: "<p>" + marker + "</p>", wantStatus: http.StatusUnauthorized, wantResult: auth.ResultDenied},
+		{name: "outage as a page", status: http.StatusServiceUnavailable, contentType: "text/html", body: "<p>" + marker + "</p>", wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError},
+		{name: "outage with an error code", status: http.StatusBadGateway, contentType: "application/json", body: `{"error":"temporarily_unavailable","error_description":"` + marker + `"}`, wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			transport := &answeringTransport{path: "/token", status: testCase.status, contentType: testCase.contentType, body: testCase.body}
+			app := newApp(t, startIssuer(t, nil), func(options *oidc.Options) {
+				options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
+			})
+
+			response := newBrowser(t).signIn(app, prefix+"/login")
+
+			require.Equal(t, testCase.wantStatus, response.Code, response.Body.String())
+			outcome := app.outcomes.last(t)
+			require.Equal(t, testCase.wantResult, outcome.Result)
+			require.ErrorContains(t, outcome.Err, "token endpoint answered HTTP "+strconv.Itoa(testCase.status))
+			require.NotContains(t, outcome.Err.Error(), marker, "the IdP's free text stays out of outcomes and events")
+		})
+	}
 }
 
 func TestAllowedEmailDomains(t *testing.T) {
@@ -362,4 +397,22 @@ func (f *failingTransport) requests() int {
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
 	return f.passed
+}
+
+// answeringTransport answers requests to path itself and passes the others on.
+type answeringTransport struct {
+	path        string
+	status      int
+	contentType string
+	body        string
+}
+
+func (a *answeringTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if !strings.HasSuffix(request.URL.Path, a.path) {
+		return http.DefaultTransport.RoundTrip(request)
+	}
+	return &http.Response{
+		Status: strconv.Itoa(a.status) + " " + http.StatusText(a.status), StatusCode: a.status,
+		Header: http.Header{"Content-Type": {a.contentType}}, Body: io.NopCloser(strings.NewReader(a.body)), Request: request,
+	}, nil
 }

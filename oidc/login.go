@@ -86,14 +86,17 @@ func (p *Provider) verifyLogin(ctx context.Context, code string, state oauthlogi
 	return login, nil
 }
 
-// exchange redeems code at the token endpoint. The IdP rejecting it is a login_failed refusal; not
-// reaching the IdP is an internal failure.
+// exchange redeems code at the token endpoint. The IdP rejecting it (an error answer below 500) is a
+// login_failed refusal; a 5xx answer or not reaching the IdP is an internal failure. An error answer is
+// described by its status only: its description and body are the IdP's free text (LOG-009).
 func (p *Provider) exchange(ctx context.Context, code, verifier string) (*oauth2.Token, error) {
 	token, err := p.oauth2Config.Exchange(gooidc.ClientContext(ctx, p.options.HTTPClient), code, oauth2.VerifierOption(verifier))
 	var retrieveError *oauth2.RetrieveError
 	switch {
+	case errors.As(err, &retrieveError) && retrieveError.Response.StatusCode < http.StatusInternalServerError:
+		return nil, loginFailed("token exchange", fmt.Errorf("exchange code: token endpoint answered HTTP %d", retrieveError.Response.StatusCode))
 	case errors.As(err, &retrieveError):
-		return nil, loginFailed("token exchange", dependency.Error("exchange code", err))
+		return nil, fmt.Errorf("oidc: exchange code: token endpoint answered HTTP %d", retrieveError.Response.StatusCode)
 	case err != nil:
 		return nil, dependency.Error("oidc: exchange code", err)
 	}
