@@ -164,21 +164,15 @@ func HasGitHubTeam(team string) Check {
 	})
 }
 
-// HasPermission passes an active identity with a permission in Permissions that allows access on
-// resource (auth.Permission.Allows: "*" covers every resource, write includes read). An empty or invalid
-// resource, or an access other than read and write, refuses everything. The effective identity counts;
-// wrap the check in Real to check the impersonator. Interactive users have no permissions unless an
-// OnLogin hook grants them: compose Any(HasRole(role), HasPermission(resource, access)) or grant them at login.
+// HasPermission passes an active identity that Permits access on resource (auth.Permission.Grants: "*"
+// covers every resource, write includes read). An empty or invalid resource, or an access other than read
+// and write, refuses everything. The effective identity counts; wrap the check in Real to check the
+// impersonator. Interactive users have no permissions unless an OnLogin hook grants them: compose
+// Any(HasRole(role), HasPermission(resource, access)) or grant them at login.
 func HasPermission(resource string, access auth.Access) Check {
-	required := auth.Permission{Resource: resource, Access: access}
-	reason := "missing permission " + required.String()
-	if required.Validate() != nil {
-		reason = "invalid permission " + required.String()
-	}
+	reason := "missing permission " + auth.Permission{Resource: resource, Access: access}.String()
 	return activeIdentityWith(reason, func(identity *auth.Identity) bool {
-		return slices.ContainsFunc(identity.Permissions, func(permission auth.Permission) bool {
-			return permission.Allows(resource, access)
-		})
+		return identity.Permits(resource, access)
 	})
 }
 

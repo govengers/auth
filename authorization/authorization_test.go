@@ -305,9 +305,9 @@ func TestHasPermission(t *testing.T) {
 		{name: "no permissions refuse", resource: "builds", access: auth.AccessRead, identity: withPermissions(), want: auth.ErrForbidden, wantReason: "missing permission builds:read"},
 		{name: "inactive identity refuses", resource: "builds", access: auth.AccessRead, identity: inactiveWriter, want: auth.ErrForbidden, wantReason: "inactive"},
 		{name: "no identity is unauthenticated", resource: "builds", access: auth.AccessRead, want: auth.ErrUnauthenticated, wantReason: "no identity"},
-		{name: "empty resource refuses", resource: "", access: auth.AccessRead, identity: withPermissions("*:write"), want: auth.ErrForbidden, wantReason: "invalid permission :read"},
-		{name: "invalid resource refuses", resource: "Builds", access: auth.AccessRead, identity: withPermissions("*:write"), want: auth.ErrForbidden, wantReason: "invalid permission Builds:read"},
-		{name: "invalid access refuses", resource: "builds", access: auth.Access("admin"), identity: withPermissions("*:write"), want: auth.ErrForbidden, wantReason: "invalid permission builds:admin"},
+		{name: "empty resource refuses", resource: "", access: auth.AccessRead, identity: withPermissions("*:write"), want: auth.ErrForbidden, wantReason: "missing permission :read"},
+		{name: "invalid resource refuses", resource: "Builds", access: auth.AccessRead, identity: withPermissions("*:write"), want: auth.ErrForbidden, wantReason: "missing permission Builds:read"},
+		{name: "invalid access refuses", resource: "builds", access: auth.Access("admin"), identity: withPermissions("*:write"), want: auth.ErrForbidden, wantReason: "missing permission builds:admin"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
