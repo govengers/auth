@@ -189,7 +189,10 @@ func newServer(ctx context.Context, configuration *Configuration, sessions *sess
 	if err != nil {
 		return nil, err
 	}
-	observer := forwardauth.NewObserver(outcomeCounter)
+	observer, err := forwardauth.NewObserver(&forwardauth.ObserverOptions{OutcomeCounter: outcomeCounter})
+	if err != nil {
+		return nil, err
+	}
 	selected, err := newProvider(ctx, configuration, sessions.store, observer, telemetry.dependencies)
 	if err != nil {
 		return nil, err

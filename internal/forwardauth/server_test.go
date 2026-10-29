@@ -407,6 +407,15 @@ func TestTheSamplerKeepsFailuresRefusalsAndDegradedEvents(t *testing.T) {
 	}
 }
 
+func TestNewObserverRequiresAnOutcomeCounter(t *testing.T) {
+	for _, options := range []*ObserverOptions{nil, {}} {
+		observer, err := NewObserver(options)
+
+		require.ErrorContains(t, err, "OutcomeCounter is required")
+		require.Nil(t, observer)
+	}
+}
+
 func TestTheObserverRecordsOutcomesOnTheWideEventAndCountsThem(t *testing.T) {
 	testHarness := newHarness(t, harnessOptions{})
 

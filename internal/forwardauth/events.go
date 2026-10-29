@@ -2,6 +2,7 @@ package forwardauth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,13 +15,22 @@ import (
 	"github.com/govengers/auth/prometheusadapter"
 )
 
+// ObserverOptions configure NewObserver.
+type ObserverOptions struct {
+	OutcomeCounter *prometheusadapter.OutcomeCounter // required: counts in forwardauth_auth_outcomes_total
+}
+
 // NewObserver returns the auth.Observer main passes to the provider, the Guard and the API keys: it
 // records each outcome on the request's wide event and counts it in forwardauth_auth_outcomes_total.
-func NewObserver(counter *prometheusadapter.OutcomeCounter) auth.Observer {
+func NewObserver(options *ObserverOptions) (auth.Observer, error) {
+	if options == nil || options.OutcomeCounter == nil {
+		return nil, errors.New("forwardauth observer: OutcomeCounter is required")
+	}
+	counter := options.OutcomeCounter
 	return func(ctx context.Context, outcome auth.Outcome) {
 		ginadapter.Observe(ctx, outcome)
 		counter.Observe(ctx, outcome)
-	}
+	}, nil
 }
 
 // sampler keeps every failure, 5xx, 401, 403 and degraded event and every rateth of the rest [LOG-010].
@@ -42,19 +52,24 @@ func sampler(rate int) wideevent.Sampler {
 // the dev emitter every value, the raw query included [LOG-009].
 func latestValues(emitter wideevent.Emitter) wideevent.Emitter {
 	return wideevent.EmitterFunc(func(we *wideevent.Event) {
-		fields := we.Fields()
-		latest := make(map[string]int, len(fields))
-		for index, field := range fields {
-			latest[field.Key] = index
-		}
-		deduplicated := &wideevent.Event{}
-		for index, field := range fields {
-			if latest[field.Key] == index {
-				deduplicated.Set(field.Key, field.Value)
-			}
-		}
-		emitter.Emit(deduplicated)
+		emitter.Emit(latestFields(we))
 	})
+}
+
+// latestFields returns a new event with the latest value of each field of we, in the order of those values.
+func latestFields(we *wideevent.Event) *wideevent.Event {
+	fields := we.Fields()
+	latest := make(map[string]int, len(fields))
+	for index, field := range fields {
+		latest[field.Key] = index
+	}
+	deduplicated := &wideevent.Event{}
+	for index, field := range fields {
+		if latest[field.Key] == index {
+			deduplicated.Set(field.Key, field.Value)
+		}
+	}
+	return deduplicated
 }
 
 // recordRequest is the wide-event pre-enricher: it replaces the query the middleware recorded verbatim

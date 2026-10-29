@@ -1376,8 +1376,11 @@ func NewServer(options *ServerOptions) (*Server, error)
 // Run serves until ctx ends, then: readiness 503, wait ShutdownDelay, Shutdown with 20 s, metrics server too [LAY-003].
 // A listener that fails to start stops the other one and its error is returned.
 func (s *Server) Run(ctx context.Context) error
+type ObserverOptions struct {
+	OutcomeCounter *prometheusadapter.OutcomeCounter // required
+}
 // NewObserver returns the auth.Observer main passes to provider, Guard and apikey: ginadapter.Observe plus the counter.
-func NewObserver(counter *prometheusadapter.OutcomeCounter) auth.Observer
+func NewObserver(options *ObserverOptions) (auth.Observer, error)
 // ValidatePathPrefix reports why prefix cannot hold the routes: it must pass redirect.IsPathPrefix, so it has no
 // gin parameter, wildcard or "." segment. NewServer and main's validateConfiguration both use it.
 func ValidatePathPrefix(prefix string) error
