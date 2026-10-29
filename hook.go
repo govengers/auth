@@ -4,7 +4,8 @@ import "context"
 
 // Hook maps an identity. OnLogin hooks run after the provider authenticated the user and before a
 // session exists: the returned identity is stored; an error aborts the login (an *Error answers with
-// its status, anything else 500) and no session is created. Hooks must not mutate the argument;
+// its status, anything else 500; providers wrap it with %w, so the kind survives) and no session is
+// created; a nil identity without error is a failure (500). Hooks must not mutate the argument;
 // return identity.Clone() with changes. Providers may call a hook from concurrent requests.
 type Hook func(ctx context.Context, identity *Identity) (*Identity, error)
 
