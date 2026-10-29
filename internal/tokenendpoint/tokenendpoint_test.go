@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -50,6 +51,19 @@ func TestErrorKeepsContextErrors(t *testing.T) {
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.ErrorContains(t, err, "exchange code: Post")
+}
+
+func TestErrorDropsTheTextOfAnUnreadableAnswer(t *testing.T) {
+	err := Error("exchange code", errors.New(`oauth2: cannot parse json: json: cannot unmarshal string "`+marker+`" into Go value of type json.Number`))
+
+	require.EqualError(t, err, "exchange code: token endpoint answered an unreadable token response")
+}
+
+func TestErrorReducesAFailedCall(t *testing.T) {
+	err := Error("exchange code", &url.Error{Op: "Post", URL: "https://idp.example.com/token?login=" + marker, Err: errors.New("connection refused")})
+
+	require.ErrorContains(t, err, `exchange code: Post "https://idp.example.com`, "dependency.Error reduces it")
+	require.NotContains(t, err.Error(), "unreadable")
 }
 
 func TestRefused(t *testing.T) {

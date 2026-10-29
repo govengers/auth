@@ -199,6 +199,11 @@ func TestExchangeKeepsGitHubTextOutOfErrors(t *testing.T) {
 			body:       "<p>" + marker + "</p>",
 			wantStatus: http.StatusInternalServerError, wantText: "token endpoint answered HTTP 502",
 		},
+		{
+			name: "malformed token response", status: http.StatusOK, contentType: "application/json",
+			body:       `{"access_token":"present","expires_in":"` + marker + `"}`,
+			wantStatus: http.StatusInternalServerError, wantText: "token endpoint answered an unreadable token response",
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
