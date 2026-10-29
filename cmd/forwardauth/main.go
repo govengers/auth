@@ -27,6 +27,7 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/apikey"
+	"github.com/govengers/auth/github"
 	"github.com/govengers/auth/internal/forwardauth"
 	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/jwt"
@@ -321,8 +322,36 @@ type selectedProvider struct {
 	refreshers []session.Refresher
 }
 
-func newProvider(_ context.Context, _ *Configuration, _ *session.Store, _ auth.Observer) (selectedProvider, error) {
-	return selectedProvider{}, errors.New("forwardauth: the oidc and github providers are wired once their packages exist")
+// newProvider builds the provider PROVIDER names; its routes live under PATH_PREFIX.
+func newProvider(_ context.Context, configuration *Configuration, store *session.Store, observer auth.Observer) (selectedProvider, error) {
+	if configuration.Provider == providerGitHub {
+		return newGitHubProvider(configuration, store, observer)
+	}
+	return selectedProvider{}, errors.New("forwardauth: the oidc provider is wired once its package exists")
+}
+
+// newGitHubProvider builds the GitHub provider; it also refreshes the teams of a session every
+// SESSION_REFRESH_INTERVAL_SECONDS through the Guard.
+func newGitHubProvider(configuration *Configuration, store *session.Store, observer auth.Observer) (selectedProvider, error) {
+	provider, err := github.New(&github.Options{
+		ClientID:      configuration.GitHubClientID,
+		ClientSecret:  configuration.GitHubClientSecret,
+		Scopes:        configuration.GitHubScopes,
+		AuthorizeURL:  configuration.GitHubAuthorizeURL,
+		TokenURL:      configuration.GitHubTokenURL,
+		APIURL:        configuration.GitHubAPIURL,
+		ExternalURL:   configuration.ExternalURL,
+		PathPrefix:    configuration.PathPrefix + "/github",
+		AllowedTeams:  configuration.GitHubAllowedTeams,
+		AdminTeams:    configuration.GitHubAdminTeams,
+		RelevantTeams: configuration.GitHubRelevantTeams,
+		Sessions:      store,
+		Observer:      observer,
+	})
+	if err != nil {
+		return selectedProvider{}, err
+	}
+	return selectedProvider{routes: provider.Routes(), loginURL: provider.LoginURL(), refreshers: []session.Refresher{provider}}, nil
 }
 
 // newAPIKeys returns nil without API_KEYS: the checks then run without the API key middleware.
