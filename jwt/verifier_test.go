@@ -319,6 +319,63 @@ func TestVerifierErrorsOmitCredentialsOfTheJWKSURL(t *testing.T) {
 	}
 }
 
+// rawAnswer answers with the bytes of answer instead of an HTTP response written by net/http.
+func rawAnswer(answer string) http.HandlerFunc {
+	return func(writer http.ResponseWriter, _ *http.Request) {
+		connection, _, err := http.NewResponseController(writer).Hijack()
+		if err != nil {
+			return
+		}
+		_, _ = connection.Write([]byte(answer)) // the client may already have given up
+		_ = connection.Close()                  // nothing to flush
+	}
+}
+
+// A JWKS response's bytes may carry personal data, so they reach neither the errors of NewVerifier and
+// Verify nor an outcome, at construction and during a refresh [LOG-009].
+func TestVerifierErrorsOmitTheJWKSResponse(t *testing.T) {
+	const canary = "alice@example.test"
+	testCases := []struct {
+		name      string
+		handler   http.Handler
+		wantError string
+	}{
+		{name: "keys not an array", handler: http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write([]byte(`{"keys":"` + canary + `"}`)) // a lost write fails the parse as well
+		}), wantError: "parse JWKS http://127.0.0.1"},
+		{name: "malformed trailer", handler: rawAnswer("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\nX-User: " + canary + "\x00\r\n\r\n"), wantError: "read JWKS http://127.0.0.1"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name+" at construction", func(t *testing.T) {
+			_, err := NewVerifier(t.Context(), testVerifierOptions(newKeySetServer(t, testCase.handler).server.URL))
+
+			require.ErrorContains(t, err, testCase.wantError)
+			require.NotContains(t, err.Error(), canary)
+		})
+		t.Run(testCase.name+" during a refresh", func(t *testing.T) {
+			clock := &testClock{instant: signedAt}
+			var outcomes []auth.Outcome
+			signer := newTestSigner(t, clock.now)
+			keySets := newKeySetServer(t, signer.JWKSHandler())
+			options := testVerifierOptions(keySets.server.URL)
+			options.Observer = func(_ context.Context, outcome auth.Outcome) { outcomes = append(outcomes, outcome) }
+			verifier := newTestVerifier(t, options, clock)
+			keySets.serve(testCase.handler)
+			clock.advance(time.Hour)
+			token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
+			require.NoError(t, err)
+			request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/items", nil)
+			request.Header.Set("Authorization", "Bearer "+token)
+
+			verifier.Middleware()(subjectHandler()).ServeHTTP(httptest.NewRecorder(), request)
+
+			require.Len(t, outcomes, 1)
+			require.ErrorContains(t, outcomes[0].Err, testCase.wantError)
+			require.NotContains(t, outcomes[0].Err.Error(), canary)
+		})
+	}
+}
+
 func TestVerifyReturnsEveryIdentityField(t *testing.T) {
 	clock := &testClock{instant: signedAt}
 	signer := newTestSigner(t, clock.now)

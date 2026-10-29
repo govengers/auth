@@ -264,16 +264,18 @@ func fetchKeySet(ctx context.Context, httpClient *http.Client, jwksURL string) (
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maximumKeySetBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read JWKS %s: %w", location, err)
+		// A body read error may quote the server's bytes (a malformed trailer line) [LOG-009].
+		return nil, fmt.Errorf("read JWKS %s: %w", location, dependency.TransportFailure(err))
 	}
 	if len(body) > maximumKeySetBytes {
 		return nil, fmt.Errorf("JWKS %s is larger than 1 MiB", location)
 	}
 	// An entry jwx cannot parse (an unknown kty, a broken modulus) is dropped like the other keys that
 	// cannot verify a token, instead of failing the whole set; signingKeys fails when none is left.
+	// jwx's parse error quotes the document, which may carry personal data, so it is dropped [LOG-009].
 	keys, err := jwk.Parse(body, jwk.WithIgnoreParseError(true))
 	if err != nil {
-		return nil, dependency.Error("parse JWKS "+location, err)
+		return nil, fmt.Errorf("parse JWKS %s: not a JSON JWK set", location)
 	}
 	return signingKeys(keys)
 }
