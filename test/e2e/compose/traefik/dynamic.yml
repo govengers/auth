@@ -13,9 +13,11 @@ http:
       entryPoints: [web]
       service: whoami
       middlewares: [forwardauth-api]
-    # login, callback, logout, jwks, health of forwardauth itself: no middleware
+    # login, callback, logout and jwks of forwardauth itself: no middleware. The checks and the probes stay
+    # internal: through this router a same-origin script could read the bearer JWT from /auth/api, and
+    # every anonymous /auth/ready would cost a Redis PING.
     forwardauth:
-      rule: PathPrefix(`/auth`)
+      rule: PathPrefix(`/auth`) && !Path(`/auth/ui`) && !Path(`/auth/api`) && !Path(`/auth/health`) && !Path(`/auth/ready`)
       entryPoints: [web]
       service: forwardauth
 
