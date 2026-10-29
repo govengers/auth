@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -218,12 +219,46 @@ func TestLogoutAnswers500WhenTheSessionCannotBeEnded(t *testing.T) {
 	}
 }
 
+func TestLogoutIgnoresAClientDisconnect(t *testing.T) {
+	issuer := startIssuer(t, nil)
+	testCases := []struct {
+		name     string
+		target   string
+		wantHint bool
+	}{
+		{name: "RP-initiated", target: prefix + "/logout", wantHint: true},
+		{name: "front-channel", target: prefix + "/frontchannel-logout?iss=" + url.QueryEscape(issuer.IssuerURL()) + "&sid=idp-session-1"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			ended := &logouts{}
+			application := newApplicationOn(t, newStoreOn(t, &failingBackend{}), issuer, func(options *oidc.Options) { options.OnLogout = ended.hook })
+			person := newBrowser(t)
+			require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
+			disconnected, disconnect := context.WithCancel(t.Context())
+			disconnect()
+			request := httptest.NewRequestWithContext(disconnected, http.MethodGet, testCase.target, nil)
+			for _, cookie := range person.cookies {
+				request.AddCookie(cookie)
+			}
+			response := httptest.NewRecorder()
+
+			application.handler.ServeHTTP(response, request)
+
+			require.Equal(t, []string{"user-1"}, ended.subjects(), "OnLogout still learns who logged out")
+			require.Equal(t, testCase.wantHint, queryOf(t, response.Header().Get("Location")).Has("id_token_hint"))
+			require.Equal(t, http.StatusUnauthorized, person.me(application), "the session ended")
+		})
+	}
+}
+
 func withoutErrorAndIdentity(outcome auth.Outcome) auth.Outcome {
 	outcome.Err, outcome.Identity = nil, nil
 	return outcome
 }
 
-// failingBackend is a memory backend whose Revoke fails once failRevoke was called.
+// failingBackend is a memory backend whose Revoke fails once failRevoke was called and whose Get fails on
+// a done context.
 type failingBackend struct {
 	session.Backend
 	mutex   sync.Mutex
@@ -244,6 +279,14 @@ func (b *failingBackend) Revoke(ctx context.Context, sessionID string, ttl time.
 		return errors.New("backend down")
 	}
 	return b.Backend.Revoke(ctx, sessionID, ttl)
+}
+
+// Get fails on a done context, as a network backend does.
+func (b *failingBackend) Get(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return b.Backend.Get(ctx, sessionID, key)
 }
 
 func newStoreOn(t *testing.T, backend *failingBackend) *session.Store {

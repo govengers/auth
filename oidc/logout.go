@@ -20,7 +20,7 @@ func (p *Provider) handleLogout(writer http.ResponseWriter, request *http.Reques
 		p.handleFrontChannelLogout(writer, request)
 		return
 	}
-	ctx := request.Context()
+	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the hint or OnLogout
 	identity := p.sessionIdentity(ctx, request)
 	rawIdentityToken := p.ownIdentityToken(ctx, request, identity)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
@@ -40,7 +40,7 @@ func (p *Provider) handleLogout(writer http.ResponseWriter, request *http.Reques
 func (p *Provider) handleFrontChannelLogout(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Cache-Control", "no-store, must-revalidate")
 	writer.Header().Set("Pragma", "no-cache")
-	ctx := request.Context()
+	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the sid check or OnLogout
 	identity := p.sessionIdentity(ctx, request)
 	if err := p.checkFrontChannelRequest(request.URL.Query(), identity); err != nil {
 		p.refuseFrontChannel(writer, request, err)
