@@ -169,7 +169,7 @@ func TestGuardRefusesRequestsWithoutAnIdentity(t *testing.T) {
 		}},
 		{name: "malformed cookie", request: func(t *testing.T, _ *guardFixture) *http.Request {
 			request := newRequest(t)
-			request.AddCookie(&http.Cookie{Name: "auth_session", Value: "forged"})
+			request.Header.Set("Cookie", "auth_session=forged")
 			return request
 		}},
 		{name: "session without identity", request: func(t *testing.T, fixture *guardFixture) *http.Request {

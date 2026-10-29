@@ -85,21 +85,21 @@ func TestStartSetsTheCookie(t *testing.T) {
 	testCases := []struct {
 		name    string
 		options StoreOptions
-		want    http.Cookie
+		want    string // Set-Cookie header with the value replaced by <value>
 	}{
 		{
 			name: "defaults",
-			want: http.Cookie{Name: "auth_session", Path: "/", MaxAge: 86400, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode},
+			want: "auth_session=<value>; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax",
 		},
 		{
 			name:    "configured",
 			options: StoreOptions{CookieName: "app", CookieDomain: "example.com", CookiePath: "/app", SameSite: http.SameSiteStrictMode, InsecureCookie: true, MaxAge: time.Hour},
-			want:    http.Cookie{Name: "app", Domain: "example.com", Path: "/app", MaxAge: 3600, HttpOnly: true, SameSite: http.SameSiteStrictMode},
+			want:    "app=<value>; Path=/app; Domain=example.com; Max-Age=3600; HttpOnly; SameSite=Strict",
 		},
 		{
 			name:    "same site none for front-channel logout",
 			options: StoreOptions{SameSite: http.SameSiteNoneMode},
-			want:    http.Cookie{Name: "auth_session", Path: "/", MaxAge: 86400, Secure: true, HttpOnly: true, SameSite: http.SameSiteNoneMode},
+			want:    "auth_session=<value>; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=None",
 		},
 	}
 	for _, testCase := range testCases {
@@ -114,15 +114,15 @@ func TestStartSetsTheCookie(t *testing.T) {
 			_, err = store.Start(t.Context(), recorder, newRequest(t))
 
 			require.NoError(t, err)
-			cookies := responseCookies(t, recorder)
-			require.Len(t, cookies, 1)
-			cookie := cookies[0]
-			decoded, err := base64.RawURLEncoding.DecodeString(cookie.Value)
+			lines := recorder.Header().Values("Set-Cookie")
+			require.Len(t, lines, 1)
+			name, rest, _ := strings.Cut(lines[0], "=")
+			value, attributes, _ := strings.Cut(rest, ";")
+			decoded, err := base64.RawURLEncoding.DecodeString(value)
 			require.NoError(t, err)
 			require.Len(t, decoded, 32)
-			require.Len(t, cookie.Value, 43)
-			cookie.Value, cookie.Raw, cookie.Quoted = "", "", false
-			require.Equal(t, testCase.want, *cookie)
+			require.Len(t, value, 43)
+			require.Equal(t, testCase.want, name+"=<value>;"+attributes)
 		})
 	}
 }
@@ -162,23 +162,23 @@ func TestOpen(t *testing.T) {
 	validValue := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	testCases := []struct {
 		name    string
-		cookie  *http.Cookie
+		cookie  string // Cookie request header
 		wantErr bool
 	}{
-		{name: "valid cookie", cookie: &http.Cookie{Name: "auth_session", Value: validValue}},
+		{name: "valid cookie", cookie: "auth_session=" + validValue},
 		{name: "no cookie", wantErr: true},
-		{name: "other cookie name", cookie: &http.Cookie{Name: "other", Value: validValue}, wantErr: true},
-		{name: "empty value", cookie: &http.Cookie{Name: "auth_session", Value: ""}, wantErr: true},
-		{name: "not base64url", cookie: &http.Cookie{Name: "auth_session", Value: strings.Repeat("*", 43)}, wantErr: true},
-		{name: "padded", cookie: &http.Cookie{Name: "auth_session", Value: validValue + "="}, wantErr: true},
-		{name: "too short", cookie: &http.Cookie{Name: "auth_session", Value: validValue[:42]}, wantErr: true},
-		{name: "too long", cookie: &http.Cookie{Name: "auth_session", Value: validValue + "AAAA"}, wantErr: true},
+		{name: "other cookie name", cookie: "other=" + validValue, wantErr: true},
+		{name: "empty value", cookie: "auth_session=", wantErr: true},
+		{name: "not base64url", cookie: "auth_session=" + strings.Repeat("*", 43), wantErr: true},
+		{name: "padded", cookie: "auth_session=" + validValue + "=", wantErr: true},
+		{name: "too short", cookie: "auth_session=" + validValue[:42], wantErr: true},
+		{name: "too long", cookie: "auth_session=" + validValue + "AAAA", wantErr: true},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			request := newRequest(t)
-			if testCase.cookie != nil {
-				request.AddCookie(testCase.cookie)
+			if testCase.cookie != "" {
+				request.Header.Set("Cookie", testCase.cookie)
 			}
 
 			current, err := store.Open(request)
