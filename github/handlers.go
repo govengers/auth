@@ -207,8 +207,9 @@ func (p *Provider) refreshTeams(writer http.ResponseWriter, request *http.Reques
 }
 
 // refreshSession refreshes and saves the real identity of the request's GitHub session. A refusal
-// (token rejected, no allowed team) ends the session; the stored identity is returned with errors after
-// the session was read.
+// (token rejected, no allowed team) ends the session; when that fails, the failure is the error (the
+// session is still usable, so it is no refusal). The stored identity is returned with errors after the
+// session was read.
 func (p *Provider) refreshSession(ctx context.Context, writer http.ResponseWriter, request *http.Request) (*auth.Identity, error) {
 	current, err := p.options.Sessions.Open(request)
 	if err != nil {
@@ -223,7 +224,10 @@ func (p *Provider) refreshSession(ctx context.Context, writer http.ResponseWrite
 	}
 	refreshed, err := p.Refresh(ctx, current, stored.Real())
 	if errors.Is(err, auth.ErrUnauthenticated) || errors.Is(err, auth.ErrForbidden) {
-		return stored, errors.Join(err, p.options.Sessions.End(ctx, writer, request))
+		if endError := p.options.Sessions.End(ctx, writer, request); endError != nil {
+			return stored, fmt.Errorf("github: end refused session: %w", endError)
+		}
+		return stored, err
 	}
 	if err != nil {
 		return stored, err

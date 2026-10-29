@@ -609,12 +609,12 @@ func TestRefreshTeams(t *testing.T) {
 
 func TestRefreshTeamsRefusals(t *testing.T) {
 	testCases := []struct {
-		name        string
-		prepare     func(environment *testEnvironment)
-		wantStatus  int
-		wantEnded   bool
-		wantResult  auth.Result
-		withoutUser bool
+		name       string
+		prepare    func(environment *testEnvironment)
+		wantStatus int
+		wantEnded  bool
+		wantResult auth.Result
+		wantErr    error
 	}{
 		{
 			name: "removed from the allowed team",
@@ -622,6 +622,14 @@ func TestRefreshTeamsRefusals(t *testing.T) {
 				environment.fake.SetTeams([]fakeprovider.GitHubTeam{{Organization: "acme", Slug: "ops"}})
 			},
 			wantStatus: http.StatusForbidden, wantEnded: true, wantResult: auth.ResultDenied,
+		},
+		{
+			name: "removed from the allowed team, session cannot be ended",
+			prepare: func(environment *testEnvironment) {
+				environment.fake.SetTeams([]fakeprovider.GitHubTeam{{Organization: "acme", Slug: "ops"}})
+				environment.backend.failRevoke.Store(true)
+			},
+			wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError, wantErr: errBackendDown,
 		},
 		{
 			name:       "token revoked at GitHub",
@@ -636,7 +644,7 @@ func TestRefreshTeamsRefusals(t *testing.T) {
 		{
 			name:       "session store fails",
 			prepare:    func(environment *testEnvironment) { environment.backend.failPut.Store(true) },
-			wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError,
+			wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError, wantErr: errBackendDown,
 		},
 	}
 	for _, testCase := range testCases {
@@ -659,6 +667,9 @@ func TestRefreshTeamsRefusals(t *testing.T) {
 			require.Equal(t, auth.ActionRefreshTeams, outcome.Action)
 			require.Equal(t, testCase.wantResult, outcome.Result)
 			require.Equal(t, "42", outcome.Identity.Subject)
+			if testCase.wantErr != nil {
+				require.ErrorIs(t, outcome.Err, testCase.wantErr)
+			}
 		})
 	}
 }
