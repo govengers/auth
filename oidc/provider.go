@@ -51,7 +51,7 @@ type Options struct {
 // Provider is one OpenID Connect identity provider. It is safe for concurrent use.
 type Provider struct {
 	options               Options
-	oauth2Config          *oauth2.Config
+	oauth2Configuration   *oauth2.Config
 	identityTokenVerifier *gooidc.IDTokenVerifier
 	accessTokenVerifier   *gooidc.IDTokenVerifier
 	endSessionEndpoint    string // "" when discovery has none
@@ -82,7 +82,7 @@ func New(ctx context.Context, options *Options) (*Provider, error) {
 	}
 	return &Provider{
 		options:               resolved,
-		oauth2Config:          newOAuth2Config(resolved, discovered.Endpoint(), metadata),
+		oauth2Configuration:   newOAuth2Configuration(resolved, discovered.Endpoint(), metadata),
 		identityTokenVerifier: discovered.Verifier(&gooidc.Config{ClientID: resolved.ClientID}),
 		// an access token is audienced at its resource server, not at this client
 		accessTokenVerifier: discovered.Verifier(&gooidc.Config{SkipClientIDCheck: true}),
@@ -148,7 +148,7 @@ func insecureEndpoint(endpoint oauth2.Endpoint, metadata providerMetadata) strin
 	return ""
 }
 
-func newOAuth2Config(options Options, endpoint oauth2.Endpoint, metadata providerMetadata) *oauth2.Config {
+func newOAuth2Configuration(options Options, endpoint oauth2.Endpoint, metadata providerMetadata) *oauth2.Config {
 	// a fixed style instead of oauth2's auto-detection, which repeats every failed exchange in the other style
 	endpoint.AuthStyle = authStyle(metadata.TokenEndpointAuthMethods)
 	return &oauth2.Config{

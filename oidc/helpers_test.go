@@ -77,21 +77,21 @@ func (o *outcomes) last(t *testing.T) auth.Outcome {
 	return o.recorded[len(o.recorded)-1]
 }
 
-// testApp is a provider mounted on a mux, with a Guard-protected /me and the outcomes it reported.
-type testApp struct {
+// testApplication is a provider mounted on a ServeMux, with a Guard-protected /me and the outcomes it reported.
+type testApplication struct {
 	provider *oidc.Provider
 	store    *session.Store
 	handler  http.Handler
 	outcomes *outcomes
 }
 
-// newApp builds a provider "test" against issuer, changed by configure, on its own store.
-func newApp(t *testing.T, issuer *fakeprovider.OIDCServer, configure func(options *oidc.Options)) *testApp {
+// newApplication builds a provider "test" against issuer, changed by configure, on its own store.
+func newApplication(t *testing.T, issuer *fakeprovider.OIDCServer, configure func(options *oidc.Options)) *testApplication {
 	t.Helper()
-	return newAppOn(t, newStore(t), issuer, configure)
+	return newApplicationOn(t, newStore(t), issuer, configure)
 }
 
-func newAppOn(t *testing.T, store *session.Store, issuer *fakeprovider.OIDCServer, configure func(options *oidc.Options)) *testApp {
+func newApplicationOn(t *testing.T, store *session.Store, issuer *fakeprovider.OIDCServer, configure func(options *oidc.Options)) *testApplication {
 	t.Helper()
 	recorded := &outcomes{}
 	options := &oidc.Options{
@@ -103,19 +103,19 @@ func newAppOn(t *testing.T, store *session.Store, issuer *fakeprovider.OIDCServe
 	}
 	provider, err := oidc.New(t.Context(), options)
 	require.NoError(t, err)
-	return &testApp{provider: provider, store: store, handler: mount(t, store, provider), outcomes: recorded}
+	return &testApplication{provider: provider, store: store, handler: mount(t, store, provider), outcomes: recorded}
 }
 
 func mount(t *testing.T, store *session.Store, providers ...*oidc.Provider) http.Handler {
 	t.Helper()
 	guard, err := session.NewGuard(&session.GuardOptions{Store: store})
 	require.NoError(t, err)
-	mux := http.NewServeMux()
+	serveMux := http.NewServeMux()
 	for _, provider := range providers {
-		auth.RegisterRoutes(mux, provider.Routes())
+		auth.RegisterRoutes(serveMux, provider.Routes())
 	}
-	mux.Handle("GET /me", guard.RequireAPI()(auth.IdentityHandler()))
-	return mux
+	serveMux.Handle("GET /me", guard.RequireAPI()(auth.IdentityHandler()))
+	return serveMux
 }
 
 // browser keeps cookies like a browser (Secure ones too: the app is reached through recorders) and
@@ -130,8 +130,8 @@ func newBrowser(t *testing.T) *browser {
 	return &browser{t: t, cookies: map[string]*http.Cookie{}}
 }
 
-// app sends GET target (an absolute URL on externalURL or a path) to handler.
-func (b *browser) app(handler http.Handler, target string, header http.Header) *httptest.ResponseRecorder {
+// get sends GET target (an absolute URL on externalURL or a path) to handler.
+func (b *browser) get(handler http.Handler, target string, header http.Header) *httptest.ResponseRecorder {
 	b.t.Helper()
 	request := httptest.NewRequestWithContext(b.t.Context(), http.MethodGet, strings.TrimPrefix(target, externalURL), nil)
 	for name, values := range header {
@@ -169,9 +169,9 @@ func (b *browser) issuer(target string) string {
 }
 
 // toCallback walks login and IdP and returns the callback URL the IdP redirected to.
-func (b *browser) toCallback(app *testApp, loginTarget string) string {
+func (b *browser) toCallback(application *testApplication, loginTarget string) string {
 	b.t.Helper()
-	login := b.app(app.handler, loginTarget, nil)
+	login := b.get(application.handler, loginTarget, nil)
 	require.Equal(b.t, http.StatusFound, login.Code, login.Body.String())
 	callback := b.issuer(login.Header().Get("Location"))
 	require.True(b.t, strings.HasPrefix(callback, externalURL+prefix+"/callback?"), callback)
@@ -179,15 +179,15 @@ func (b *browser) toCallback(app *testApp, loginTarget string) string {
 }
 
 // signIn runs the whole login and returns the callback's response.
-func (b *browser) signIn(app *testApp, loginTarget string) *httptest.ResponseRecorder {
+func (b *browser) signIn(application *testApplication, loginTarget string) *httptest.ResponseRecorder {
 	b.t.Helper()
-	return b.app(app.handler, b.toCallback(app, loginTarget), nil)
+	return b.get(application.handler, b.toCallback(application, loginTarget), nil)
 }
 
 // me returns the status of the Guard-protected /me.
-func (b *browser) me(app *testApp) int {
+func (b *browser) me(application *testApplication) int {
 	b.t.Helper()
-	return b.app(app.handler, "/me", nil).Code
+	return b.get(application.handler, "/me", nil).Code
 }
 
 // sessionValue reads key from the browser's session in store.

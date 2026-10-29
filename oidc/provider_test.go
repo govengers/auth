@@ -146,7 +146,7 @@ func TestNewDoesNotKeepTheCallersOptions(t *testing.T) {
 	require.Equal(t, before.ExternalURL, options.ExternalURL)
 	require.Empty(t, options.PathPrefix)
 	options.Scopes[0] = "changed"
-	login := newBrowser(t).app(mount(t, before.Sessions, provider), prefix+"/login", nil)
+	login := newBrowser(t).get(mount(t, before.Sessions, provider), prefix+"/login", nil)
 	require.Equal(t, "openid email", queryOf(t, login.Header().Get("Location")).Get("scope"))
 }
 
@@ -163,9 +163,9 @@ func TestScopes(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			app := newApp(t, issuer, func(options *oidc.Options) { options.Scopes = testCase.scopes })
+			application := newApplication(t, issuer, func(options *oidc.Options) { options.Scopes = testCase.scopes })
 
-			login := newBrowser(t).app(app.handler, prefix+"/login", nil)
+			login := newBrowser(t).get(application.handler, prefix+"/login", nil)
 
 			require.Equal(t, testCase.want, queryOf(t, login.Header().Get("Location")).Get("scope"))
 		})
@@ -184,9 +184,9 @@ func TestRoutesAndLoginURL(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			app := newApp(t, issuer, func(options *oidc.Options) { options.PathPrefix = testCase.pathPrefix })
+			application := newApplication(t, issuer, func(options *oidc.Options) { options.PathPrefix = testCase.pathPrefix })
 
-			routes := app.provider.Routes()
+			routes := application.provider.Routes()
 
 			paths := []string{}
 			for _, route := range routes {
@@ -197,15 +197,15 @@ func TestRoutesAndLoginURL(t *testing.T) {
 				testCase.wantPathPrefix + "/login", testCase.wantPathPrefix + "/callback",
 				testCase.wantPathPrefix + "/logout", testCase.wantPathPrefix + "/frontchannel-logout",
 			}, paths)
-			require.Equal(t, externalURL+testCase.wantPathPrefix+"/login", app.provider.LoginURL())
-			require.Equal(t, "test", app.provider.Name())
+			require.Equal(t, externalURL+testCase.wantPathPrefix+"/login", application.provider.LoginURL())
+			require.Equal(t, "test", application.provider.Name())
 		})
 	}
 }
 
 func TestLoginURLWorksAsTheGuardsLoginURL(t *testing.T) {
-	app := newApp(t, startIssuer(t, nil), nil)
-	guard, err := session.NewGuard(&session.GuardOptions{Store: app.store, LoginURL: app.provider.LoginURL()})
+	application := newApplication(t, startIssuer(t, nil), nil)
+	guard, err := session.NewGuard(&session.GuardOptions{Store: application.store, LoginURL: application.provider.LoginURL()})
 	require.NoError(t, err)
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/reports?year=2026", nil)
 	recorder := httptest.NewRecorder()

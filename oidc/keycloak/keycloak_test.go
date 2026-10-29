@@ -17,11 +17,11 @@ import (
 )
 
 const (
-	realm         = "staff"
-	userID        = "5d3f6e2a-1b2c-4d5e-8f90-123456789abc"
-	appClientID   = "app"
-	serviceClient = "app-admin"
-	serviceSecret = "service-secret"
+	realm               = "staff"
+	userID              = "5d3f6e2a-1b2c-4d5e-8f90-123456789abc"
+	applicationClientID = "app"
+	serviceClient       = "app-admin"
+	serviceSecret       = "service-secret"
 )
 
 // fakeKeycloak is the fake issuer in Keycloak layout, with the base URL keycloak.Options.URL needs.
@@ -37,7 +37,7 @@ func startKeycloak(t *testing.T, configure func(options *fakeprovider.OIDCOption
 	server := httptest.NewUnstartedServer(nil)
 	base := "http://" + server.Listener.Addr().String()
 	options := fakeprovider.OIDCOptions{
-		IssuerURL: base + "/realms/" + realm, ClientID: appClientID, ClientSecret: "app-secret",
+		IssuerURL: base + "/realms/" + realm, ClientID: applicationClientID, ClientSecret: "app-secret",
 		KeycloakRealm: realm, KeycloakClientID: serviceClient, KeycloakClientSecret: serviceSecret,
 		User: fakeprovider.OIDCUser{
 			Subject: userID, PreferredUsername: "ada",
@@ -62,7 +62,7 @@ func startKeycloak(t *testing.T, configure func(options *fakeprovider.OIDCOption
 
 func newClient(t *testing.T, keycloak *fakeKeycloak, configure func(options *Options)) *Client {
 	t.Helper()
-	options := &Options{URL: keycloak.url, Realm: realm, ClientID: serviceClient, ClientSecret: serviceSecret, ClientRolesClientID: appClientID}
+	options := &Options{URL: keycloak.url, Realm: realm, ClientID: serviceClient, ClientSecret: serviceSecret, ClientRolesClientID: applicationClientID}
 	if configure != nil {
 		configure(options)
 	}
@@ -131,7 +131,7 @@ func TestEnrichReplacesRolesGroupsAndAttributes(t *testing.T) {
 		wantClientRoles []string
 		wantLookups     int
 	}{
-		{name: "with client roles", clientRoles: appClientID, wantClientRoles: []string{"editor"}, wantLookups: 1},
+		{name: "with client roles", clientRoles: applicationClientID, wantClientRoles: []string{"editor"}, wantLookups: 1},
 		{name: "without client roles", clientRoles: "", wantClientRoles: nil, wantLookups: 0},
 	}
 	for _, testCase := range testCases {

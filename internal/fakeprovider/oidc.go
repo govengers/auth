@@ -81,7 +81,7 @@ type OIDCHandler struct {
 	endpointURL string // IssuerURL without a trailing "/"
 	key         *rsa.PrivateKey
 	keyID       string
-	mux         *http.ServeMux
+	serveMux    *http.ServeMux
 
 	mutex                 sync.Mutex
 	codes                 map[string]authorizationGrant
@@ -129,7 +129,7 @@ func NewOIDCHandler(options *OIDCOptions) (*OIDCHandler, error) {
 		codes:       map[string]authorizationGrant{},
 		adminTokens: map[string]bool{},
 	}
-	handler.mux = handler.routes(strings.TrimSuffix(issuer.Path, "/"))
+	handler.serveMux = handler.routes(strings.TrimSuffix(issuer.Path, "/"))
 	return handler, nil
 }
 
@@ -146,21 +146,21 @@ func cloneUser(user OIDCUser) OIDCUser {
 }
 
 func (h *OIDCHandler) routes(issuerPath string) *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET "+issuerPath+"/.well-known/openid-configuration", h.discovery)
-	mux.HandleFunc("GET "+issuerPath+"/jwks", h.jwks)
-	mux.HandleFunc("GET "+issuerPath+"/authorize", h.authorize)
-	mux.HandleFunc("POST "+issuerPath+"/token", h.token)
-	mux.HandleFunc("GET "+issuerPath+"/end_session", h.endSession)
+	serveMux := http.NewServeMux()
+	serveMux.HandleFunc("GET "+issuerPath+"/.well-known/openid-configuration", h.discovery)
+	serveMux.HandleFunc("GET "+issuerPath+"/jwks", h.jwks)
+	serveMux.HandleFunc("GET "+issuerPath+"/authorize", h.authorize)
+	serveMux.HandleFunc("POST "+issuerPath+"/token", h.token)
+	serveMux.HandleFunc("GET "+issuerPath+"/end_session", h.endSession)
 	if h.options.KeycloakRealm != "" {
-		h.registerKeycloakRoutes(mux)
+		h.registerKeycloakRoutes(serveMux)
 	}
-	return mux
+	return serveMux
 }
 
 // ServeHTTP serves the issuer's endpoints.
 func (h *OIDCHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	h.mux.ServeHTTP(writer, request)
+	h.serveMux.ServeHTTP(writer, request)
 }
 
 // IssuerURL returns the issuer as configured: the iss claim and the discovery issuer.

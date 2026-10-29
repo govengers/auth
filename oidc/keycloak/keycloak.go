@@ -142,22 +142,22 @@ func validate(options Options) error {
 func newTokenRequester(options Options) func(ctx context.Context) (*oauth2.Token, error) {
 	tokenURL := options.URL + "/realms/" + url.PathEscape(options.AuthenticationRealm) + "/protocol/openid-connect/token"
 	if options.GrantType == GrantTypePassword {
-		config := &oauth2.Config{
+		configuration := &oauth2.Config{
 			ClientID:     options.ClientID,
 			ClientSecret: options.ClientSecret,
 			Endpoint:     oauth2.Endpoint{TokenURL: tokenURL, AuthStyle: oauth2.AuthStyleInParams},
 		}
 		return func(ctx context.Context) (*oauth2.Token, error) {
-			return config.PasswordCredentialsToken(ctx, options.Username, options.Password)
+			return configuration.PasswordCredentialsToken(ctx, options.Username, options.Password)
 		}
 	}
-	config := &clientcredentials.Config{
+	configuration := &clientcredentials.Config{
 		ClientID:     options.ClientID,
 		ClientSecret: options.ClientSecret,
 		TokenURL:     tokenURL,
 		AuthStyle:    oauth2.AuthStyleInParams,
 	}
-	return config.Token
+	return configuration.Token
 }
 
 // Enrich has the auth.Hook shape; identity.Subject is the Keycloak user ID. It returns a Clone with
