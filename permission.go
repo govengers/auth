@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -59,10 +60,11 @@ func (p Permission) String() string {
 	return p.Resource + ":" + string(p.Access)
 }
 
-// Allows reports whether the permission grants access on resource: the resource matches exactly or the
-// permission covers AllResources, and AccessWrite includes AccessRead. An invalid permission, resource
-// or access allows nothing.
-func (p Permission) Allows(resource string, access Access) bool {
+// Grants reports whether the permission grants access on resource: the resource matches exactly or the
+// permission covers AllResources, and AccessWrite includes AccessRead. An invalid permission, an empty or
+// invalid resource, or an access other than read or write grants nothing. This is the only place the
+// matching rule lives.
+func (p Permission) Grants(resource string, access Access) bool {
 	if p.Validate() != nil || !validResource(resource) || !access.valid() {
 		return false
 	}
@@ -70,6 +72,17 @@ func (p Permission) Allows(resource string, access Access) bool {
 		return false
 	}
 	return p.Access == AccessWrite || access == AccessRead
+}
+
+// Permits reports whether one of the identity's Permissions grants access on resource. It looks at
+// Permissions only (not Active, not the Impersonator) and is false for a nil identity.
+func (i *Identity) Permits(resource string, access Access) bool {
+	if i == nil {
+		return false
+	}
+	return slices.ContainsFunc(i.Permissions, func(permission Permission) bool {
+		return permission.Grants(resource, access)
+	})
 }
 
 // MarshalText encodes the text form; an invalid permission is an error.
