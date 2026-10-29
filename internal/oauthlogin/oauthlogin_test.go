@@ -100,7 +100,8 @@ func TestBegin(t *testing.T) {
 }
 
 // A cross-site link to a login route must not end the visitor's session: Begin puts the state into an
-// authenticated session instead of starting a fresh one, and the callback finds it there.
+// authenticated session instead of starting a fresh one, the callback finds it there, and the session the
+// callback starts after authentication is a new one (fixation defense).
 func TestBeginKeepsAnAuthenticatedSession(t *testing.T) {
 	store, _ := newRecordingStore(t)
 	loginRecorder := httptest.NewRecorder()
@@ -110,6 +111,7 @@ func TestBeginKeepsAnAuthenticatedSession(t *testing.T) {
 	cookie, err := http.ParseSetCookie(loginRecorder.Header().Get("Set-Cookie"))
 	require.NoError(t, err)
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/login", nil)
+	request.Header.Set("Sec-Fetch-Site", "cross-site")
 	request.AddCookie(cookie)
 	recorder := httptest.NewRecorder()
 
@@ -125,6 +127,15 @@ func TestBeginKeepsAnAuthenticatedSession(t *testing.T) {
 	completed, err := Complete(t.Context(), store, callback, loginKey)
 	require.NoError(t, err)
 	require.Equal(t, state, completed)
+
+	rotationRecorder := httptest.NewRecorder()
+	_, err = store.Start(t.Context(), rotationRecorder, callback)
+	require.NoError(t, err)
+	rotated, err := http.ParseSetCookie(rotationRecorder.Header().Get("Set-Cookie"))
+	require.NoError(t, err)
+	require.NotEqual(t, cookie.Value, rotated.Value, "the callback's Start rotates the session ID")
+	_, err = authenticated.Identity(t.Context())
+	require.ErrorIs(t, err, auth.ErrUnauthenticated, "and revokes the session the login state lived in")
 }
 
 func TestBeginFailsWhenTheStateCannotBeStored(t *testing.T) {
