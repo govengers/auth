@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -35,7 +36,7 @@ const (
 
 // VerifierOptions configure a Verifier.
 type VerifierOptions struct {
-	JWKSURL         string        // required: absolute http(s) URL of the signer's JWKS; only its RSA keys with alg and use "sig" (or none) count
+	JWKSURL         string        // required: absolute http(s) URL of the signer's JWKS; only its RSA keys with an RSA signature alg (RS*, PS*) and use "sig" (or none) count
 	Issuer          string        // required: expected iss
 	Audience        string        // optional: when set, aud must contain it
 	RefreshInterval time.Duration // default 1 h, at least 1 min; an unknown kid triggers a refetch at most once per minute
@@ -246,15 +247,15 @@ func fetchKeySet(ctx context.Context, httpClient *http.Client, jwksURL string) (
 }
 
 // signingKeys returns the keys of keys a token may be verified with: RSA keys for signatures (use "sig"
-// or unset) that name their algorithm. A JWKS is public, so a symmetric key in it would let anyone sign
-// tokens; a key without alg cannot bind the token's algorithm.
+// or unset) that name an RSA signature algorithm. A JWKS is public, so a symmetric key in it would let
+// anyone sign tokens; a key without alg cannot bind the token's algorithm, and one with another alg
+// verifies no token.
 func signingKeys(keys jwk.Set) (jwk.Set, error) {
 	usable := jwk.NewSet()
 	for index := range keys.Len() {
 		key, _ := keys.Key(index)
 		usage, _ := key.KeyUsage()
-		_, hasAlgorithm := key.Algorithm()
-		if key.KeyType() != jwa.RSA() || (usage != "" && usage != string(jwk.ForSignature)) || !hasAlgorithm {
+		if key.KeyType() != jwa.RSA() || (usage != "" && usage != string(jwk.ForSignature)) || !hasRSASignatureAlgorithm(key) {
 			continue
 		}
 		if err := usable.AddKey(key); err != nil {
@@ -265,6 +266,12 @@ func signingKeys(keys jwk.Set) (jwk.Set, error) {
 		return nil, errors.New("JWKS has no RSA signing key with alg")
 	}
 	return usable, nil
+}
+
+// hasRSASignatureAlgorithm reports whether key names an algorithm RSA keys sign with (RFC 7518 section 3.1).
+func hasRSASignatureAlgorithm(key jwk.Key) bool {
+	algorithm, found := key.Algorithm()
+	return found && slices.Contains([]string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512"}, algorithm.String())
 }
 
 func (v *Verifier) parseOptions(keys jwk.Set) []jwxjwt.ParseOption {

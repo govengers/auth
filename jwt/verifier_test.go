@@ -213,6 +213,11 @@ func TestNewVerifierFailsWithoutAnRSASigningKey(t *testing.T) {
 	encryptionKey["use"] = "enc"
 	keyWithoutAlgorithm := maps.Clone(signerKey)
 	delete(keyWithoutAlgorithm, "alg")
+	keyWithEncryptionAlgorithm := maps.Clone(signerKey)
+	keyWithEncryptionAlgorithm["alg"] = "RSA-OAEP"
+	delete(keyWithEncryptionAlgorithm, "use")
+	keyWithECAlgorithm := maps.Clone(signerKey)
+	keyWithECAlgorithm["alg"] = "ES256"
 	testCases := []struct {
 		name string
 		key  map[string]any
@@ -220,6 +225,8 @@ func TestNewVerifierFailsWithoutAnRSASigningKey(t *testing.T) {
 		{name: "symmetric key", key: symmetricKey},
 		{name: "encryption key", key: encryptionKey},
 		{name: "key without alg", key: keyWithoutAlgorithm},
+		{name: "RSA key with an encryption alg and no use", key: keyWithEncryptionAlgorithm},
+		{name: "RSA key with an EC alg", key: keyWithECAlgorithm},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
