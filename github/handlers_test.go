@@ -847,8 +847,13 @@ func TestRefreshTeamsRefusesWhenOtherRequestsKeepSaving(t *testing.T) {
 	login := environment.login(t)
 	current := environment.sessionOf(t, login)
 	stored := environment.identityOf(t, login)
-	saves := 0
+	saves, saving := 0, false
 	environment.backend.beforeSwap = func() {
+		if saving { // SaveIdentity swaps too: only the handler's swaps get a concurrent save
+			return
+		}
+		saving = true
+		defer func() { saving = false }()
 		saves++
 		changed := stored.Clone()
 		changed.Name = fmt.Sprintf("save %d", saves)
