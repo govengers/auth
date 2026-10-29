@@ -27,6 +27,7 @@ import (
 
 const (
 	startTimeout     = 20 * time.Second
+	startAttempts    = 3
 	maximumBodyBytes = 1 << 20
 )
 
@@ -41,8 +42,24 @@ type instance struct {
 
 // start runs the binary on two free ports with environment and waits until {prefix}/health answers.
 // EXTERNAL_URL defaults to the instance's own base URL. The process is stopped with SIGTERM when the test
-// ends and must then exit with 0.
+// ends and must then exit with 0. A port that another socket took between freePort and the binary's bind
+// is retried on new ports.
 func start(t *testing.T, environment map[string]string) *instance {
+	t.Helper()
+	for attempt := 1; ; attempt++ {
+		running := launch(t, environment)
+		if running.waitUntilHealthy(t) {
+			t.Cleanup(func() { running.requireCleanExit(t) })
+			return running
+		}
+		if attempt == startAttempts || !strings.Contains(running.output.String(), "address already in use") {
+			require.FailNow(t, "forwardauth exited during startup", running.output.String())
+		}
+	}
+}
+
+// launch starts the binary on two free ports without waiting for it.
+func launch(t *testing.T, environment map[string]string) *instance {
 	t.Helper()
 	port, metricsPort := freePort(t), freePort(t)
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
@@ -60,8 +77,6 @@ func start(t *testing.T, environment map[string]string) *instance {
 		_ = command.Wait() // after the test's SIGTERM it reports the cancelled context; ProcessState tells the exit
 		close(running.exited)
 	}()
-	t.Cleanup(func() { running.requireCleanExit(t) })
-	running.waitUntilHealthy(t)
 	return running
 }
 
@@ -86,22 +101,24 @@ func (i *instance) requireCleanExit(t *testing.T) {
 	require.True(t, i.command.ProcessState.Success(), "forwardauth did not exit cleanly after SIGTERM (%s):\n%s", i.command.ProcessState, i.output.String())
 }
 
-func (i *instance) waitUntilHealthy(t *testing.T) {
+// waitUntilHealthy reports whether {prefix}/health answered before the process exited.
+func (i *instance) waitUntilHealthy(t *testing.T) bool {
 	t.Helper()
 	client := &http.Client{Timeout: time.Second}
 	deadline := time.Now().Add(startTimeout)
 	for time.Now().Before(deadline) {
 		select {
 		case <-i.exited:
-			require.FailNow(t, "forwardauth exited during startup", i.output.String())
+			return false
 		default:
 		}
 		if healthy(t.Context(), client, i.baseURL+"/auth/health") {
-			return
+			return true
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	require.FailNow(t, "forwardauth did not become healthy", i.output.String())
+	return false
 }
 
 func healthy(ctx context.Context, client *http.Client, target string) bool {
@@ -117,10 +134,11 @@ func healthy(ctx context.Context, client *http.Client, target string) bool {
 	return response.StatusCode == http.StatusOK
 }
 
-// freePort asks the kernel for a free port and releases it for the binary.
+// freePort asks the kernel for a port free on every interface, as the binary binds it, and releases it
+// for the binary; start retries when another socket takes it first.
 func freePort(t *testing.T) int {
 	t.Helper()
-	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", ":0")
 	require.NoError(t, err)
 	port := listener.Addr().(*net.TCPAddr).Port
 	require.NoError(t, listener.Close())
