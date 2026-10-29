@@ -134,11 +134,11 @@ func healthy(ctx context.Context, client *http.Client, target string) bool {
 	return response.StatusCode == http.StatusOK
 }
 
-// freePort asks the kernel for a port free on every interface, as the binary binds it, and releases it
-// for the binary; start retries when another socket takes it first.
+// freePort asks the kernel for a free loopback port and releases it for the binary; start retries when
+// another socket takes it first.
 func freePort(t *testing.T) int {
 	t.Helper()
-	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", ":0")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	port := listener.Addr().(*net.TCPAddr).Port
 	require.NoError(t, listener.Close())
