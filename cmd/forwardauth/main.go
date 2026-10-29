@@ -5,21 +5,34 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
 	"os"
+	"os/signal"
 	"slices"
 	"strings"
+	"syscall"
+	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/govengers/config/v2"
+	wideevent "github.com/mxcd/go-wide-event-logger"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/apikey"
+	"github.com/govengers/auth/internal/forwardauth"
 	"github.com/govengers/auth/internal/redirect"
+	"github.com/govengers/auth/jwt"
+	"github.com/govengers/auth/prometheusadapter"
 	"github.com/govengers/auth/session"
+	"github.com/govengers/auth/session/redisbackend"
 )
 
 // version is set at build time with -ldflags "-X main.version=<version>".
@@ -115,7 +128,12 @@ func main() {
 	}
 }
 
+// run boots in a fixed order [LAY-002]: configuration, metrics registry, session store, provider, Guard,
+// API keys, signer, server; then it serves until SIGINT or SIGTERM.
 func run(logger *slog.Logger) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	configuration, err := loadConfiguration()
 	if err != nil {
 		return err
@@ -124,8 +142,220 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("invalid configuration:\n%w", err)
 	}
 	config.Print()
-	logger.Info("configuration loaded", "version", version, "provider", configuration.Provider)
-	return errors.New("forwardauth: wiring of the provider follows with the oidc and github packages")
+	gin.SetMode(ginMode(configuration.DevMode)) // process-wide; release mode keeps gin's debug lines off stdout
+
+	sessions, err := newSessions(configuration)
+	if err != nil {
+		return err
+	}
+	defer sessions.close(logger)
+	server, err := newServer(ctx, configuration, sessions)
+	if err != nil {
+		return err
+	}
+	logger.Info("forwardauth started", "version", version, "provider", configuration.Provider,
+		"port", configuration.Port, "metricsPort", configuration.MetricsPort, "redis", configuration.SessionRedisEnabled)
+	err = server.Run(ctx)
+	logger.Info("forwardauth stopped")
+	return err
+}
+
+func ginMode(devMode bool) string {
+	if devMode {
+		return gin.DebugMode
+	}
+	return gin.ReleaseMode
+}
+
+// newServer builds every component after the session store and the server that serves them.
+func newServer(ctx context.Context, configuration *Configuration, sessions *sessions) (*forwardauth.Server, error) {
+	metricsRegistry := newMetricsRegistry()
+	outcomeCounter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: metricsRegistry, Namespace: "forwardauth"})
+	if err != nil {
+		return nil, err
+	}
+	observer := forwardauth.NewObserver(outcomeCounter)
+	selected, err := newProvider(ctx, configuration, sessions.store, observer)
+	if err != nil {
+		return nil, err
+	}
+	guard, err := session.NewGuard(&session.GuardOptions{
+		Store:            sessions.store,
+		LoginURL:         selected.loginURL,
+		ReturnPathHeader: "X-Forwarded-Uri",
+		Refreshers:       selected.refreshers,
+		RefreshInterval:  seconds(configuration.SessionRefreshIntervalSeconds),
+		Observer:         observer,
+	})
+	if err != nil {
+		return nil, err
+	}
+	apiKeys, err := newAPIKeys(configuration, observer)
+	if err != nil {
+		return nil, err
+	}
+	signer, err := newSigner(configuration)
+	if err != nil {
+		return nil, err
+	}
+	return forwardauth.NewServer(&forwardauth.ServerOptions{
+		Version:          version,
+		Port:             configuration.Port,
+		MetricsPort:      configuration.MetricsPort,
+		PathPrefix:       configuration.PathPrefix,
+		Routes:           selected.routes,
+		Guard:            guard,
+		APIKeys:          apiKeys,
+		Signer:           signer,
+		JWTHeader:        configuration.JWTHeader,
+		IdentityEndpoint: configuration.IdentityEndpointEnabled,
+		Emitter:          newEmitter(configuration.DevMode),
+		SampleRate:       configuration.WideEventSampleRate,
+		MetricsRegistry:  metricsRegistry,
+		ReadinessCheck:   sessions.readinessCheck(),
+		ShutdownDelay:    seconds(configuration.ShutdownDelaySeconds),
+	})
+}
+
+// newMetricsRegistry returns the registry /metrics serves, with the Go, process and build-info collectors [MET-002].
+func newMetricsRegistry() *prometheus.Registry {
+	metricsRegistry := prometheus.NewRegistry()
+	metricsRegistry.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+		collectors.NewBuildInfoCollector(),
+	)
+	return metricsRegistry
+}
+
+// newEmitter writes wide events as JSON lines on stdout, or readable for a developer in dev mode [LOG-013].
+func newEmitter(devMode bool) wideevent.Emitter {
+	if devMode {
+		return wideevent.DevStdoutEmitter()
+	}
+	return wideevent.JSONStdoutEmitter()
+}
+
+// sessions is the session store and, with SESSION_REDIS_ENABLED, the Redis client behind it.
+type sessions struct {
+	store *session.Store
+	redis *redis.Client // nil for the in-memory backend
+}
+
+func newSessions(configuration *Configuration) (*sessions, error) {
+	encryptionKey, err := session.ParseKey(configuration.SessionEncryptionKey)
+	if err != nil {
+		return nil, err
+	}
+	sameSite, err := sameSiteMode(configuration.SessionSameSite)
+	if err != nil {
+		return nil, err
+	}
+	created := &sessions{}
+	backend, err := created.newBackend(configuration)
+	if err != nil {
+		return nil, err
+	}
+	created.store, err = session.NewStore(&session.StoreOptions{
+		Backend:        backend,
+		EncryptionKey:  encryptionKey,
+		CookieName:     configuration.SessionCookieName,
+		CookieDomain:   configuration.SessionCookieDomain,
+		SameSite:       sameSite,
+		InsecureCookie: configuration.SessionInsecureCookie,
+		MaxAge:         seconds(configuration.SessionMaxAgeSeconds),
+	})
+	if err != nil {
+		return nil, errors.Join(err, created.closeRedis())
+	}
+	return created, nil
+}
+
+// newBackend opens the Redis client when SESSION_REDIS_ENABLED, otherwise the in-memory backend
+// (exactly one replica).
+func (s *sessions) newBackend(configuration *Configuration) (session.Backend, error) {
+	if !configuration.SessionRedisEnabled {
+		return session.NewMemoryBackend(nil)
+	}
+	s.redis = redis.NewClient(&redis.Options{
+		Addr:     configuration.SessionRedisAddress,
+		Password: configuration.SessionRedisPassword,
+		DB:       configuration.SessionRedisDatabase,
+	})
+	backend, err := redisbackend.New(&redisbackend.Options{Client: s.redis, KeyPrefix: configuration.SessionRedisKeyPrefix})
+	if err != nil {
+		return nil, errors.Join(err, s.closeRedis())
+	}
+	return backend, nil
+}
+
+// readinessCheck pings Redis; the in-memory backend needs no check.
+func (s *sessions) readinessCheck() func(ctx context.Context) error {
+	if s.redis == nil {
+		return nil
+	}
+	return func(ctx context.Context) error { return s.redis.Ping(ctx).Err() }
+}
+
+func (s *sessions) closeRedis() error {
+	if s.redis == nil {
+		return nil
+	}
+	if err := s.redis.Close(); err != nil {
+		return fmt.Errorf("close the Redis client: %w", err)
+	}
+	return nil
+}
+
+// close runs after the server drained; a failure is logged, the process is ending anyway.
+func (s *sessions) close(logger *slog.Logger) {
+	if err := s.closeRedis(); err != nil {
+		logger.Error("shutdown incomplete", "error", err.Error())
+	}
+}
+
+// selectedProvider is what the Guard and the server need from the configured provider.
+type selectedProvider struct {
+	routes     []auth.Route
+	loginURL   string
+	refreshers []session.Refresher
+}
+
+func newProvider(_ context.Context, _ *Configuration, _ *session.Store, _ auth.Observer) (selectedProvider, error) {
+	return selectedProvider{}, errors.New("forwardauth: the oidc and github providers are wired once their packages exist")
+}
+
+// newAPIKeys returns nil without API_KEYS: the checks then run without the API key middleware.
+func newAPIKeys(configuration *Configuration, observer auth.Observer) (*apikey.Authenticator, error) {
+	if len(configuration.APIKeys) == 0 {
+		return nil, nil // no keys configured is not an error
+	}
+	keys, err := apiKeys(configuration.APIKeys, configuration.APIKeyPermissions)
+	if err != nil {
+		return nil, err
+	}
+	return apikey.New(&apikey.Options{Keys: keys, Observer: observer})
+}
+
+// newSigner returns nil when JWT_ENABLED is false: the checks then answer without a token.
+func newSigner(configuration *Configuration) (*jwt.Signer, error) {
+	if !configuration.JWTEnabled {
+		return nil, nil // JWT disabled is not an error
+	}
+	issuer := configuration.JWTIssuer
+	if issuer == "" {
+		issuer = strings.TrimSuffix(configuration.ExternalURL, "/")
+	}
+	return jwt.NewSigner(&jwt.SignerOptions{
+		PrivateKey: []byte(configuration.JWTPrivateKey),
+		Issuer:     issuer,
+		Audience:   configuration.JWTAudience,
+		Lifetime:   seconds(configuration.JWTLifetimeSeconds),
+	})
+}
+
+func seconds(count int) time.Duration {
+	return time.Duration(count) * time.Second
 }
 
 // loadConfiguration reads every variable; a missing required one fails the boot with all of them listed.
