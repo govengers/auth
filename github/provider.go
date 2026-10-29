@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"regexp"
 	"slices"
@@ -126,8 +125,8 @@ func validateURLs(options Options) error {
 	for _, endpoint := range []struct{ field, value string }{
 		{"AuthorizeURL", options.AuthorizeURL}, {"TokenURL", options.TokenURL}, {"APIURL", options.APIURL},
 	} {
-		if err := validateEndpoint(endpoint.field, endpoint.value); err != nil {
-			return err
+		if !redirect.IsSecureURL(endpoint.value) {
+			return fmt.Errorf("%s must be an absolute https URL without user info (http only on a loopback host)", endpoint.field)
 		}
 	}
 	if !pathPrefixPattern.MatchString(options.PathPrefix) {
@@ -140,27 +139,6 @@ func validateURLs(options Options) error {
 		return errors.New("ErrorURL must be an absolute http(s) URL or a path starting with \"/\"")
 	}
 	return nil
-}
-
-// validateEndpoint requires an absolute https URL, or http on a loopback host (tests and e2e). The
-// error never repeats the value, so a misplaced credential does not end up in a log.
-func validateEndpoint(field, raw string) error {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" || parsed.User != nil {
-		return fmt.Errorf("%s must be an absolute URL without user info", field)
-	}
-	if parsed.Scheme == "https" || (parsed.Scheme == "http" && isLoopback(parsed.Hostname())) {
-		return nil
-	}
-	return fmt.Errorf("%s must use https (http only on a loopback host)", field)
-}
-
-func isLoopback(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	address, err := netip.ParseAddr(host)
-	return err == nil && address.IsLoopback()
 }
 
 // isRedirectTarget accepts a same-origin path or an absolute http(s) URL with a host.

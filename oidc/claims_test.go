@@ -135,25 +135,3 @@ func TestAuthStyle(t *testing.T) {
 		})
 	}
 }
-
-func TestIsSecureURL(t *testing.T) {
-	testCases := []struct {
-		raw  string
-		want bool
-	}{
-		{raw: "https://idp.example.com/realms/x", want: true},
-		{raw: "http://127.0.0.1:8080", want: true},
-		{raw: "http://[::1]:8080", want: true},
-		{raw: "http://localhost:8080", want: true},
-		{raw: "http://idp.example.com", want: false},
-		{raw: "ftp://idp.example.com", want: false},
-		{raw: "https://", want: false},
-		{raw: "https://user@idp.example.com", want: false},
-		{raw: "::", want: false},
-	}
-	for _, testCase := range testCases {
-		t.Run(testCase.raw, func(t *testing.T) {
-			require.Equal(t, testCase.want, isSecureURL(testCase.raw))
-		})
-	}
-}

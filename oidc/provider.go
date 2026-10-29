@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -175,7 +174,7 @@ func validateRequired(options *Options) error {
 		return errors.New("client ID and client secret are required")
 	case options.Sessions == nil:
 		return errors.New("sessions are required")
-	case !isSecureURL(options.Issuer):
+	case !redirect.IsSecureURL(options.Issuer):
 		return errors.New("issuer must be an https URL, or http on a loopback host")
 	}
 	return nil
@@ -276,24 +275,6 @@ func lowerCaseDomains(domains []string) ([]string, error) {
 
 func isSpaceOrControl(character rune) bool {
 	return character <= ' ' || character == 0x7f
-}
-
-// isSecureURL reports whether raw is an absolute https URL, or an http URL on a loopback host (design D16:
-// credentials never travel in clear text, tests run on 127.0.0.1).
-func isSecureURL(raw string) bool {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" || parsed.User != nil {
-		return false
-	}
-	return parsed.Scheme == "https" || (parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname()))
-}
-
-func isLoopbackHost(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	address := net.ParseIP(host)
-	return address != nil && address.IsLoopback()
 }
 
 func isAbsoluteHTTPURL(raw string) bool {

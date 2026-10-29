@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -25,6 +24,7 @@ import (
 	"golang.org/x/oauth2/clientcredentials"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/redirect"
 )
 
 const (
@@ -120,7 +120,7 @@ func resolveOptions(options *Options) (Options, error) {
 
 func validate(options Options) error {
 	switch {
-	case !isSecureURL(options.URL):
+	case !redirect.IsSecureURL(options.URL) || strings.ContainsAny(options.URL, "?#"):
 		return errors.New("URL must be an https URL without query, or http on a loopback host")
 	case options.Realm == "":
 		return errors.New("realm is required")
@@ -344,24 +344,6 @@ func missingRequirement(authorization userAuthorization, options Options) error 
 		}
 	}
 	return nil
-}
-
-// isSecureURL reports whether raw is an absolute https URL, or an http URL on a loopback host (design
-// D16), without user info, query or fragment.
-func isSecureURL(raw string) bool {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" || parsed.User != nil || strings.ContainsAny(raw, "?#") {
-		return false
-	}
-	return parsed.Scheme == "https" || (parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname()))
-}
-
-func isLoopbackHost(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	address := net.ParseIP(host)
-	return address != nil && address.IsLoopback()
 }
 
 // dependencyError keeps the message of an oauth2 or net/http error and drops its chain, so callers cannot

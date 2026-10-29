@@ -174,3 +174,31 @@ func TestExternalURL(t *testing.T) {
 		})
 	}
 }
+
+func TestIsSecureURL(t *testing.T) {
+	testCases := []struct {
+		raw  string
+		want bool
+	}{
+		{raw: "https://idp.example.com/realms/x", want: true},
+		{raw: "https://idp.example.com/?a=b", want: true},
+		{raw: "http://127.0.0.1:8080", want: true},
+		{raw: "http://127.0.0.2:8080", want: true},
+		{raw: "http://[::1]:8080", want: true},
+		{raw: "http://localhost:8080", want: true},
+		{raw: "http://idp.example.com", want: false},
+		{raw: "http://LOCALHOST:8080", want: false},
+		{raw: "http://[::1%25lo0]:8080", want: false},
+		{raw: "ftp://idp.example.com", want: false},
+		{raw: "https://", want: false},
+		{raw: "https://user@idp.example.com", want: false},
+		{raw: "http://user:secret@127.0.0.1", want: false},
+		{raw: "/realms/x", want: false},
+		{raw: "::", want: false},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.raw, func(t *testing.T) {
+			require.Equal(t, testCase.want, IsSecureURL(testCase.raw))
+		})
+	}
+}
