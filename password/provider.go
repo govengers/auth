@@ -41,6 +41,7 @@ type Provider struct {
 	backupCodeAlphabet []rune
 	dummyHash          string // verified for unknown users, so a lookup costs the same either way
 	now                func() time.Time
+	verifyHash         func(password, encodedHash string) (bool, Parameters, error) // verifyHash; tests observe the calls
 }
 
 // New validates options, applies the defaults to a copy and precomputes the dummy hash used for unknown users
@@ -71,6 +72,7 @@ func newProvider(options Options) (*Provider, error) {
 		backupCodeAlphabet: distinctRunes(options.TOTP.BackupCodeAlphabet),
 		dummyHash:          dummyHash,
 		now:                time.Now,
+		verifyHash:         verifyHash,
 	}, nil
 }
 

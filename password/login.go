@@ -23,12 +23,12 @@ func (p *Provider) login(writer http.ResponseWriter, request *http.Request) repl
 	if err := httpjson.Decode(writer, request, &body); err != nil {
 		return refused(&auth.Error{Kind: auth.ErrInvalidRequest, Reason: "malformed login request", Err: err})
 	}
-	user, legacy, err := p.checkCredentials(request.Context(), body.Identifier, body.Password)
+	user, rehash, err := p.checkCredentials(request.Context(), body.Identifier, body.Password)
 	if err != nil {
 		return refused(err)
 	}
 	var upgradeError error
-	if legacy {
+	if rehash {
 		upgradeError = p.upgradeHash(request.Context(), user, body.Password)
 	}
 	return p.continueLogin(writer, request, user, http.StatusOK).degradedBy(upgradeError)
@@ -98,27 +98,31 @@ func (p *Provider) continueLogin(writer http.ResponseWriter, request *http.Reque
 	return succeeded(status, auth.NewIdentityResponse(identity), identity)
 }
 
-// checkCredentials returns the user identifier and password belong to, and whether the password matched a
-// legacy hash (one to upgrade).
-func (p *Provider) checkCredentials(ctx context.Context, identifier, password string) (user *User, legacy bool, err error) {
+// checkCredentials returns the user identifier and password belong to, and whether to store a new hash of the
+// password (see verifyPassword).
+func (p *Provider) checkCredentials(ctx context.Context, identifier, password string) (user *User, rehash bool, err error) {
 	user, err = p.lookup(ctx, identifier)
 	if errors.Is(err, ErrUserNotFound) {
-		// Same cost as a real check, so response times do not tell which users exist. The dummy hash is
-		// well-formed, so there is no error to handle; only the cost matters.
-		_, _ = Verify(password, p.dummyHash)
+		p.verifyDummy(password)
 		return nil, false, &auth.Error{Kind: auth.ErrUnauthenticated, Code: codeInvalidCredentials, Reason: "unknown user", Err: err}
 	}
 	if err != nil {
 		return nil, false, fmt.Errorf("look up password user: %w", err)
 	}
-	matched, legacy, err := p.verifyPassword(user, password)
+	matched, rehash, err := p.verifyPassword(user, password)
 	if err != nil {
 		return nil, false, &auth.Error{Kind: auth.ErrUnauthenticated, Code: codeInvalidCredentials, Reason: "stored password hash not verifiable", Err: err}
 	}
 	if !matched {
 		return nil, false, &auth.Error{Kind: auth.ErrUnauthenticated, Code: codeInvalidCredentials, Reason: "wrong password"}
 	}
-	return user, legacy, nil
+	return user, rehash, nil
+}
+
+// verifyDummy verifies password against the dummy hash: the cost of a real check, so response times do not tell
+// an account from an unknown one. The dummy hash is well-formed, so only the cost matters.
+func (p *Provider) verifyDummy(password string) {
+	_, _, _ = p.verifyHash(password, p.dummyHash)
 }
 
 // lookup returns the user an identifier names; a kind of identifier that is disabled finds nobody.
@@ -137,29 +141,34 @@ func (p *Provider) lookup(ctx context.Context, identifier string) (*User, error)
 	}
 }
 
-// verifyPassword reports whether password matches the user's stored hash, and whether the LegacyVerifier
-// decided it because the hash is not Argon2id.
-func (p *Provider) verifyPassword(user *User, password string) (matched, legacy bool, err error) {
-	matched, err = Verify(password, user.PasswordHash)
-	if err == nil || p.options.LegacyVerifier == nil {
-		return matched, false, err
+// verifyPassword reports whether password matches the user's stored hash, and whether to store a new hash of it:
+// the LegacyVerifier matched a hash that is not Argon2id, or the Argon2id hash has other than the configured
+// parameters. A stored hash nothing can verify costs a dummy verification, like an unknown user.
+func (p *Provider) verifyPassword(user *User, password string) (matched, rehash bool, err error) {
+	matched, parameters, err := p.verifyHash(password, user.PasswordHash)
+	if err == nil {
+		return matched, matched && parameters != p.options.HashParameters, nil
 	}
-	matched, err = p.options.LegacyVerifier(password, user.PasswordHash)
-	if err != nil {
-		return false, true, fmt.Errorf("legacy password verifier: %w", err)
+	if p.options.LegacyVerifier != nil {
+		matched, err = p.options.LegacyVerifier(password, user.PasswordHash)
+		if err == nil {
+			return matched, matched, nil
+		}
+		err = fmt.Errorf("legacy password verifier: %w", err)
 	}
-	return matched, true, nil
+	p.verifyDummy(password)
+	return false, false, err
 }
 
-// upgradeHash replaces the user's legacy hash with an Argon2id hash of password, unless the stored hash
-// changed since the user was read (compare-and-swap).
+// upgradeHash replaces the user's stored hash with an Argon2id hash of password on the configured parameters,
+// unless the stored hash changed since the user was read (compare-and-swap).
 func (p *Provider) upgradeHash(ctx context.Context, user *User, password string) error {
 	newHash, err := Hash(password, p.options.HashParameters)
 	if err != nil {
-		return fmt.Errorf("upgrade legacy hash of user %s: %w", user.ID, err)
+		return fmt.Errorf("upgrade password hash of user %s: %w", user.ID, err)
 	}
 	if err := p.options.Storage.UpdatePasswordHash(ctx, user.ID, user.PasswordHash, newHash); err != nil {
-		return fmt.Errorf("upgrade legacy hash of user %s: %w", user.ID, err)
+		return fmt.Errorf("upgrade password hash of user %s: %w", user.ID, err)
 	}
 	return nil
 }
