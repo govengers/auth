@@ -3,6 +3,7 @@ package oidc_test
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -101,6 +102,7 @@ func TestLogoutWithoutHintGoesToThePostLogoutURL(t *testing.T) {
 			require.Equal(t, testCase.wantLocation, response.Header().Get("Location"))
 			require.Equal(t, testCase.wantLogouts, ended.subjects())
 			require.Equal(t, http.StatusUnauthorized, person.me(application))
+			require.NoError(t, application.outcomes.last(t).Err, "no session is nothing to report")
 		})
 	}
 }
@@ -296,6 +298,47 @@ func TestLogoutIgnoresAClientDisconnect(t *testing.T) {
 			require.Equal(t, []string{"user-1"}, ended.subjects(), "OnLogout still learns who logged out")
 			require.Equal(t, testCase.wantHint, queryOf(t, response.Header().Get("Location")).Has("id_token_hint"))
 			require.Equal(t, http.StatusUnauthorized, person.me(application), "the session ended")
+		})
+	}
+}
+
+func TestLogoutDegradesWhenTheSessionCannotBeRead(t *testing.T) {
+	issuer := startIssuer(t, nil)
+	frontChannel := prefix + "/frontchannel-logout?iss=" + url.QueryEscape(issuer.IssuerURL()) + "&sid=idp-session-1"
+	testCases := []struct {
+		name        string
+		target      string
+		failingKey  string
+		wantStatus  int
+		wantAction  auth.Action
+		wantLogouts []string
+	}{
+		{name: "RP-initiated, identity", target: prefix + "/logout", failingKey: "identity", wantStatus: http.StatusFound, wantAction: auth.ActionLogout, wantLogouts: []string{}},
+		{name: "RP-initiated, ID token", target: prefix + "/logout", failingKey: providerName + ".id_token", wantStatus: http.StatusFound, wantAction: auth.ActionLogout, wantLogouts: []string{"user-1"}},
+		{name: "front-channel, identity", target: frontChannel, failingKey: "identity", wantStatus: http.StatusOK, wantAction: auth.ActionFrontChannelLogout, wantLogouts: []string{}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			backend := &failingBackend{}
+			ended := &logouts{}
+			application := newApplicationOn(t, newStoreOn(t, backend), issuer, func(options *oidc.Options) { options.OnLogout = ended.hook })
+			person := newBrowser(t)
+			require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
+			signedIn := maps.Clone(person.cookies)
+			backend.failKey(testCase.failingKey)
+
+			response := person.get(application.handler, testCase.target, nil)
+
+			require.Equal(t, testCase.wantStatus, response.Code)
+			require.False(t, queryOf(t, response.Header().Get("Location")).Has("id_token_hint"))
+			require.Equal(t, testCase.wantLogouts, ended.subjects())
+			outcome := application.outcomes.last(t)
+			require.Equal(t, testCase.wantAction, outcome.Action)
+			require.Equal(t, auth.ResultSuccess, outcome.Result)
+			require.ErrorIs(t, outcome.Err, errBackendDown, "the lost hook or hint shows on the outcome")
+			backend.failKey("")
+			person.cookies = signedIn
+			require.Equal(t, http.StatusUnauthorized, person.me(application), "the session ended all the same")
 		})
 	}
 }
