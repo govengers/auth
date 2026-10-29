@@ -133,6 +133,10 @@ func (failingBackend) Pop(context.Context, string, string) ([]byte, bool, error)
 	return nil, false, errRedisDown
 }
 
+func (failingBackend) CompareAndSwap(context.Context, string, string, []byte, []byte) (bool, error) {
+	return false, errRedisDown
+}
+
 func (failingBackend) Revoke(context.Context, string, time.Duration) error { return errRedisDown }
 
 func TestSessionStoreFailuresAreRecordedButARevokedSessionIsNot(t *testing.T) {
@@ -146,21 +150,28 @@ func TestSessionStoreFailuresAreRecordedButARevokedSessionIsNot(t *testing.T) {
 	require.ErrorIs(t, err, errRedisDown)
 	_, _, err = failing.Pop(ctx, "session", "key")
 	require.ErrorIs(t, err, errRedisDown)
+	_, err = failing.CompareAndSwap(ctx, "session", "key", nil, nil)
+	require.ErrorIs(t, err, errRedisDown)
 	require.ErrorIs(t, failing.Revoke(ctx, "session", time.Minute), errRedisDown)
 	we := wideevent.Begin(nil, "test")
 	calls.recordOn(we)
 
 	cache := we.FieldsMap()["cache"].(map[string]any)
-	require.Equal(t, 4, cache["failures"])
+	require.Equal(t, 5, cache["failures"])
 	require.Equal(t, "redis down", cache["error"])
-	for _, operation := range []string{"put", "get", "pop", "revoke"} {
+	for _, operation := range []string{"put", "get", "pop", "compare_and_swap", "revoke"} {
 		require.Equal(t, uint64(1), dependencyCount(t, registry, "redis", operation, "failure"), operation)
 	}
 
 	memory, err := session.NewMemoryBackend(nil)
 	require.NoError(t, err)
+	require.NoError(t, memory.Put(ctx, "revoked", "key", nil, time.Minute)) // a marker needs a revoked value
 	revoking := dependencies.Backend(memory)
 	require.NoError(t, revoking.Revoke(ctx, "revoked", time.Minute))
 	require.ErrorIs(t, revoking.Put(ctx, "revoked", "key", nil, time.Minute), session.ErrSessionRevoked)
 	require.Equal(t, uint64(1), dependencyCount(t, registry, "redis", "put", "success"), "a revoked session is an answer")
+	swapped, err := revoking.CompareAndSwap(ctx, "revoked", "key", nil, []byte("value"))
+	require.NoError(t, err)
+	require.False(t, swapped)
+	require.Equal(t, uint64(1), dependencyCount(t, registry, "redis", "compare_and_swap", "success"), "a lost swap is an answer")
 }
