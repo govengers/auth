@@ -425,8 +425,9 @@ func TestGuardRefreshFailureKeepsTheIdentity(t *testing.T) {
 			outcomes := fixture.observer.take()
 			require.Len(t, outcomes, 2)
 			require.Equal(t, auth.ActionRefresh, outcomes[0].Action)
-			require.Equal(t, auth.ResultError, outcomes[0].Result)
+			require.Equal(t, auth.ResultSuccess, outcomes[0].Result, "degraded success: nothing answered 500")
 			require.ErrorContains(t, outcomes[0].Err, testCase.wantErr)
+			require.Equal(t, testIdentity(), outcomes[0].Identity)
 			require.Equal(t, auth.ResultSuccess, outcomes[1].Result)
 
 			serveGuarded(fixture.guard.RequireAPI(), request)
