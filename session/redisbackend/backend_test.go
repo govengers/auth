@@ -1,8 +1,13 @@
 package redisbackend_test
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"io"
+	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -168,6 +173,63 @@ func TestRevocationMarkerLivesAsLongAsTheRevokedValues(t *testing.T) {
 	require.NoError(t, backend.Revoke(ctx, "s", 24*time.Hour))
 
 	require.Equal(t, 10*time.Minute, server.TTL("session:{s}#revoked"))
+}
+
+// go-redis retries a command whose reply was lost (MaxRetries defaults to 3). The retried Pop must return
+// the value the lost attempt consumed, not report it absent.
+func TestPopSurvivesARetryAfterALostReply(t *testing.T) {
+	server := miniredis.RunT(t)
+	var dropReply atomic.Bool
+	client := redis.NewClient(&redis.Options{Addr: server.Addr(), Dialer: func(ctx context.Context, network, address string) (net.Conn, error) {
+		connection, err := (&net.Dialer{}).DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return &replyDroppingConnection{Conn: connection, dropReply: &dropReply}, nil
+	}})
+	t.Cleanup(func() { _ = client.Close() })
+	backend, err := redisbackend.New(&redisbackend.Options{Client: client})
+	require.NoError(t, err)
+	ctx := t.Context()
+	require.NoError(t, backend.Put(ctx, "s", "state", []byte("value"), time.Hour))
+	_, _, err = backend.Pop(ctx, "s", "warm-up") // loads the script, so the next Pop runs on its first EVALSHA
+	require.NoError(t, err)
+
+	dropReply.Store(true)
+	value, found, err := backend.Pop(ctx, "s", "state")
+
+	require.False(t, dropReply.Load(), "a reply was dropped")
+	require.NoError(t, err)
+	require.True(t, found, "the retry returns what the lost attempt consumed")
+	require.Equal(t, "value", string(value))
+	_, found, err = backend.Pop(ctx, "s", "state")
+	require.NoError(t, err)
+	require.False(t, found, "another Pop finds nothing")
+}
+
+// replyDroppingConnection loses the reply to the next script call once dropReply is set: the server ran the
+// script, the client sees the connection end, as when the network drops a response.
+type replyDroppingConnection struct {
+	net.Conn
+	dropReply *atomic.Bool
+	dropping  bool
+}
+
+func (c *replyDroppingConnection) Write(data []byte) (int, error) {
+	if bytes.Contains(bytes.ToLower(data), []byte("evalsha")) && c.dropReply.CompareAndSwap(true, false) {
+		c.dropping = true
+	}
+	return c.Conn.Write(data)
+}
+
+func (c *replyDroppingConnection) Read(buffer []byte) (int, error) {
+	if c.dropping {
+		c.dropping = false
+		_, _ = c.Conn.Read(buffer) // the reply arrived: the script ran
+		_ = c.Close()
+		return 0, io.EOF
+	}
+	return c.Conn.Read(buffer)
 }
 
 func TestPutExtendsButNeverShortensTheIndexTTL(t *testing.T) {

@@ -2,6 +2,7 @@ package redisbackend
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,7 +14,12 @@ import (
 	"github.com/govengers/auth/session"
 )
 
-const defaultKeyPrefix = "session"
+const (
+	defaultKeyPrefix = "session"
+	// popReceiptTTL keeps a popped value for a retry of the same Pop; it outlives go-redis's retries of
+	// a lost reply (MaxRetries times read timeout plus backoff, about 11 s with the defaults).
+	popReceiptTTL = time.Minute
+)
 
 // Lua scripts keep each operation atomic on the slot of one session. They are read-only package values.
 var (
@@ -27,14 +33,16 @@ if redis.call('PTTL', KEYS[3]) < tonumber(ARGV[2]) then redis.call('PEXPIRE', KE
 return 1
 `)
 
-	// popScript returns and deletes the value in one step.
-	// KEYS: value, index.
+	// popScript returns and deletes the value in one step. It keeps the value under a receipt named by the
+	// caller's random token, so a client retrying the script after a lost reply (go-redis does by default)
+	// gets the value again instead of "absent" (RES-004: the token is the idempotency key).
+	// KEYS: value, index, receipt. ARGV: receipt ttl in ms.
 	popScript = redis.NewScript(`
 local v = redis.call('GET', KEYS[1])
-if v then
-  redis.call('DEL', KEYS[1])
-  redis.call('SREM', KEYS[2], KEYS[1])
-end
+if not v then return redis.call('GET', KEYS[3]) end
+redis.call('DEL', KEYS[1])
+redis.call('SREM', KEYS[2], KEYS[1])
+redis.call('SET', KEYS[3], v, 'PX', ARGV[1])
 return v
 `)
 
@@ -57,8 +65,9 @@ type Options struct {
 }
 
 // Backend implements session.Backend on Redis. One string per value plus a set indexing the keys of
-// the session; the layout is <prefix>:{<sessionID>} (index), <prefix>:{<sessionID>}:<key> (value) and
-// <prefix>:{<sessionID>}#revoked (revocation marker). It is safe for concurrent use.
+// the session; the layout is <prefix>:{<sessionID>} (index), <prefix>:{<sessionID>}:<key> (value),
+// <prefix>:{<sessionID>}#revoked (revocation marker) and <prefix>:{<sessionID>}#popped:<token> (a popped
+// value kept one minute for a retried Pop). It is safe for concurrent use.
 type Backend struct {
 	client redis.UniversalClient
 	prefix string
@@ -110,12 +119,14 @@ func (b *Backend) Get(ctx context.Context, sessionID, key string) ([]byte, bool,
 	return valueOrAbsent(value, err, "read session value")
 }
 
-// Pop returns the live value under (sessionID, key) and deletes it in one atomic step.
+// Pop returns the live value under (sessionID, key) and deletes it in one atomic step; a client retry of
+// the step after a lost reply returns the same value.
 func (b *Backend) Pop(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
 	if err := validateSessionID(sessionID); err != nil {
 		return nil, false, err
 	}
-	value, err := popScript.Run(ctx, b.client, []string{b.valueKey(sessionID, key), b.indexKey(sessionID)}).Text()
+	keys := []string{b.valueKey(sessionID, key), b.indexKey(sessionID), b.indexKey(sessionID) + "#popped:" + rand.Text()}
+	value, err := popScript.Run(ctx, b.client, keys, popReceiptTTL.Milliseconds()).Text()
 	return valueOrAbsent([]byte(value), err, "pop session value")
 }
 
