@@ -476,6 +476,79 @@ func TestGuardRefreshRacingALogout(t *testing.T) {
 	require.ErrorContains(t, outcomes[0].Err, "no session identity")
 }
 
+// Requests arriving while a due refresh runs find it claimed: one Refresher call per interval, every
+// request answered.
+func TestGuardClaimsADueRefresh(t *testing.T) {
+	var fixture *guardFixture
+	var request *http.Request
+	var concurrent []guardResult
+	refresher := &fakeRefresher{name: "password"}
+	refresher.refresh = func(identity *auth.Identity) (*auth.Identity, error) {
+		if concurrent == nil {
+			concurrent = []guardResult{}
+			for range 15 {
+				concurrent = append(concurrent, serveGuarded(fixture.guard.RequireAPI(), request))
+			}
+		}
+		return identity, nil
+	}
+	fixture = newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
+	request = login(t, fixture.store, testIdentity())
+	fixture.clock.advance(2 * time.Minute)
+
+	result := serveGuarded(fixture.guard.RequireAPI(), request)
+
+	require.Equal(t, 1, refresher.callCount())
+	for _, answered := range append(concurrent, result) {
+		require.Equal(t, http.StatusNoContent, answered.recorder.Code)
+		require.Equal(t, testIdentity(), answered.identity)
+	}
+}
+
+// A request that read a due session and loses the claim to a save made meanwhile does not refresh: the save
+// moved refreshedAt. It continues with the identity it read.
+func TestGuardLosingTheRefreshClaimSkipsTheRefresh(t *testing.T) {
+	saved := testIdentity()
+	saved.Roles = []string{"guest"}
+	refresher := &fakeRefresher{name: "password", refresh: func(identity *auth.Identity) (*auth.Identity, error) {
+		return identity, nil
+	}}
+	fixture := newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
+	request := login(t, fixture.store, testIdentity())
+	fixture.store.options.Backend = &beforeSwapBackend{Backend: fixture.store.options.Backend, beforeSwap: func() {
+		concurrent, err := fixture.store.Open(request)
+		require.NoError(t, err)
+		require.NoError(t, concurrent.SaveIdentity(t.Context(), saved))
+	}}
+	fixture.clock.advance(2 * time.Minute)
+
+	result := serveGuarded(fixture.guard.RequireAPI(), request)
+
+	require.Equal(t, http.StatusNoContent, result.recorder.Code)
+	require.Equal(t, testIdentity(), result.identity)
+	require.Zero(t, refresher.callCount())
+	current, err := fixture.store.Open(request)
+	require.NoError(t, err)
+	stored, err := current.Identity(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, saved, stored)
+}
+
+// beforeSwapBackend runs beforeSwap once, before the first CompareAndSwap reaches the backend.
+type beforeSwapBackend struct {
+	Backend
+	beforeSwap func()
+}
+
+func (b *beforeSwapBackend) CompareAndSwap(ctx context.Context, sessionID, key string, previous, value []byte) (bool, error) {
+	if b.beforeSwap != nil {
+		beforeSwap := b.beforeSwap
+		b.beforeSwap = nil
+		beforeSwap()
+	}
+	return b.Backend.CompareAndSwap(ctx, sessionID, key, previous, value)
+}
+
 // A save completed while a refresh runs (another request's refresh, impersonation, a role change) wins: the
 // refresh must not write its older snapshot back, neither after a success nor after a degraded failure.
 func TestGuardRefreshLosesToAConcurrentSave(t *testing.T) {
