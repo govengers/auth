@@ -131,7 +131,7 @@ func TestAuthStyle(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			require.Equal(t, testCase.want, authStyle(testCase.methods))
+			require.Equal(t, testCase.want, authenticationStyle(testCase.methods))
 		})
 	}
 }
