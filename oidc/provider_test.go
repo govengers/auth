@@ -106,7 +106,8 @@ func TestDiscoveryErrorsCarryNoAnswerText(t *testing.T) {
 	const marker = "alice@example.com"
 	testCases := []struct {
 		name      string
-		transport *answeringTransport
+		answer    http.Handler        // the issuer's answer, served by a test server
+		transport *answeringTransport // in place of answer: what a test server cannot send
 		wantText  string
 	}{
 		{
@@ -115,9 +116,9 @@ func TestDiscoveryErrorsCarryNoAnswerText(t *testing.T) {
 			wantText:  "discover issuer: 503 Service Unavailable",
 		},
 		{
-			name:      "a page instead of the document",
-			transport: &answeringTransport{status: http.StatusOK, contentType: "text/html; charset=" + marker, body: "<p>" + marker + "</p>"},
-			wantText:  `discover issuer: oidc: failed to decode provider discovery object: expected Content-Type = application/json, got ""`,
+			name:     "a page instead of the document",
+			answer:   answer(http.StatusOK, "text/html; charset="+marker, "<p>"+marker+"</p>"),
+			wantText: `discover issuer: oidc: failed to decode provider discovery object: expected Content-Type = application/json, got ""`,
 		},
 		{
 			name:      "an answer without a body",
@@ -128,8 +129,12 @@ func TestDiscoveryErrorsCarryNoAnswerText(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			options := discoveryOptions(t, startIssuer(t, nil).IssuerURL())
-			testCase.transport.path = "/.well-known/openid-configuration"
-			options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: testCase.transport}
+			if testCase.answer != nil {
+				options.Issuer = serveAnswer(t, testCase.answer)
+			} else {
+				testCase.transport.path = "/.well-known/openid-configuration"
+				options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: testCase.transport}
+			}
 
 			_, err := oidc.New(t.Context(), options)
 
@@ -165,12 +170,8 @@ func TestDiscoveryReadsNoBodyBeyondTheDocumentLimit(t *testing.T) {
 
 func TestDiscoveryDropsAnOversizedDocument(t *testing.T) {
 	document := `{"issuer":"` + strings.Repeat("a", 1<<20) + `"}`
-	options := discoveryOptions(t, startIssuer(t, nil).IssuerURL())
-	options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: &answeringTransport{
-		path: "/.well-known/openid-configuration", status: http.StatusOK, contentType: "application/json", body: document,
-	}}
 
-	_, err := oidc.New(t.Context(), options)
+	_, err := oidc.New(t.Context(), discoveryOptions(t, serveAnswer(t, answer(http.StatusOK, "application/json", document))))
 
 	require.ErrorContains(t, err, `failed to decode provider discovery object: expected Content-Type = application/json, got ""`)
 }
@@ -184,6 +185,14 @@ func TestDiscoveryFollowsNoRedirect(t *testing.T) {
 
 	require.ErrorContains(t, err, "redirect refused")
 	require.Zero(t, sinkRequests(), "the discovery document comes from the issuer, never from where it points")
+}
+
+// serveAnswer serves handler on loopback until the test ends and returns the server URL.
+func serveAnswer(t *testing.T, handler http.Handler) string {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	return server.URL
 }
 
 func discoveryOptions(t *testing.T, issuer string) *oidc.Options {

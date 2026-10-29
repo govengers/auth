@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -166,19 +165,15 @@ func TestCallbackRefusals(t *testing.T) {
 	}
 }
 
-func TestCallbackFailsWhenTheIssuerIsUnreachable(t *testing.T) {
-	issuer := startIssuer(t, nil)
-	transport := &failingTransport{failPath: "/token"}
-	application := newApplication(t, issuer, func(options *oidc.Options) {
-		options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
-	})
+func TestCallbackFailsWhenTheTokenEndpointIsUnreachable(t *testing.T) {
+	issuer := startIssuer(t, func(options *fakeprovider.OIDCOptions) { options.TokenAnswer = hangUp(t) })
+	application := newApplication(t, issuer, nil)
 
 	response := newBrowser(t).signIn(application, prefix+"/login")
 
 	require.Equal(t, http.StatusInternalServerError, response.Code)
 	require.JSONEq(t, `{"code":"internal","message":"internal error"}`, response.Body.String())
 	require.Equal(t, auth.ResultError, application.outcomes.last(t).Result)
-	require.Positive(t, transport.requests(), "discovery went through HTTPClient")
 }
 
 func TestCallbackClassifiesTokenEndpointErrorsWithoutTheirText(t *testing.T) {
@@ -225,8 +220,10 @@ func TestCallbackKeepsTheIDTokenAndTheKeySetOutOfTheOutcome(t *testing.T) {
 		wantReason string
 	}{
 		{name: "key set outage as a page", transport: &answeringTransport{path: "/jwks", status: http.StatusServiceUnavailable, reason: marker, contentType: "text/html", body: page}},
-		{name: "a page instead of the key set", transport: &answeringTransport{path: "/jwks", status: http.StatusOK, contentType: "text/html", body: page}},
-		{name: "key set unreachable", transport: &failingTransport{failPath: "/jwks", failure: marker}},
+		{name: "a page instead of the key set", configure: func(options *fakeprovider.OIDCOptions) {
+			options.JWKSAnswer = answer(http.StatusOK, "text/html", page)
+		}},
+		{name: "key set unreachable", configure: func(options *fakeprovider.OIDCOptions) { options.JWKSAnswer = hangUp(t) }},
 		{name: "token header", configure: func(options *fakeprovider.OIDCOptions) {
 			options.TokenAnswer = answer(http.StatusOK, "application/json", `{"access_token":"a","token_type":"Bearer","id_token":"`+headerWithMarker+`.e30.c2ln"}`)
 		}},
@@ -429,30 +426,6 @@ func messageOf(status int) string {
 	return response.Message
 }
 
-// failingTransport fails requests to failPath (with failure, default "connection refused") and counts the others.
-type failingTransport struct {
-	failPath string
-	failure  string
-	mutex    sync.Mutex
-	passed   int
-}
-
-func (f *failingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	if strings.HasSuffix(request.URL.Path, f.failPath) {
-		return nil, errors.New(cmp.Or(f.failure, "connection refused"))
-	}
-	f.mutex.Lock()
-	f.passed++
-	f.mutex.Unlock()
-	return http.DefaultTransport.RoundTrip(request)
-}
-
-func (f *failingTransport) requests() int {
-	f.mutex.Lock()
-	defer f.mutex.Unlock()
-	return f.passed
-}
-
 // answer is a handler answering status with contentType and body.
 func answer(status int, contentType, body string) http.HandlerFunc {
 	return func(writer http.ResponseWriter, _ *http.Request) {
@@ -462,8 +435,20 @@ func answer(status int, contentType, body string) http.HandlerFunc {
 	}
 }
 
-// answeringTransport answers requests to path itself and passes the others on. The reason phrase of its
-// status line defaults to the standard one; withoutBody answers with a nil Body, endless with endless's.
+// hangUp is a handler that closes the connection without an answer, as an unreachable endpoint does.
+func hangUp(t *testing.T) http.HandlerFunc {
+	return func(writer http.ResponseWriter, _ *http.Request) {
+		connection, _, err := http.NewResponseController(writer).Hijack()
+		if err != nil {
+			t.Errorf("hang up: %v", err)
+			return
+		}
+		_ = connection.Close() // nothing was written, nothing to flush
+	}
+}
+
+// answeringTransport answers requests to path itself and passes the others on, for answers a test server
+// cannot send: its own reason phrase (default the standard one), a nil Body (withoutBody) or endless's body.
 type answeringTransport struct {
 	path        string
 	status      int

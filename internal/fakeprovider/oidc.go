@@ -56,7 +56,8 @@ type OIDCUser struct {
 }
 
 // OIDCOptions configures the fake issuer. Faults (the bool fields after User) make every token
-// response broken in one specific way; TokenAnswer replaces the token endpoint altogether.
+// response broken in one specific way; TokenAnswer and JWKSAnswer replace the token endpoint and the key
+// set altogether.
 type OIDCOptions struct {
 	IssuerURL              string   // required by NewOIDCHandler, set by StartOIDC: the iss claim; endpoints are served below its path
 	ClientID               string   // required
@@ -73,6 +74,7 @@ type OIDCOptions struct {
 	ExpiredIDToken         bool // the ID token expired a minute ago
 
 	TokenAnswer http.Handler // when set, answers every /token request in place of the fake: an IdP's error or broken answers
+	JWKSAnswer  http.Handler // when set, answers every /jwks request in place of the fake: a key set outage or a broken key set
 
 	KeycloakRealm               string // when set, also serves the Keycloak token endpoint and Admin API of this realm (keycloak.go)
 	KeycloakAuthenticationRealm string // realm whose token endpoint issues admin tokens; default KeycloakRealm
@@ -240,7 +242,11 @@ func (h *OIDCHandler) discovery(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, document)
 }
 
-func (h *OIDCHandler) jwks(writer http.ResponseWriter, _ *http.Request) {
+func (h *OIDCHandler) jwks(writer http.ResponseWriter, request *http.Request) {
+	if h.options.JWKSAnswer != nil {
+		h.options.JWKSAnswer.ServeHTTP(writer, request)
+		return
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{"keys": []map[string]string{{
 		"kty": "RSA", "use": "sig", "alg": "RS256", "kid": h.keyID,
 		"n": base64.RawURLEncoding.EncodeToString(h.key.N.Bytes()),
