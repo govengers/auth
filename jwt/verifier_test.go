@@ -3,6 +3,7 @@ package jwt
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lestrrat-go/jwx/v3/jwa"
+	"github.com/lestrrat-go/jwx/v3/jwk"
 	"github.com/lestrrat-go/jwx/v3/jws"
 	jwxjwt "github.com/lestrrat-go/jwx/v3/jwt"
 	"github.com/stretchr/testify/require"
@@ -171,6 +173,85 @@ func TestNewVerifierFailsWhenTheJWKSCannotBeFetched(t *testing.T) {
 			require.Nil(t, verifier)
 		})
 	}
+}
+
+// keySetHandler serves {"keys": keys}.
+func keySetHandler(t *testing.T, keys ...map[string]any) http.Handler {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"keys": keys})
+	require.NoError(t, err)
+	return http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write(body) // the client reads what arrives; a lost write fails the parse
+	})
+}
+
+// publishedKey returns the signer's JWKS entry as JSON members.
+func publishedKey(t *testing.T, signer *Signer) map[string]any {
+	t.Helper()
+	var keySet struct {
+		Keys []map[string]any `json:"keys"`
+	}
+	require.NoError(t, json.Unmarshal(signer.keySetJSON, &keySet))
+	return keySet.Keys[0]
+}
+
+// hmacKey returns a symmetric JWK with key ID "oct-1" and alg HS256, as JSON members and as a signing key.
+func hmacKey(t *testing.T) (map[string]any, jwk.Key) {
+	t.Helper()
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	key, err := jwk.Import(secret)
+	require.NoError(t, err)
+	require.NoError(t, key.Set(jwk.KeyIDKey, "oct-1"))
+	return map[string]any{"kty": "oct", "kid": "oct-1", "alg": "HS256", "k": base64.RawURLEncoding.EncodeToString(secret)}, key
+}
+
+func TestNewVerifierFailsWithoutAnRSASigningKey(t *testing.T) {
+	signerKey := publishedKey(t, newTestSigner(t, fixedClock(signedAt)))
+	symmetricKey, _ := hmacKey(t)
+	encryptionKey := maps.Clone(signerKey)
+	encryptionKey["use"] = "enc"
+	keyWithoutAlgorithm := maps.Clone(signerKey)
+	delete(keyWithoutAlgorithm, "alg")
+	testCases := []struct {
+		name string
+		key  map[string]any
+	}{
+		{name: "symmetric key", key: symmetricKey},
+		{name: "encryption key", key: encryptionKey},
+		{name: "key without alg", key: keyWithoutAlgorithm},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			keySets := newKeySetServer(t, keySetHandler(t, testCase.key))
+
+			verifier, err := NewVerifier(t.Context(), testVerifierOptions(keySets.server.URL))
+
+			require.ErrorContains(t, err, "JWKS has no RSA signing key with alg")
+			require.Nil(t, verifier)
+		})
+	}
+}
+
+func TestVerifyIgnoresSymmetricKeysOfTheJWKS(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	signer := newTestSigner(t, clock.now)
+	symmetricKey, signingKey := hmacKey(t)
+	verifier := newTestVerifier(t, testVerifierOptions(newKeySetServer(t, keySetHandler(t, publishedKey(t, signer), symmetricKey)).server.URL), clock)
+	token := jwxjwt.New()
+	for name, value := range validClaims(signedAt) {
+		require.NoError(t, token.Set(name, value))
+	}
+	forged, err := jwxjwt.Sign(token, jwxjwt.WithKey(jwa.HS256(), signingKey))
+	require.NoError(t, err)
+	valid, err := signer.Sign(&auth.Identity{Subject: "42"})
+	require.NoError(t, err)
+
+	_, err = verifier.Verify(t.Context(), string(forged))
+	requireInvalidToken(t, err, "unknown key ID")
+
+	identity, err := verifier.Verify(t.Context(), valid)
+	require.NoError(t, err)
+	require.Equal(t, "42", identity.Subject)
 }
 
 func TestVerifyReturnsEveryIdentityField(t *testing.T) {

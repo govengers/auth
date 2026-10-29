@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lestrrat-go/jwx/v3/jwa"
 	"github.com/lestrrat-go/jwx/v3/jwk"
 	"github.com/lestrrat-go/jwx/v3/jws"
 	jwxjwt "github.com/lestrrat-go/jwx/v3/jwt"
@@ -34,7 +35,7 @@ const (
 
 // VerifierOptions configure a Verifier.
 type VerifierOptions struct {
-	JWKSURL         string        // required: absolute http(s) URL of the signer's JWKS
+	JWKSURL         string        // required: absolute http(s) URL of the signer's JWKS; only its RSA keys with alg and use "sig" (or none) count
 	Issuer          string        // required: expected iss
 	Audience        string        // optional: when set, aud must contain it
 	RefreshInterval time.Duration // default 1 h, at least 1 min; an unknown kid triggers a refetch at most once per minute
@@ -224,7 +225,29 @@ func fetchKeySet(ctx context.Context, httpClient *http.Client, jwksURL string) (
 	if err != nil {
 		return nil, dependency.Error("parse JWKS "+jwksURL, err)
 	}
-	return keys, nil
+	return signingKeys(keys)
+}
+
+// signingKeys returns the keys of keys a token may be verified with: RSA keys for signatures (use "sig"
+// or unset) that name their algorithm. A JWKS is public, so a symmetric key in it would let anyone sign
+// tokens; a key without alg cannot bind the token's algorithm.
+func signingKeys(keys jwk.Set) (jwk.Set, error) {
+	usable := jwk.NewSet()
+	for index := range keys.Len() {
+		key, _ := keys.Key(index)
+		usage, _ := key.KeyUsage()
+		_, hasAlgorithm := key.Algorithm()
+		if key.KeyType() != jwa.RSA() || (usage != "" && usage != string(jwk.ForSignature)) || !hasAlgorithm {
+			continue
+		}
+		if err := usable.AddKey(key); err != nil {
+			return nil, dependency.Error("keep JWKS key", err)
+		}
+	}
+	if usable.Len() == 0 {
+		return nil, errors.New("JWKS has no RSA signing key with alg")
+	}
+	return usable, nil
 }
 
 func (v *Verifier) parseOptions(keys jwk.Set) []jwxjwt.ParseOption {
