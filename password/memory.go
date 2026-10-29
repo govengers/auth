@@ -122,15 +122,21 @@ func (s *MemoryStorage) ConsumeBackupCode(_ context.Context, id uuid.UUID, hash 
 	return consumed, err
 }
 
-// SetTOTP enables TOTP and resets the attempt counter.
-func (s *MemoryStorage) SetTOTP(_ context.Context, id uuid.UUID, secret string, backupCodeHashes []string) error {
-	return s.update(id, func(stored *memoryUser) error {
+// SetTOTP enables TOTP and resets the attempt counter while TOTP is disabled and reports whether it did.
+func (s *MemoryStorage) SetTOTP(_ context.Context, id uuid.UUID, secret string, backupCodeHashes []string) (bool, error) {
+	enabled := false
+	err := s.update(id, func(stored *memoryUser) error {
+		if stored.user.TOTPEnabled {
+			return nil
+		}
 		stored.user.TOTPEnabled = true
 		stored.user.TOTPSecret = &secret
 		stored.user.BackupCodeHashes = slices.Clone(backupCodeHashes)
 		stored.totpAttempts = 0
+		enabled = true
 		return nil
 	})
+	return enabled, err
 }
 
 // ClearTOTP disables TOTP and resets the attempt counter.

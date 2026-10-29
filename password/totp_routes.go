@@ -230,9 +230,14 @@ func (p *Provider) storeTOTP(writer http.ResponseWriter, request *http.Request, 
 	return identity, nil
 }
 
+// setTOTP enables TOTP for the user; a user who has it enabled by now (a concurrent enrollment won) is a conflict.
 func (p *Provider) setTOTP(ctx context.Context, id uuid.UUID, secret string, hashes []string) error {
-	if err := p.options.Storage.SetTOTP(ctx, id, secret, hashes); err != nil {
+	enabled, err := p.options.Storage.SetTOTP(ctx, id, secret, hashes)
+	if err != nil {
 		return fmt.Errorf("enable TOTP of user %s: %w", id, err)
+	}
+	if !enabled {
+		return &auth.Error{Kind: auth.ErrConflict, Code: codeTOTPAlreadyEnabled, Reason: "enabled by a concurrent enrollment"}
 	}
 	return nil
 }

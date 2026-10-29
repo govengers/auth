@@ -86,7 +86,7 @@ func TestLoginChallengesTOTPUsers(t *testing.T) {
 func TestLoginFailsForEnrolledUsersWhileTOTPIsOff(t *testing.T) {
 	fixture := newFixture(t, Options{})
 	user := fixture.createUser(t, "ada", "")
-	require.NoError(t, fixture.storage.SetTOTP(t.Context(), user.ID, testSecret, nil))
+	requireSetTOTP(t, fixture.storage, user.ID, testSecret, nil)
 	browser := fixture.newClient(t)
 
 	recorder := browser.login("ada")
@@ -529,6 +529,66 @@ func TestEnableOnAFullSessionWritesNoSession(t *testing.T) {
 	require.True(t, fixture.storedUser(t, user.ID).TOTPEnabled)
 }
 
+// pausingStorage runs pause, once, after the next GetUserByID read the user and before it returns it: the reading
+// request goes on with a snapshot that pause can make stale.
+type pausingStorage struct {
+	*MemoryStorage
+	pause func()
+}
+
+func (s *pausingStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*User, error) {
+	user, err := s.MemoryStorage.GetUserByID(ctx, id)
+	if pause := s.pause; pause != nil {
+		s.pause = nil
+		pause()
+	}
+	return user, err
+}
+
+func TestConcurrentEnrollmentsEnableOnce(t *testing.T) {
+	testCases := []struct {
+		name     string
+		required bool
+	}{
+		{name: "logins pending enrollment", required: true},
+		{name: "full sessions"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			options := totpOptions()
+			options.TOTP.Required = testCase.required
+			fixture := newFixture(t, options)
+			user := fixture.createUser(t, "ada", "")
+			winner, loser := fixture.newClient(t), fixture.newClient(t)
+			winner.login("ada")
+			loser.login("ada")
+			winnerSecret := decodeBody[setupResponse](t, winner.post(setupPath, map[string]any{})).Secret
+			loserSecret := decodeBody[setupResponse](t, loser.post(setupPath, map[string]any{})).Secret
+			storage := &pausingStorage{MemoryStorage: fixture.storage}
+			fixture.provider.options.Storage = storage
+			var winnerCodes []string
+			storage.pause = func() { // the loser has read the user without TOTP; the winner enables meanwhile
+				enable := winner.post(enablePath, map[string]any{"code": fixture.code(t, winnerSecret, 0), "password": testPassword})
+				require.Equal(t, http.StatusOK, enable.Code, enable.Body.String())
+				winnerCodes = decodeBody[enableResponse](t, enable).BackupCodes
+			}
+
+			recorder := loser.post(enablePath, map[string]any{"code": fixture.code(t, loserSecret, 30*time.Second), "password": testPassword})
+
+			requireRefusal(t, recorder, http.StatusConflict, "totp_already_enabled")
+			stored := fixture.storedUser(t, user.ID)
+			require.Equal(t, winnerSecret, *stored.TOTPSecret)
+			require.Len(t, stored.BackupCodeHashes, len(winnerCodes))
+			_, found := matchingBackupCode(stored.BackupCodeHashes, winnerCodes[0])
+			require.True(t, found, "the winner's backup codes stay")
+			if testCase.required {
+				_, err := fixture.sessionIdentity(t, loser)
+				require.ErrorIs(t, err, auth.ErrUnauthenticated, "the losing enrollment gets no session")
+			}
+		})
+	}
+}
+
 func TestBackupCodesAreDistinct(t *testing.T) {
 	fixture := newFixture(t, totpOptions())
 	fixture.provider.backupCodeAlphabet = []rune("ab")
@@ -652,12 +712,12 @@ func TestSessionBackendFailures(t *testing.T) {
 	}{
 		{name: "login", prepare: func(t *testing.T, fixture *fixture) *client { return fixture.newClient(t) }, path: "/auth/password/login", body: map[string]any{"identifier": "ada", "password": testPassword}},
 		{name: "login with a TOTP challenge", options: totpOptions(), prepare: func(t *testing.T, fixture *fixture) *client {
-			require.NoError(t, fixture.storage.SetTOTP(t.Context(), mustUserID(t, fixture, "ada"), testSecret, nil))
+			requireSetTOTP(t, fixture.storage, mustUserID(t, fixture, "ada"), testSecret, nil)
 			return fixture.newClient(t)
 		}, path: "/auth/password/login", body: map[string]any{"identifier": "ada", "password": testPassword}},
 		{name: "logout", prepare: loggedInClient, path: "/auth/password/logout", body: map[string]any{}},
 		{name: "TOTP verify", options: totpOptions(), prepare: func(t *testing.T, fixture *fixture) *client {
-			require.NoError(t, fixture.storage.SetTOTP(t.Context(), mustUserID(t, fixture, "ada"), testSecret, nil))
+			requireSetTOTP(t, fixture.storage, mustUserID(t, fixture, "ada"), testSecret, nil)
 			return fixture.pendingClient(t, "ada")
 		}, path: verifyPath, body: map[string]any{"code": "000000"}},
 		{name: "TOTP setup", options: totpOptions(), prepare: loggedInClient, path: setupPath, body: map[string]any{}},

@@ -143,8 +143,16 @@ func (f *fixture) createTOTPUser(t *testing.T, username string) (*User, []string
 		require.NoError(t, err)
 		hashes = append(hashes, hash)
 	}
-	require.NoError(t, f.storage.SetTOTP(t.Context(), user.ID, testSecret, hashes))
+	requireSetTOTP(t, f.storage, user.ID, testSecret, hashes)
 	return user, codes
+}
+
+// requireSetTOTP enables TOTP for a user of storage who has it disabled.
+func requireSetTOTP(t *testing.T, storage Storage, id uuid.UUID, secret string, hashes []string) {
+	t.Helper()
+	enabled, err := storage.SetTOTP(t.Context(), id, secret, hashes)
+	require.NoError(t, err)
+	require.True(t, enabled)
 }
 
 // code returns the TOTP code of secret at the fixture's time plus offset.
@@ -355,9 +363,9 @@ func (s *failingStorage) ConsumeBackupCode(ctx context.Context, id uuid.UUID, ha
 	return s.MemoryStorage.ConsumeBackupCode(ctx, id, hash)
 }
 
-func (s *failingStorage) SetTOTP(ctx context.Context, id uuid.UUID, secret string, backupCodeHashes []string) error {
+func (s *failingStorage) SetTOTP(ctx context.Context, id uuid.UUID, secret string, backupCodeHashes []string) (bool, error) {
 	if err := s.fail("SetTOTP"); err != nil {
-		return err
+		return false, err
 	}
 	return s.MemoryStorage.SetTOTP(ctx, id, secret, backupCodeHashes)
 }

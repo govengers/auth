@@ -73,7 +73,7 @@ func TestMemoryStorageSharesNothingWithCallers(t *testing.T) {
 	storage := NewMemoryStorage()
 	user := newMemoryUser("ada", "ada@example.com")
 	require.NoError(t, storage.CreateUser(t.Context(), user))
-	require.NoError(t, storage.SetTOTP(t.Context(), user.ID, "secret", []string{"first", "second"}))
+	requireSetTOTP(t, storage, user.ID, "secret", []string{"first", "second"})
 
 	*user.Username = "changed"
 	read, err := storage.GetUserByID(t.Context(), user.ID)
@@ -124,7 +124,7 @@ func TestMemoryStorageTOTPAttempts(t *testing.T) {
 	spendAll()
 	require.NoError(t, storage.ResetTOTPAttempts(t.Context(), user.ID))
 	spendAll()
-	require.NoError(t, storage.SetTOTP(t.Context(), user.ID, "secret", nil))
+	requireSetTOTP(t, storage, user.ID, "secret", nil)
 	spendAll()
 	require.NoError(t, storage.ClearTOTP(t.Context(), user.ID))
 	spendAll()
@@ -144,7 +144,7 @@ func TestMemoryStorageConsumeTOTPStep(t *testing.T) {
 	require.True(t, consume(step))
 	require.False(t, consume(step))
 	require.False(t, consume(step.Add(-30*time.Second)))
-	require.NoError(t, storage.SetTOTP(t.Context(), user.ID, "secret", nil))
+	requireSetTOTP(t, storage, user.ID, "secret", nil)
 	require.NoError(t, storage.ClearTOTP(t.Context(), user.ID))
 	require.False(t, consume(step))
 	require.True(t, consume(step.Add(30*time.Second)))
@@ -156,13 +156,20 @@ func TestMemoryStorageSetAndClearTOTP(t *testing.T) {
 	require.NoError(t, storage.CreateUser(t.Context(), user))
 	hashes := []string{"first"}
 
-	require.NoError(t, storage.SetTOTP(t.Context(), user.ID, "secret", hashes))
+	requireSetTOTP(t, storage, user.ID, "secret", hashes)
 	hashes[0] = "changed"
 	enabled, err := storage.GetUserByID(t.Context(), user.ID)
 	require.NoError(t, err)
 	require.True(t, enabled.TOTPEnabled)
 	require.Equal(t, "secret", *enabled.TOTPSecret)
 	require.Equal(t, []string{"first"}, enabled.BackupCodeHashes)
+
+	replaced, err := storage.SetTOTP(t.Context(), user.ID, "other", []string{"other"})
+	require.NoError(t, err)
+	require.False(t, replaced, "an enabled second factor is never replaced")
+	kept, err := storage.GetUserByID(t.Context(), user.ID)
+	require.NoError(t, err)
+	require.Equal(t, enabled, kept)
 
 	require.NoError(t, storage.ClearTOTP(t.Context(), user.ID))
 	cleared, err := storage.GetUserByID(t.Context(), user.ID)
@@ -176,7 +183,7 @@ func TestMemoryStorageConsumeBackupCode(t *testing.T) {
 	storage := NewMemoryStorage()
 	user := newMemoryUser("ada", "")
 	require.NoError(t, storage.CreateUser(t.Context(), user))
-	require.NoError(t, storage.SetTOTP(t.Context(), user.ID, "secret", []string{"first", "second"}))
+	requireSetTOTP(t, storage, user.ID, "secret", []string{"first", "second"})
 
 	consumed, err := storage.ConsumeBackupCode(t.Context(), user.ID, "first")
 	require.NoError(t, err)
@@ -197,7 +204,7 @@ func TestMemoryStorageConsumeBackupCodeOnceUnderRace(t *testing.T) {
 	storage := NewMemoryStorage()
 	user := newMemoryUser("ada", "")
 	require.NoError(t, storage.CreateUser(t.Context(), user))
-	require.NoError(t, storage.SetTOTP(t.Context(), user.ID, "secret", []string{"only"}))
+	requireSetTOTP(t, storage, user.ID, "secret", []string{"only"})
 
 	var consumedCount atomic.Int32
 	var waitGroup sync.WaitGroup
@@ -231,7 +238,10 @@ func TestMemoryStorageUnknownUser(t *testing.T) {
 			_, err := storage.ConsumeBackupCode(t.Context(), unknown, "hash")
 			return err
 		},
-		"SetTOTP":   func() error { return storage.SetTOTP(t.Context(), unknown, "secret", nil) },
+		"SetTOTP": func() error {
+			_, err := storage.SetTOTP(t.Context(), unknown, "secret", nil)
+			return err
+		},
 		"ClearTOTP": func() error { return storage.ClearTOTP(t.Context(), unknown) },
 	}
 	for name, operation := range operations {

@@ -62,8 +62,11 @@ type Storage interface {
 	// ConsumeBackupCode removes hash from BackupCodeHashes and reports whether it was there; of two concurrent
 	// calls with the same hash at most one returns true.
 	ConsumeBackupCode(ctx context.Context, id uuid.UUID, hash string) (bool, error)
-	// SetTOTP enables TOTP with secret and backupCodeHashes and resets the attempt counter.
-	SetTOTP(ctx context.Context, id uuid.UUID, secret string, backupCodeHashes []string) error
+	// SetTOTP enables TOTP with secret and backupCodeHashes and resets the attempt counter, but only while TOTP is
+	// disabled: it reports whether it did, and changes nothing for a user who has TOTP enabled, so a concurrent
+	// enrollment never replaces the second factor another one just set. Check and write are one atomic step, e.g.
+	// UPDATE ... SET totp_enabled = true, ... WHERE id = $1 AND NOT totp_enabled.
+	SetTOTP(ctx context.Context, id uuid.UUID, secret string, backupCodeHashes []string) (bool, error)
 	// ClearTOTP disables TOTP, clears the secret and the backup codes and resets the attempt counter.
 	ClearTOTP(ctx context.Context, id uuid.UUID) error
 }
