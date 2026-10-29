@@ -377,6 +377,28 @@ func TestResolver(t *testing.T) {
 	}
 }
 
+func TestResolverFailureKeepsAContextErrorDetectable(t *testing.T) {
+	var outcomes []auth.Outcome
+	authenticator, err := apikey.New(&apikey.Options{
+		Resolver: func(ctx context.Context, _ string) (*auth.Identity, error) {
+			return nil, fmt.Errorf("query keys: %w", ctx.Err())
+		},
+		Observer: func(_ context.Context, outcome auth.Outcome) { outcomes = append(outcomes, outcome) },
+	})
+	require.NoError(t, err)
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	request := httptest.NewRequestWithContext(cancelled, http.MethodGet, "/", nil)
+	request.Header.Set("X-API-Key", "issued-key-0123456789")
+
+	recorder, _ := serve(authenticator, request)
+
+	require.Equal(t, http.StatusInternalServerError, recorder.Code)
+	require.Len(t, outcomes, 1)
+	require.ErrorIs(t, outcomes[0].Err, context.Canceled, "a client that went away stays distinguishable from a failing resolver")
+	require.Equal(t, auth.ResultError, outcomes[0].Result)
+}
+
 func TestResolverReceivesTrimmedKeyAndRequestContext(t *testing.T) {
 	var gotKey string
 	var gotValue any

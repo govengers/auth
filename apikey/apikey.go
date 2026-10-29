@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/internal/failure"
 )
 
@@ -32,7 +33,8 @@ type Key struct {
 // Resolver resolves application-issued keys. Unknown or revoked: return an error matching
 // auth.ErrUnauthenticated. A returned identity with empty Provider gets "apikey"; it carries its own
 // Permissions (e.g. a stored read_only level becomes "*:read"). Any other error is
-// answered as a 500, whatever its kind. It must be safe for concurrent use.
+// answered as a 500, whatever its kind; only context.Canceled and context.DeadlineExceeded stay
+// detectable in it. It must be safe for concurrent use.
 type Resolver func(ctx context.Context, key string) (*auth.Identity, error)
 
 // Options configure an Authenticator.
@@ -166,7 +168,8 @@ func (a *Authenticator) authenticate(ctx context.Context, key string) (*auth.Ide
 	case errors.Is(err, auth.ErrUnauthenticated):
 		return nil, invalidKey(err)
 	case err != nil:
-		return nil, fmt.Errorf("apikey: resolve key: %v", err) //nolint:errorlint // %v keeps the Resolver's error kind from picking the response status
+		// The chain is dropped so the Resolver's error kind cannot pick the response status.
+		return nil, dependency.Error("apikey: resolve key", err)
 	case resolved == nil:
 		return nil, invalidKey(nil)
 	}
