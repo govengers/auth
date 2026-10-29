@@ -22,8 +22,7 @@ import (
 const defaultHTTPTimeout = 10 * time.Second
 
 var (
-	namePattern       = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
-	pathPrefixPattern = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
+	namePattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 	// reservedNames are other providers' Identity.Provider or Outcome.Provider values.
 	reservedNames = []string{"password", "github", "apikey", "session", "jwt"}
 	defaultScopes = []string{gooidc.ScopeOpenID, "profile", "email"}
@@ -36,7 +35,7 @@ type Options struct {
 	ClientID, ClientSecret       string          // required (confidential client)
 	Scopes                       []string        // default ["openid","profile","email"]; "openid" added first when missing; order kept, duplicates dropped
 	ExternalURL                  string          // required: absolute public base URL; redirect URI = ExternalURL + PathPrefix + "/callback"
-	PathPrefix                   string          // default "/auth/oidc/" + Name
+	PathPrefix                   string          // default "/auth/oidc/" + Name; segments of A-Z a-z 0-9 . _ ~ -, no trailing "/", no "." or ".." segment
 	PostLogoutURL                string          // default ExternalURL + "/"; path or absolute http(s) URL, no fragment; a path is made absolute with ExternalURL
 	ErrorURL                     string          // optional: callback failures (refusals and code=internal) redirect to ErrorURL?code=<code> instead of answering JSON; same rules as PostLogoutURL
 	ClaimMapper                  ClaimMapper     // default DefaultClaimMapper
@@ -210,7 +209,7 @@ func withURLs(resolved Options) (Options, error) {
 	if resolved.PathPrefix == "" {
 		resolved.PathPrefix = "/auth/oidc/" + resolved.Name
 	}
-	if !pathPrefixPattern.MatchString(resolved.PathPrefix) {
+	if !redirect.IsPathPrefix(resolved.PathPrefix) {
 		return Options{}, errors.New("path prefix must start with \"/\", have no trailing \"/\" and only unreserved URL characters")
 	}
 	if resolved.PostLogoutURL == "" {

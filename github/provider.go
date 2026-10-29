@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -29,9 +28,6 @@ const (
 	defaultTimeout      = 10 * time.Second
 )
 
-// pathPrefixPattern keeps the prefix a plain path: no trailing "/", no query, no ServeMux wildcards.
-var pathPrefixPattern = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
-
 // Options configure a Provider.
 type Options struct {
 	ClientID, ClientSecret string          // required: the GitHub OAuth app
@@ -40,7 +36,7 @@ type Options struct {
 	TokenURL               string          // default "https://github.com/login/oauth/access_token"
 	APIURL                 string          // default "https://api.github.com"; GHE e.g. https://ghe.example.com/api/v3
 	ExternalURL            string          // required: absolute public base URL; redirect URI = ExternalURL + PathPrefix + "/callback"
-	PathPrefix             string          // default "/auth/github"
+	PathPrefix             string          // default "/auth/github"; segments of A-Z a-z 0-9 . _ ~ -, no trailing "/", no "." or ".." segment
 	PostLogoutURL          string          // default ExternalURL + "/"; path or absolute http(s) URL, no fragment; a path is made absolute with ExternalURL
 	ErrorURL               string          // optional: callback failures (refusals and code=internal) redirect to ErrorURL?code=<code> instead of answering JSON; same rules as PostLogoutURL
 	AllowedTeams           []string        // required, at least one, "org/team-slug", case-insensitive
@@ -130,7 +126,7 @@ func withURLs(options Options) (Options, error) {
 			return Options{}, fmt.Errorf("%s must be an absolute https URL without user info (http only on a loopback host)", endpoint.field)
 		}
 	}
-	if !pathPrefixPattern.MatchString(options.PathPrefix) {
+	if !redirect.IsPathPrefix(options.PathPrefix) {
 		return Options{}, errors.New("PathPrefix must be a path like \"/auth/github\" without a trailing \"/\"")
 	}
 	var err error

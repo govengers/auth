@@ -295,3 +295,33 @@ func TestAbsoluteTarget(t *testing.T) {
 		})
 	}
 }
+
+func TestIsPathPrefix(t *testing.T) {
+	testCases := []struct {
+		prefix string
+		want   bool
+	}{
+		{prefix: "/auth/password", want: true},
+		{prefix: "/a", want: true},
+		{prefix: "/api/v1.2/auth~x_y-z", want: true},
+		{prefix: "/auth/...", want: true},
+		{prefix: "", want: false},
+		{prefix: "/", want: false},
+		{prefix: "auth", want: false},
+		{prefix: "/auth/", want: false},
+		{prefix: "/auth//password", want: false},
+		{prefix: "/auth/./password", want: false},
+		{prefix: "/auth/..", want: false},
+		{prefix: "/auth/{provider}", want: false},
+		{prefix: "/auth/pass word", want: false},
+		{prefix: "/auth?x=1", want: false},
+		{prefix: "/auth#x", want: false},
+		{prefix: "/auth/%41", want: false},
+		{prefix: "/auth/ä", want: false},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.prefix, func(t *testing.T) {
+			require.Equal(t, testCase.want, IsPathPrefix(testCase.prefix))
+		})
+	}
+}

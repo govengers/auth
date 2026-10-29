@@ -1,6 +1,7 @@
-// Package redirect validates where the library may send a browser or a credential: same-origin return
-// paths, login locations carrying a return path, configured external URLs and the endpoints of identity
-// providers. Every function is safe for concurrent use; all but To are pure.
+// Package redirect validates where the library may send a browser or a credential and where it serves
+// routes: same-origin return paths, login locations carrying a return path, configured external URLs and
+// redirect targets, the endpoints of identity providers and route path prefixes. Every function is safe
+// for concurrent use; all but To are pure.
 package redirect
 
 import (
@@ -8,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
+	"regexp"
 	"strings"
 	"unicode"
 )
@@ -16,6 +19,10 @@ import (
 const ReturnParameter = "return_to"
 
 const maximumReturnPathLength = 2048
+
+// pathPrefixPattern is "/"-separated segments of unreserved URL characters: no trailing "/", no query, no
+// ServeMux wildcard.
+var pathPrefixPattern = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
 
 // SafeReturnPath accepts only same-origin relative paths: starts with "/", second byte not "/" or "\",
 // no control characters or "\" anywhere, url.Parse succeeds with empty Scheme, Host and Opaque, <= 2048 bytes.
@@ -92,6 +99,13 @@ func AbsoluteTarget(raw, externalURL string) (string, error) {
 		}
 	}
 	return "", errors.New("must be a path starting with \"/\" or an absolute http(s) URL, without a fragment")
+}
+
+// IsPathPrefix reports whether prefix can prefix a provider's routes: "/"-separated segments of unreserved
+// URL characters (A-Z a-z 0-9 . _ ~ -), no trailing "/", and no "." or ".." segment that path cleaning
+// would remove, so the routes are neither ServeMux wildcards nor unreachable.
+func IsPathPrefix(prefix string) bool {
+	return pathPrefixPattern.MatchString(prefix) && path.Clean(prefix) == prefix
 }
 
 // IsTarget reports whether raw is a valid redirect target: a same-origin path (SafeReturnPath) or an
