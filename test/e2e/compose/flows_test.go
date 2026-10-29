@@ -20,7 +20,7 @@ func TestAnAnonymousBrowserIsSentThroughTheIssuerWithPKCEStateAndNonce(t *testin
 
 	toIssuer := person.get(toLogin.location, nil)
 	require.Equal(t, http.StatusFound, toIssuer.status)
-	require.True(t, strings.HasPrefix(toIssuer.location, issuerURL+"/"), toIssuer.location)
+	require.True(t, strings.HasPrefix(toIssuer.location, issuerURL+"/authorize?"), toIssuer.location)
 	query := queryOf(t, toIssuer.location)
 	require.Equal(t, "S256", query.Get("code_challenge_method"))
 	require.NotEmpty(t, query.Get("code_challenge"))
@@ -62,7 +62,7 @@ func TestAfterLogoutTheAppRedirectsToTheLoginAgain(t *testing.T) {
 
 	toIssuer := person.get(appURL+"/auth/oidc/oidc/logout", nil)
 	require.Equal(t, http.StatusFound, toIssuer.status)
-	require.True(t, strings.HasPrefix(toIssuer.location, issuerURL+"/"), toIssuer.location)
+	require.True(t, strings.HasPrefix(toIssuer.location, issuerURL+"/end_session?"), toIssuer.location)
 	require.NotEmpty(t, queryOf(t, toIssuer.location).Get("id_token_hint"))
 	backToApp := person.get(toIssuer.location, nil)
 	require.Equal(t, http.StatusFound, backToApp.status)
