@@ -15,6 +15,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/internal/tokenendpoint"
 	"github.com/govengers/auth/session"
 )
@@ -155,7 +156,7 @@ func (p *Provider) getJSON(ctx context.Context, client *http.Client, path string
 	request.Header.Set("X-GitHub-Api-Version", apiVersion)
 	response, err := client.Do(request)
 	if err != nil {
-		return fmt.Errorf("github: GET %s: %w", path, err)
+		return dependency.Error("github: GET "+path, err)
 	}
 	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
 	if response.StatusCode == http.StatusUnauthorized {
@@ -190,7 +191,7 @@ func (p *Provider) revokeToken(ctx context.Context, token *oauth2.Token) error {
 	request.Header.Set("X-GitHub-Api-Version", apiVersion)
 	response, err := p.options.HTTPClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("github: revoke token: %w", err)
+		return dependency.Error("github: revoke token", err)
 	}
 	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
 	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusOK {

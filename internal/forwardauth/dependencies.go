@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -13,6 +12,7 @@ import (
 	wideevent "github.com/mxcd/go-wide-event-logger"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/session"
 )
 
@@ -52,8 +52,8 @@ func NewDependencies(options *DependenciesOptions) (*Dependencies, error) {
 
 // HTTPClient returns a client with the 10 s default timeout whose calls are recorded as dependency name
 // (operation: the method), under http.<name> on the wide event. A transport error or a 5xx is a failure;
-// the recorded error is the transport's reduced by transportFailure: no URL, whose query may carry
-// personal data, and no byte of a malformed answer [LOG-009]. The caller gets the error unchanged.
+// the recorded error is the transport's reduced by dependency.TransportFailure: no URL, whose query may
+// carry personal data, and no byte of a malformed answer [LOG-009]. The caller gets the error unchanged.
 func (d *Dependencies) HTTPClient(name string) *http.Client {
 	return &http.Client{Timeout: defaultHTTPTimeout, Transport: &recordingTransport{dependencies: d, name: name}}
 }
@@ -99,7 +99,7 @@ func (t *recordingTransport) RoundTrip(request *http.Request) (*http.Response, e
 		duration: time.Since(start), failed: err != nil,
 	}
 	if err != nil {
-		call.err = transportFailure(err)
+		call.err = dependency.TransportFailure(err)
 	}
 	if response != nil {
 		call.status = response.StatusCode
@@ -107,26 +107,6 @@ func (t *recordingTransport) RoundTrip(request *http.Request) (*http.Response, e
 	}
 	t.dependencies.record(request.Context(), call)
 	return response, err
-}
-
-// transportFailure reduces a transport error to what is safe to record: the text of a malformed answer
-// repeats the server's bytes (a header line, a status line), which may be personal data [LOG-009]. A
-// cancelled or expired context and a dial error are kept; anything else is named by the type of its
-// innermost error.
-func transportFailure(err error) error {
-	var dialError *net.OpError
-	switch {
-	case errors.Is(err, context.Canceled):
-		return context.Canceled
-	case errors.Is(err, context.DeadlineExceeded):
-		return context.DeadlineExceeded
-	case errors.As(err, &dialError) && dialError.Op == "dial":
-		return dialError
-	}
-	for errors.Unwrap(err) != nil {
-		err = errors.Unwrap(err)
-	}
-	return fmt.Errorf("transport failure (%T)", err)
 }
 
 type recordingBackend struct {

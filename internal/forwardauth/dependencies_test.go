@@ -3,8 +3,6 @@ package forwardauth
 import (
 	"bufio"
 	"context"
-	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -177,15 +175,6 @@ func TestTheRecordedTransportErrorRepeatsNothingTheServerSent(t *testing.T) {
 			require.NotContains(t, oidc["error"], "alice")
 		})
 	}
-}
-
-func TestTheRecordedTransportErrorKeepsCancellation(t *testing.T) {
-	for _, contextError := range []error{context.Canceled, context.DeadlineExceeded} {
-		require.ErrorIs(t, transportFailure(fmt.Errorf("net/http: %w", contextError)), contextError)
-	}
-	dial := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}
-	require.Equal(t, dial, transportFailure(fmt.Errorf("wrapped: %w", dial)), "a dial error names nothing the server sent")
-	require.EqualError(t, transportFailure(fmt.Errorf("read: %w", errors.New("alice@example.com"))), "transport failure (*errors.errorString)")
 }
 
 // failingBackend fails every operation.

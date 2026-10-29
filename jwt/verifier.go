@@ -256,11 +256,7 @@ func fetchKeySet(ctx context.Context, httpClient *http.Client, jwksURL string) (
 	location := redactedURL(request.URL)
 	response, err := httpClient.Do(request)
 	if err != nil {
-		var urlError *url.Error
-		if errors.As(err, &urlError) {
-			urlError.URL = location
-		}
-		return nil, fmt.Errorf("fetch JWKS: %w", err)
+		return nil, dependency.Error("fetch JWKS", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {

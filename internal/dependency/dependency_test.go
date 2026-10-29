@@ -3,10 +3,19 @@ package dependency
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+const canary = "alice@example.com"
 
 // thirdPartyError stands for a dependency's own error type.
 type thirdPartyError struct{ cause error }
@@ -40,5 +49,88 @@ func TestErrorKeepsContextErrors(t *testing.T) {
 			var dependencyFailure *thirdPartyError
 			require.False(t, errors.As(err, &dependencyFailure), "only the standard library sentinel is wrapped")
 		})
+	}
+}
+
+// An HTTP call's error names neither the URL's path and query nor anything the server sent, also when a
+// dependency wrapped it; a cancelled or expired context stays detectable.
+func TestErrorReducesAnHTTPCall(t *testing.T) {
+	malformed := httptest.NewServer(rawAnswer("HTTP/1.1 200 OK\r\nX-User: " + canary + "\x00\r\n\r\n"))
+	t.Cleanup(malformed.Close)
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	}))
+	t.Cleanup(slow.Close)
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+	testCases := []struct {
+		name      string
+		server    string
+		cancelled bool
+		timeout   time.Duration
+		wantText  string
+		wantIs    error
+	}{
+		{name: "malformed answer", server: malformed.URL, wantText: "transport failure ("},
+		{name: "connection refused", server: closed.URL, wantText: "dial tcp " + closed.Listener.Addr().String() + ": connect: connection refused"},
+		{name: "cancelled", server: slow.URL, cancelled: true, wantText: "context canceled", wantIs: context.Canceled},
+		{name: "client timeout", server: slow.URL, timeout: 50 * time.Millisecond, wantText: "context deadline exceeded", wantIs: context.DeadlineExceeded},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			if testCase.cancelled {
+				cancel()
+			}
+			defer cancel()
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, testCase.server+"/teams?login="+canary+"&token=secret-query", nil)
+			require.NoError(t, err)
+			_, callError := (&http.Client{Timeout: testCase.timeout}).Do(request) //nolint:bodyclose // the call fails, there is no body
+			require.ErrorContains(t, callError, canary, "the call's own error repeats the URL")
+
+			for _, cause := range []error{callError, fmt.Errorf("client: get keys %s: %w", request.URL, callError)} {
+				err := Error("fetch teams", cause)
+
+				require.ErrorContains(t, err, `fetch teams: Get "`+testCase.server+`": `+testCase.wantText)
+				require.NotContains(t, err.Error(), canary)
+				require.NotContains(t, err.Error(), "secret")
+				require.NotContains(t, err.Error(), "/teams")
+				var urlError *url.Error
+				require.False(t, errors.As(err, &urlError), "the dependency's chain is dropped")
+				if testCase.wantIs != nil {
+					require.ErrorIs(t, err, testCase.wantIs)
+				}
+			}
+		})
+	}
+}
+
+func TestErrorOfAnUnparsableURL(t *testing.T) {
+	err := Error("fetch", &url.Error{Op: "parse", URL: "http://a b/%zz?token=secret", Err: url.EscapeError("%zz")})
+
+	require.EqualError(t, err, `fetch: parse "": transport failure (url.EscapeError)`)
+}
+
+func TestTransportFailure(t *testing.T) {
+	for _, contextError := range []error{context.Canceled, context.DeadlineExceeded} {
+		require.ErrorIs(t, TransportFailure(fmt.Errorf("net/http: %w", contextError)), contextError)
+	}
+	dial := TransportFailure(fmt.Errorf("wrapped: %w", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}))
+	require.EqualError(t, dial, "dial tcp: connect: connection refused", "a dial error names nothing the server sent")
+	var opError *net.OpError
+	require.False(t, errors.As(dial, &opError), "no dependency type")
+	require.EqualError(t, TransportFailure(&net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}), "timeout")
+	require.EqualError(t, TransportFailure(fmt.Errorf("read: %w", errors.New(canary))), "transport failure (*errors.errorString)")
+}
+
+// rawAnswer writes answer as the whole response and closes the connection.
+func rawAnswer(answer string) http.HandlerFunc {
+	return func(writer http.ResponseWriter, _ *http.Request) {
+		connection, _, err := http.NewResponseController(writer).Hijack()
+		if err != nil {
+			return
+		}
+		_, _ = connection.Write([]byte(answer)) // the client may already have given up
+		_ = connection.Close()                  // nothing to flush
 	}
 }
