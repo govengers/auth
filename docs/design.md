@@ -172,10 +172,14 @@ func ParsePermission(text string) (Permission, error)
 func (p Permission) Validate() error
 // String returns "<resource>:<access>".
 func (p Permission) String() string
-// Allows reports whether p grants access on resource: resource equal or p.Resource == AllResources, and
+// Grants reports whether p grants access on resource: resource equal or p.Resource == AllResources, and
 // AccessWrite includes AccessRead. Requiring AllResources needs a "*" permission. An invalid p, an empty or
-// invalid resource, or an access other than read/write allows nothing (fail closed).
-func (p Permission) Allows(resource string, access Access) bool
+// invalid resource, or an access other than read/write grants nothing (fail closed).
+// The only implementation of the matching rule: no other package copies it.
+func (p Permission) Grants(resource string, access Access) bool
+// Permits reports whether one of i.Permissions Grants access on resource. Permissions only: it ignores
+// Active and the Impersonator (callers decide those). Nil-safe: false for a nil identity.
+func (i *Identity) Permits(resource string, access Access) bool
 // MarshalText encodes the text form; an invalid permission is an error (an identity with one cannot be stored).
 func (p Permission) MarshalText() ([]byte, error)
 // UnmarshalText decodes with ParsePermission.
@@ -750,9 +754,10 @@ func HasUserID(id uuid.UUID) Check      // active and UserID == id; uuid.Nil nev
 func HasOIDCRole(role string) Check     // active and role in OIDCRoles
 func HasOIDCGroup(group string) Check   // active and group in Groups
 func HasGitHubTeam(team string) Check   // active and lower-case team in Teams
-// HasPermission: no identity: 401; inactive: 403 (Reason "inactive"); no p in identity.Permissions with
-// p.Allows(resource, access): 403 with Reason "missing permission <resource>:<access>". An empty or invalid
-// resource or an access other than read/write refuses everything (403, fail closed). The effective identity
+// HasPermission: no identity: 401; inactive: 403 (Reason "inactive"); !identity.Permits(resource, access):
+// 403 with Reason "missing permission <resource>:<access>". The matching rule is auth.Permission.Grants, never
+// re-implemented here; an empty or invalid resource or an access other than read/write therefore refuses
+// everything (403, fail closed). The effective identity
 // counts (wrap in Real to check the impersonator). Interactive users have no permissions unless an OnLogin
 // hook grants them: compose Any(HasRole(...), HasPermission(...)) or grant e.g. "*:write" at login.
 func HasPermission(resource string, access auth.Access) Check
@@ -1205,7 +1210,7 @@ func (s *Server) Run(ctx context.Context) error
 
 | Package | Must cover |
 |---|---|
-| `auth` | context round trip and nil cases; `Real`, `Clone` (deep, nil-safe, no aliasing); `ResponseFor` table (each kind, custom code, wrapped twice, unknown -> 500, message never contains Reason or cause); `WriteError` headers; `NewIdentityResponse` excludes Claims/Attributes/Data, omits Nil userId, nests impersonator, `roles` never null; `IdentityHandler` 200/401; `RegisterRoutes`; `Error.Error`/`Unwrap` with `errors.Is`; `ParsePermission` table (valid forms, charset, case, length 64/65, missing or second separator, unknown access) with `String` round trip; `Allows` table (read/write implication, wildcard, requiring `*`, fail closed on empty/invalid resource or access and on an invalid permission); JSON text form round trip and invalid permission errors on marshal and unmarshal; `AccessForMethod` table; `Clone` and `NewIdentityResponse` copy Permissions. Examples. (Implemented, 100 %.) |
+| `auth` | context round trip and nil cases; `Real`, `Clone` (deep, nil-safe, no aliasing); `ResponseFor` table (each kind, custom code, wrapped twice, unknown -> 500, message never contains Reason or cause); `WriteError` headers; `NewIdentityResponse` excludes Claims/Attributes/Data, omits Nil userId, nests impersonator, `roles` never null; `IdentityHandler` 200/401; `RegisterRoutes`; `Error.Error`/`Unwrap` with `errors.Is`; `ParsePermission` table (valid forms, charset, case, length 64/65, missing or second separator, unknown access) with `String` round trip; `Grants` table (read/write implication, wildcard, requiring `*`, fail closed on empty/invalid resource or access and on an invalid permission); `Permits` table (nil identity, no permissions, any-of match, invalid entries skipped, Active and Impersonator ignored); JSON text form round trip and invalid permission errors on marshal and unmarshal; `AccessForMethod` table; `Clone` and `NewIdentityResponse` copy Permissions. Examples. (Implemented, 100 %.) |
 | `session` | `ParseKey` table; `NewStore`/`NewGuard`/`NewMemoryBackend` validation, defaults, caller untouched; cookie attributes; `Start` revokes the previous session; `Open` missing/malformed; Put/Get/Pop; backend sees only hashed IDs and ciphertext; AAD (value copied to another key or session is absent); tampered value absent; `SaveIdentity`/`Identity` incl. absolute expiry via clock and authenticatedAt preserved; `End` idempotent; Put after revoke -> ErrSessionRevoked; memory backend through `backendtest.Run` incl. eviction order; Guard: pass-through with identity, API 401, UI 302 with return path (request URI, header, unsafe omitted), refresh after interval (clock) with real identity, impersonator refresh, refresher 401/403 end the session, transient error keeps identity and reports error, observer outcomes. |
 | `jwt` | signer validation (missing/bad PEM, < 2048 bits, PKCS#1 and PKCS#8, missing issuer); stable kid; Sign/Verify round trip of every Identity field; reserved claims not copied; `permissions` claim round trip in text form, `Sign` error on an invalid permission, `Verify` drops non-string and unparsable entries and keeps the rest; JWKS JSON (public only); verifier: wrong iss, wrong aud, expired and nbf (clock), bad signature, alg mismatch, unknown kid refetch + rate limit, refresh interval, wrong claim types without panic, middleware 401/200, observer; `NewVerifier` fails when JWKS is unreachable. |
 | `password` | port `util_test`, `legacy_password_test`, `validation_test`, `tfa_test`, `security_state_test`, `e2e_test`: Hash/Verify (limits, version, malformed); VerifyBcrypt; policy and identifier tables; login by username/email, disabled kinds, unknown user via dummy hash, wrong password; legacy upgrade CAS incl. concurrent change and degraded failure; content type, 64 KiB, unknown fields; registration off (404 on mux) and on (201, 409, 400s); TOTP challenge, verify, attempts exhaustion ends the pending session, backup code single use under `-race`, pending expiry, pending session revoked after success; Required enrollment flow; setup/enable/disable/status, impersonated session refused; logout + OnLogout; OnLogin refusal (403, no session) and failure (500); Refresh (deleted user, profile change, other fields kept); MemoryStorage contracts; outcomes per action. |

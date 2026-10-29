@@ -59,7 +59,9 @@ func ExampleParsePermission() {
 		return
 	}
 
-	fmt.Println(permission.Allows("builds", auth.AccessRead), permission.Allows("deployments", auth.AccessRead))
+	identity := &auth.Identity{Provider: "apikey", Subject: "ci", Active: true, Permissions: []auth.Permission{permission}}
+
+	fmt.Println(permission.Grants("builds", auth.AccessRead), identity.Permits("deployments", auth.AccessRead))
 	fmt.Println(auth.AccessForMethod(http.MethodDelete))
 	// Output:
 	// true false

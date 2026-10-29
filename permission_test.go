@@ -56,7 +56,7 @@ func TestPermissionValidate(t *testing.T) {
 	require.ErrorContains(t, Permission{Resource: "builds", Access: "delete"}.Validate(), "access")
 }
 
-func TestPermissionAllows(t *testing.T) {
+func TestPermissionGrants(t *testing.T) {
 	buildsRead := Permission{Resource: "builds", Access: AccessRead}
 	buildsWrite := Permission{Resource: "builds", Access: AccessWrite}
 	allRead := Permission{Resource: AllResources, Access: AccessRead}
@@ -83,12 +83,43 @@ func TestPermissionAllows(t *testing.T) {
 		{name: "invalid resource fails closed", permission: allWrite, resource: "Builds", access: AccessRead, want: false},
 		{name: "empty access fails closed", permission: allWrite, resource: "builds", access: "", want: false},
 		{name: "unknown access fails closed", permission: allWrite, resource: "builds", access: "admin", want: false},
-		{name: "invalid permission allows nothing", permission: Permission{Resource: "builds", Access: "admin"}, resource: "builds", access: AccessRead, want: false},
-		{name: "zero permission allows nothing", permission: Permission{}, resource: "builds", access: AccessRead, want: false},
+		{name: "invalid permission grants nothing", permission: Permission{Resource: "builds", Access: "admin"}, resource: "builds", access: AccessRead, want: false},
+		{name: "zero permission grants nothing", permission: Permission{}, resource: "builds", access: AccessRead, want: false},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			require.Equal(t, testCase.want, testCase.permission.Allows(testCase.resource, testCase.access))
+			require.Equal(t, testCase.want, testCase.permission.Grants(testCase.resource, testCase.access))
+		})
+	}
+}
+
+func TestIdentityPermits(t *testing.T) {
+	buildsRead := Permission{Resource: "builds", Access: AccessRead}
+	deploymentsWrite := Permission{Resource: "deployments", Access: AccessWrite}
+	allRead := Permission{Resource: AllResources, Access: AccessRead}
+
+	testCases := []struct {
+		name     string
+		identity *Identity
+		resource string
+		access   Access
+		want     bool
+	}{
+		{name: "nil identity", identity: nil, resource: "builds", access: AccessRead, want: false},
+		{name: "no permissions", identity: &Identity{Active: true}, resource: "builds", access: AccessRead, want: false},
+		{name: "matching permission", identity: &Identity{Permissions: []Permission{buildsRead}}, resource: "builds", access: AccessRead, want: true},
+		{name: "second permission matches", identity: &Identity{Permissions: []Permission{buildsRead, deploymentsWrite}}, resource: "deployments", access: AccessRead, want: true},
+		{name: "read does not grant write", identity: &Identity{Permissions: []Permission{buildsRead}}, resource: "builds", access: AccessWrite, want: false},
+		{name: "wildcard read", identity: &Identity{Permissions: []Permission{allRead}}, resource: "deployments", access: AccessRead, want: true},
+		{name: "wildcard read does not grant write", identity: &Identity{Permissions: []Permission{allRead, buildsRead}}, resource: "deployments", access: AccessWrite, want: false},
+		{name: "invalid permission skipped", identity: &Identity{Permissions: []Permission{{Resource: "builds", Access: "admin"}, buildsRead}}, resource: "builds", access: AccessRead, want: true},
+		{name: "unknown access fails closed", identity: &Identity{Permissions: []Permission{deploymentsWrite}}, resource: "deployments", access: "delete", want: false},
+		{name: "inactive identity still permits (callers check Active)", identity: &Identity{Active: false, Permissions: []Permission{buildsRead}}, resource: "builds", access: AccessRead, want: true},
+		{name: "impersonator permissions do not count", identity: &Identity{Impersonator: &Identity{Permissions: []Permission{allRead}}}, resource: "builds", access: AccessRead, want: false},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			require.Equal(t, testCase.want, testCase.identity.Permits(testCase.resource, testCase.access))
 		})
 	}
 }
