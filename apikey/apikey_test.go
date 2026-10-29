@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -18,6 +19,8 @@ const (
 	buildSecret = "build-secret-0123456789"
 	adminSecret = "admin-secret-0123456789"
 )
+
+var buildPermissions = []auth.Permission{{Resource: "builds", Access: auth.AccessWrite}, {Resource: auth.AllResources, Access: auth.AccessRead}}
 
 type contextKey struct{}
 
@@ -55,7 +58,7 @@ func serve(authenticator *apikey.Authenticator, request *http.Request) (*httptes
 func newStatic(t *testing.T, options apikey.Options) *apikey.Authenticator {
 	t.Helper()
 	options.Keys = []apikey.Key{
-		{Name: "build", Secret: buildSecret},
+		{Name: "build", Secret: buildSecret, Permissions: slices.Clone(buildPermissions)},
 		{Name: "admin", Secret: adminSecret, Roles: []string{auth.RoleAdmin}},
 	}
 	authenticator, err := apikey.New(&options)
@@ -105,6 +108,9 @@ func TestNew(t *testing.T) {
 		{name: "secret with trailing space", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret + " "}}}, wantErr: "leading or trailing whitespace"},
 		{name: "duplicate name", options: &apikey.Options{Keys: []apikey.Key{build, {Name: "build", Secret: adminSecret}}}, wantErr: "key 1: name or secret is used by another key"},
 		{name: "duplicate secret", options: &apikey.Options{Keys: []apikey.Key{build, {Name: "other", Secret: buildSecret}}}, wantErr: "key 1: name or secret is used by another key"},
+		{name: "valid permissions", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret, Permissions: buildPermissions}}}},
+		{name: "invalid permission access", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret, Permissions: []auth.Permission{{Resource: "builds", Access: "admin"}}}}}, wantErr: "key 0: permission"},
+		{name: "invalid permission resource", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret, Permissions: []auth.Permission{{Access: auth.AccessRead}}}}}, wantErr: "key 0: permission"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -133,31 +139,34 @@ func TestNewErrorNeverContainsSecret(t *testing.T) {
 }
 
 func TestNewLeavesOptionsAlone(t *testing.T) {
-	options := &apikey.Options{Keys: []apikey.Key{{Name: "admin", Secret: adminSecret, Roles: []string{auth.RoleAdmin}}}}
+	options := &apikey.Options{Keys: []apikey.Key{{Name: "admin", Secret: adminSecret, Roles: []string{auth.RoleAdmin}, Permissions: slices.Clone(buildPermissions)}}}
 
 	authenticator, err := apikey.New(options)
 	require.NoError(t, err)
 	options.Keys[0].Roles[0] = "tampered"
+	options.Keys[0].Permissions[0] = auth.Permission{Resource: "tampered", Access: auth.AccessWrite}
 	options.Keys[0].Name = "tampered"
 
 	require.Empty(t, options.HeaderName, "the default must not be written back")
 	_, observed := serve(authenticator, requestWith(t, headerValues{"X-API-Key": adminSecret}))
 	require.Equal(t, "admin", observed.identity.Subject)
 	require.Equal(t, []string{auth.RoleAdmin}, observed.identity.Roles)
+	require.Equal(t, buildPermissions, observed.identity.Permissions)
 }
 
 func TestMiddlewareAuthenticatesStaticKeys(t *testing.T) {
 	testCases := []struct {
-		name        string
-		headers     headerValues
-		wantSubject string
-		wantRoles   []string
+		name            string
+		headers         headerValues
+		wantSubject     string
+		wantRoles       []string
+		wantPermissions []auth.Permission
 	}{
-		{name: "X-API-Key", headers: headerValues{"X-API-Key": buildSecret}, wantSubject: "build"},
+		{name: "X-API-Key", headers: headerValues{"X-API-Key": buildSecret}, wantSubject: "build", wantPermissions: buildPermissions},
 		{name: "bearer", headers: headerValues{"Authorization": "Bearer " + adminSecret}, wantSubject: "admin", wantRoles: []string{auth.RoleAdmin}},
-		{name: "whitespace around the header value", headers: headerValues{"X-API-Key": "  " + buildSecret + "\t"}, wantSubject: "build"},
-		{name: "extra whitespace after bearer", headers: headerValues{"Authorization": "Bearer   " + buildSecret + " "}, wantSubject: "build"},
-		{name: "header wins over bearer", headers: headerValues{"X-API-Key": buildSecret, "Authorization": "Bearer " + adminSecret}, wantSubject: "build"},
+		{name: "whitespace around the header value", headers: headerValues{"X-API-Key": "  " + buildSecret + "\t"}, wantSubject: "build", wantPermissions: buildPermissions},
+		{name: "extra whitespace after bearer", headers: headerValues{"Authorization": "Bearer   " + buildSecret + " "}, wantSubject: "build", wantPermissions: buildPermissions},
+		{name: "header wins over bearer", headers: headerValues{"X-API-Key": buildSecret, "Authorization": "Bearer " + adminSecret}, wantSubject: "build", wantPermissions: buildPermissions},
 		{name: "blank header falls back to bearer", headers: headerValues{"X-API-Key": "  ", "Authorization": "Bearer " + adminSecret}, wantSubject: "admin", wantRoles: []string{auth.RoleAdmin}},
 	}
 	for _, testCase := range testCases {
@@ -167,11 +176,12 @@ func TestMiddlewareAuthenticatesStaticKeys(t *testing.T) {
 			require.Equal(t, http.StatusNoContent, recorder.Code)
 			require.True(t, observed.called)
 			require.Equal(t, &auth.Identity{
-				Provider: "apikey",
-				Subject:  testCase.wantSubject,
-				Username: testCase.wantSubject,
-				Active:   true,
-				Roles:    testCase.wantRoles,
+				Provider:    "apikey",
+				Subject:     testCase.wantSubject,
+				Username:    testCase.wantSubject,
+				Active:      true,
+				Roles:       testCase.wantRoles,
+				Permissions: testCase.wantPermissions,
 			}, observed.identity)
 		})
 	}
@@ -246,6 +256,21 @@ func TestMiddlewarePassesRequestsWithoutKey(t *testing.T) {
 			require.Nil(t, observed.identity)
 			require.False(t, resolved)
 		})
+	}
+}
+
+func TestMiddlewareGivesEveryRequestItsOwnPermissions(t *testing.T) {
+	authenticator := newStatic(t, apikey.Options{})
+	handler := authenticator.Middleware()(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		identity := auth.IdentityFrom(request.Context())
+		_, _ = fmt.Fprint(writer, identity.Permissions)
+		identity.Permissions[0] = auth.Permission{Resource: "tampered", Access: auth.AccessWrite}
+	}))
+
+	for range 2 {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, requestWith(t, headerValues{"X-API-Key": buildSecret}))
+		require.Equal(t, "[builds:write *:read]", recorder.Body.String())
 	}
 }
 
@@ -368,15 +393,19 @@ func TestResolverReceivesTrimmedKeyAndRequestContext(t *testing.T) {
 }
 
 func TestResolverIdentityIsCopied(t *testing.T) {
-	shared := &auth.Identity{Subject: "ci", Roles: []string{"reader"}}
+	readAll := []auth.Permission{{Resource: auth.AllResources, Access: auth.AccessRead}}
+	shared := &auth.Identity{Subject: "ci", Roles: []string{"reader"}, Permissions: slices.Clone(readAll)}
 	authenticator := newResolving(t, func(context.Context, string) (*auth.Identity, error) { return shared, nil })
 
 	_, observed := serve(authenticator, requestWith(t, headerValues{"X-API-Key": "issued-key-0123456789"}))
+	require.Equal(t, readAll, observed.identity.Permissions)
 	observed.identity.Roles[0] = "tampered"
+	observed.identity.Permissions[0] = auth.Permission{Resource: "tampered", Access: auth.AccessWrite}
 
 	require.NotSame(t, shared, observed.identity)
 	require.Empty(t, shared.Provider)
 	require.Equal(t, []string{"reader"}, shared.Roles)
+	require.Equal(t, readAll, shared.Permissions)
 }
 
 func TestResolverIsOnlyAskedAboutUnknownKeys(t *testing.T) {

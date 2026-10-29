@@ -22,13 +22,15 @@ const (
 
 // Key is one statically configured API key.
 type Key struct {
-	Name   string   // required, unique, non-empty; becomes Identity.Subject and Username
-	Secret string   // required, at least 16 bytes, no surrounding whitespace; SHA-256 pre-hashed at construction
-	Roles  []string // optional, e.g. auth.RoleAdmin
+	Name        string            // required, unique, non-empty; becomes Identity.Subject and Username
+	Secret      string            // required, at least 16 bytes, no surrounding whitespace; SHA-256 pre-hashed at construction
+	Roles       []string          // optional, e.g. auth.RoleAdmin
+	Permissions []auth.Permission // optional, each valid (auth.Permission.Validate), e.g. "builds:write"; every identity of the key gets a copy
 }
 
 // Resolver resolves application-issued keys. Unknown or revoked: return an error matching
-// auth.ErrUnauthenticated. A returned identity with empty Provider gets "apikey". Any other error is
+// auth.ErrUnauthenticated. A returned identity with empty Provider gets "apikey"; it carries its own
+// Permissions (e.g. a stored read_only level becomes "*:read"). Any other error is
 // answered as a 500, whatever its kind. It must be safe for concurrent use.
 type Resolver func(ctx context.Context, key string) (*auth.Identity, error)
 
@@ -43,8 +45,9 @@ type Options struct {
 type staticKey struct {
 	hash [sha256.Size]byte
 	name string
-	// roles belong to the Authenticator; every identity gets its own copy.
-	roles []string
+	// roles and permissions belong to the Authenticator; every identity gets its own copy.
+	roles       []string
+	permissions []auth.Permission
 }
 
 // Authenticator turns a presented API key into an auth.Identity. It is safe for concurrent use.
@@ -88,7 +91,7 @@ func newStaticKeys(keys []Key) ([]staticKey, error) {
 		if slices.ContainsFunc(static, func(other staticKey) bool { return other.name == key.Name || other.hash == hash }) {
 			return nil, fmt.Errorf("apikey: key %d: name or secret is used by another key", index)
 		}
-		static = append(static, staticKey{hash: hash, name: key.Name, roles: slices.Clone(key.Roles)})
+		static = append(static, staticKey{hash: hash, name: key.Name, roles: slices.Clone(key.Roles), permissions: slices.Clone(key.Permissions)})
 	}
 	return static, nil
 }
@@ -101,6 +104,11 @@ func validateKey(key Key) error {
 		return fmt.Errorf("key secret is shorter than %d bytes", minimumSecretSize)
 	case strings.TrimSpace(key.Secret) != key.Secret:
 		return errors.New("key secret has leading or trailing whitespace")
+	}
+	for _, permission := range key.Permissions {
+		if err := permission.Validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -181,11 +189,12 @@ func (a *Authenticator) findStatic(key string) *staticKey {
 
 func (k *staticKey) identity() *auth.Identity {
 	return &auth.Identity{
-		Provider: provider,
-		Subject:  k.name,
-		Username: k.name,
-		Active:   true,
-		Roles:    slices.Clone(k.roles),
+		Provider:    provider,
+		Subject:     k.name,
+		Username:    k.name,
+		Active:      true,
+		Roles:       slices.Clone(k.roles),
+		Permissions: slices.Clone(k.permissions),
 	}
 }
 

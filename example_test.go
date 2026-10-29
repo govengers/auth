@@ -51,3 +51,17 @@ func ExampleIdentity_Clone() {
 	fmt.Println(identity.Roles, promoted.Roles)
 	// Output: [reader] [reader admin]
 }
+
+func ExampleParsePermission() {
+	permission, err := auth.ParsePermission("builds:write")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	fmt.Println(permission.Allows("builds", auth.AccessRead), permission.Allows("deployments", auth.AccessRead))
+	fmt.Println(auth.AccessForMethod(http.MethodDelete))
+	// Output:
+	// true false
+	// write
+}

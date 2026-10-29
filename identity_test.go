@@ -22,6 +22,7 @@ func fullIdentity() *Identity {
 		OIDCClientRoles: []string{"client-role"},
 		Groups:          []string{"/engineering"},
 		Teams:           []string{"org/team"},
+		Permissions:     []Permission{{Resource: "builds", Access: AccessWrite}, {Resource: AllResources, Access: AccessRead}},
 		Attributes:      map[string][]string{"department": {"research"}},
 		Claims:          map[string]any{"sub": "subject-1"},
 		Data:            map[string]any{"tenant": "a"},
@@ -67,6 +68,7 @@ func TestIdentityClone(t *testing.T) {
 	clone.OIDCClientRoles[0] = "changed"
 	clone.Groups[0] = "changed"
 	clone.Teams[0] = "changed"
+	clone.Permissions[0] = Permission{Resource: "changed", Access: AccessRead}
 	clone.Attributes["department"][0] = "changed"
 	clone.Attributes["added"] = []string{"x"}
 	clone.Claims["added"] = "x"
@@ -84,6 +86,7 @@ func TestIdentityCloneKeepsNilFields(t *testing.T) {
 
 	require.Equal(t, &Identity{Subject: "s"}, clone)
 	require.Nil(t, clone.Roles)
+	require.Nil(t, clone.Permissions)
 	require.Nil(t, clone.Attributes)
 	require.Nil(t, clone.Claims)
 	require.Nil(t, clone.Impersonator)

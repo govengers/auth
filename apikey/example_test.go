@@ -12,7 +12,12 @@ import (
 
 func ExampleNew() {
 	authenticator, err := apikey.New(&apikey.Options{
-		Keys: []apikey.Key{{Name: "ci", Secret: "ci-secret-0123456789", Roles: []string{auth.RoleAdmin}}},
+		Keys: []apikey.Key{{
+			Name:        "ci",
+			Secret:      "ci-secret-0123456789",
+			Roles:       []string{auth.RoleAdmin},
+			Permissions: []auth.Permission{{Resource: "builds", Access: auth.AccessWrite}},
+		}},
 	})
 	if err != nil {
 		fmt.Println(err)
@@ -20,7 +25,7 @@ func ExampleNew() {
 	}
 	protected := authenticator.Middleware()(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		identity := auth.IdentityFrom(request.Context())
-		fmt.Fprintln(writer, identity.Subject, identity.Roles)
+		fmt.Fprintln(writer, identity.Subject, identity.Roles, identity.Permissions)
 	}))
 
 	for _, key := range []string{"ci-secret-0123456789", "guess"} {
@@ -31,6 +36,6 @@ func ExampleNew() {
 		fmt.Print(recorder.Code, " ", recorder.Body.String())
 	}
 	// Output:
-	// 200 ci [admin]
+	// 200 ci [admin] [builds:write]
 	// 401 {"code":"invalid_api_key","message":"authentication required"}
 }
