@@ -404,7 +404,7 @@ func TestResolverReceivesTrimmedKeyAndRequestContext(t *testing.T) {
 	var gotValue any
 	authenticator := newResolving(t, func(ctx context.Context, key string) (*auth.Identity, error) {
 		gotKey, gotValue = key, ctx.Value(contextKey{})
-		return &auth.Identity{Subject: "ci"}, nil
+		return &auth.Identity{Subject: "ci", Active: true}, nil
 	})
 	request := httptest.NewRequestWithContext(context.WithValue(t.Context(), contextKey{}, "request-scoped"), http.MethodGet, "/", nil)
 	request.Header.Set("Authorization", "Bearer  issued-key ")
@@ -451,9 +451,9 @@ func TestObserver(t *testing.T) {
 	resolver := func(_ context.Context, key string) (*auth.Identity, error) {
 		switch key {
 		case "issued-key-0123456789":
-			return &auth.Identity{Subject: "issued"}, nil
+			return &auth.Identity{Subject: "issued", Active: true}, nil
 		case "revoked-key-0123456789":
-			return nil, auth.ErrUnauthenticated
+			return nil, fmt.Errorf("key revoked: %w", auth.ErrUnauthenticated)
 		}
 		return nil, errors.New("database down")
 	}
@@ -464,13 +464,14 @@ func TestObserver(t *testing.T) {
 		wantResult   auth.Result
 		wantSubject  string
 		wantCode     int
+		wantError    string
 		wantNoReport bool
 	}{
 		{name: "static key", headers: headerValues{"X-API-Key": buildSecret}, wantResult: auth.ResultSuccess, wantSubject: "build"},
 		{name: "resolved key", options: apikey.Options{Resolver: resolver}, headers: headerValues{"X-API-Key": "issued-key-0123456789"}, wantResult: auth.ResultSuccess, wantSubject: "issued"},
 		{name: "unknown static key", headers: headerValues{"X-API-Key": "wrong-key-0123456789"}, wantResult: auth.ResultDenied, wantCode: http.StatusUnauthorized},
-		{name: "revoked resolved key", options: apikey.Options{Resolver: resolver}, headers: headerValues{"X-API-Key": "revoked-key-0123456789"}, wantResult: auth.ResultDenied, wantCode: http.StatusUnauthorized},
-		{name: "resolver failure", options: apikey.Options{Resolver: resolver}, headers: headerValues{"X-API-Key": "broken-key-0123456789"}, wantResult: auth.ResultError, wantCode: http.StatusInternalServerError},
+		{name: "revoked resolved key", options: apikey.Options{Resolver: resolver}, headers: headerValues{"X-API-Key": "revoked-key-0123456789"}, wantResult: auth.ResultDenied, wantCode: http.StatusUnauthorized, wantError: "key revoked"},
+		{name: "resolver failure", options: apikey.Options{Resolver: resolver}, headers: headerValues{"X-API-Key": "broken-key-0123456789"}, wantResult: auth.ResultError, wantCode: http.StatusInternalServerError, wantError: "database down"},
 		{name: "no key", wantNoReport: true},
 	}
 	for _, testCase := range testCases {
@@ -495,7 +496,7 @@ func TestObserver(t *testing.T) {
 				require.Equal(t, testCase.wantSubject, outcome.Identity.Subject)
 				return
 			}
-			require.Error(t, outcome.Err)
+			require.ErrorContains(t, outcome.Err, testCase.wantError, "the Resolver's text reaches the outcome, hence the warning on Resolver")
 			require.Nil(t, outcome.Identity)
 			require.Equal(t, testCase.wantCode, recorder.Code)
 			status, _ := auth.ResponseFor(outcome.Err)
