@@ -166,7 +166,8 @@ func (g *Guard) refreshDue(stored identityEnvelope) bool {
 // refresh claims the due refresh, runs the real identity's Refresher, saves the outcome and reports it
 // (Action refresh). The claim saves the moved refreshedAt before the Refresher runs, so requests reading
 // the session meanwhile find it fresh: one Refresher call per interval. A request losing the claim (another
-// one claimed or saved first) continues with the identity it read. A refusal ends the session; any other
+// one claimed or saved first) continues with the identity it read. A refusal ends the session (when that
+// fails, the failure is answered with 500 instead of the refusal: the session is still usable); any other
 // failure keeps the identity and is reported as a degraded success (Result success with Err set): the
 // request is still answered. The save swaps against the claim: when another request saved the session
 // meanwhile, that save wins and the request continues with it.
@@ -186,7 +187,10 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 	refreshed, err := g.refreshers[realIdentity.Provider].Refresh(ctx, current, realIdentity.Clone())
 	switch {
 	case errors.Is(err, auth.ErrUnauthenticated) || errors.Is(err, auth.ErrForbidden):
-		outcome.Err = errors.Join(err, g.options.Store.End(ctx, writer, request))
+		outcome.Err = err
+		if endError := g.options.Store.End(ctx, writer, request); endError != nil {
+			outcome.Err = fmt.Errorf("end refused session: %w", endError)
+		}
 		return nil, g.reportFailure(ctx, outcome)
 	case err != nil:
 		outcome.Err = err
