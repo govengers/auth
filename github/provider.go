@@ -74,7 +74,7 @@ func New(options *Options) (*Provider, error) {
 		return nil, fmt.Errorf("github: APIURL: %w", err)
 	}
 	reporter := failure.Reporter{Provider: providerName, Observer: resolved.Observer, ErrorURL: resolved.ErrorURL}
-	return &Provider{options: resolved, oauth: oauthConfig(resolved), api: api, reporter: reporter}, nil
+	return &Provider{options: resolved, oauth: oauthConfiguration(resolved), api: api, reporter: reporter}, nil
 }
 
 // Name returns "github", the Identity.Provider of every identity this provider creates.
@@ -179,7 +179,7 @@ func withParsedTeams(options Options) (Options, error) {
 	return options, nil
 }
 
-func oauthConfig(options Options) *oauth2.Config {
+func oauthConfiguration(options Options) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     options.ClientID,
 		ClientSecret: options.ClientSecret,
