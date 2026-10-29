@@ -15,8 +15,8 @@ import (
 	"unicode"
 )
 
-// ReturnParameter is the query parameter that carries the return path to a login route.
-const ReturnParameter = "return_to"
+// returnParameter is the query parameter that carries the return path to a login route.
+const returnParameter = "return_to"
 
 const maximumReturnPathLength = 2048
 
@@ -40,7 +40,7 @@ func SafeReturnPath(raw string) (string, bool) {
 
 // ReturnPath returns SafeReturnPath(request query return_to) or "/".
 func ReturnPath(request *http.Request) string {
-	returnPath, ok := SafeReturnPath(request.URL.Query().Get(ReturnParameter))
+	returnPath, ok := SafeReturnPath(request.URL.Query().Get(returnParameter))
 	if !ok {
 		return "/"
 	}
@@ -52,7 +52,7 @@ func LoginLocation(loginURL, returnPath string) string {
 	if returnPath == "" {
 		return loginURL
 	}
-	return WithQuery(loginURL, url.Values{ReturnParameter: {returnPath}})
+	return WithQuery(loginURL, url.Values{returnParameter: {returnPath}})
 }
 
 // WithQuery appends the encoded values to target, keeping a query target already has.
@@ -94,7 +94,7 @@ func AbsoluteTarget(raw, externalURL string) (string, error) {
 		if returnPath, ok := SafeReturnPath(raw); ok {
 			return externalURL + returnPath, nil
 		}
-		if IsAbsoluteHTTPURL(raw) {
+		if isAbsoluteHTTPURL(raw) {
 			return raw, nil
 		}
 	}
@@ -115,8 +115,8 @@ func IsTarget(raw string) bool {
 	return err == nil
 }
 
-// IsAbsoluteHTTPURL reports whether raw parses as an http or https URL with a host name.
-func IsAbsoluteHTTPURL(raw string) bool {
+// isAbsoluteHTTPURL reports whether raw parses as an http or https URL with a host name.
+func isAbsoluteHTTPURL(raw string) bool {
 	parsed, err := url.Parse(raw)
 	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Hostname() != ""
 }

@@ -248,7 +248,7 @@ func TestIsAbsoluteHTTPURL(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.raw, func(t *testing.T) {
-			require.Equal(t, testCase.want, IsAbsoluteHTTPURL(testCase.raw))
+			require.Equal(t, testCase.want, isAbsoluteHTTPURL(testCase.raw))
 		})
 	}
 }
