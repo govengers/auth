@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lestrrat-go/jwx/v3/jwa"
+	"github.com/lestrrat-go/jwx/v3/jws"
 	jwxjwt "github.com/lestrrat-go/jwx/v3/jwt"
 	"github.com/stretchr/testify/require"
 
@@ -99,12 +100,13 @@ func validClaims(instant time.Time) map[string]any {
 	return map[string]any{"iss": testIssuer, "aud": []string{"backend"}, "sub": "42", "iat": instant.Unix(), "exp": instant.Add(time.Minute).Unix()}
 }
 
-func requireInvalidToken(t *testing.T, err error) {
+func requireInvalidToken(t *testing.T, err error, wantReason string) {
 	t.Helper()
 	var refusal *auth.Error
 	require.ErrorAs(t, err, &refusal)
 	require.ErrorIs(t, err, auth.ErrUnauthenticated)
 	require.Equal(t, "invalid_token", refusal.Code)
+	require.Equal(t, wantReason, refusal.Reason)
 	require.NoError(t, refusal.Err)
 }
 
@@ -272,27 +274,67 @@ func TestVerifyRejectsInvalidTokens(t *testing.T) {
 	require.NoError(t, err)
 	parts := strings.Split(valid, ".")
 	testCases := []struct {
-		name  string
-		token string
+		name       string
+		token      string
+		wantReason string
 	}{
-		{name: "garbage", token: "not-a-token"},
-		{name: "JSON serialization", token: `{"payload":"e30","signatures":[]}`},
-		{name: "no key ID", token: string(withoutKeyID)},
-		{name: "wrong issuer", token: signWith(t, signer, jwa.RS512(), withClaim(validClaims(signedAt), "iss", "https://evil.example.com"))},
-		{name: "wrong audience", token: signWith(t, signer, jwa.RS512(), withClaim(validClaims(signedAt), "aud", []string{"other"}))},
-		{name: "no audience", token: signWith(t, signer, jwa.RS512(), withoutClaim(validClaims(signedAt), "aud"))},
-		{name: "not yet valid beyond skew", token: signWith(t, signer, jwa.RS512(), withClaim(validClaims(signedAt), "nbf", signedAt.Add(31*time.Second).Unix()))},
-		{name: "no expiry", token: signWith(t, signer, jwa.RS512(), withoutClaim(validClaims(signedAt), "exp"))},
-		{name: "tampered payload", token: parts[0] + "." + base64.RawURLEncoding.EncodeToString([]byte(`{"iss":"`+testIssuer+`","aud":["backend"],"sub":"admin","exp":9999999999}`)) + "." + parts[2]},
-		{name: "signature of another key", token: parts[0] + "." + parts[1] + "." + strings.Split(forged, ".")[2]},
-		{name: "algorithm differs from the key's", token: signWith(t, signer, jwa.RS256(), validClaims(signedAt))},
-		{name: "unsigned", token: base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","kid":"`+keyID+`"}`)) + "." + parts[1] + "."},
+		{name: "garbage", token: "not-a-token", wantReason: "malformed token"},
+		{name: "JSON serialization", token: `{"payload":"e30","signatures":[]}`, wantReason: "malformed token"},
+		{name: "no key ID", token: string(withoutKeyID), wantReason: "token header has no kid"},
+		{name: "unknown key ID", token: forged, wantReason: "unknown key ID"},
+		{name: "wrong issuer", token: signWith(t, signer, jwa.RS512(), withClaim(validClaims(signedAt), "iss", "https://evil.example.com")), wantReason: "issuer mismatch"},
+		{name: "wrong audience", token: signWith(t, signer, jwa.RS512(), withClaim(validClaims(signedAt), "aud", []string{"other"})), wantReason: "audience mismatch"},
+		{name: "no audience", token: signWith(t, signer, jwa.RS512(), withoutClaim(validClaims(signedAt), "aud")), wantReason: "audience mismatch"},
+		{name: "not yet valid beyond skew", token: signWith(t, signer, jwa.RS512(), withClaim(validClaims(signedAt), "nbf", signedAt.Add(31*time.Second).Unix())), wantReason: "token not yet valid"},
+		{name: "no expiry", token: signWith(t, signer, jwa.RS512(), withoutClaim(validClaims(signedAt), "exp")), wantReason: "expiry missing"},
+		{name: "expiry of the wrong type", token: signPayload(t, signer, `{"iss":"`+testIssuer+`","aud":["backend"],"exp":"MARKER"}`), wantReason: "token invalid"},
+		{name: "tampered payload", token: parts[0] + "." + base64.RawURLEncoding.EncodeToString([]byte(`{"iss":"`+testIssuer+`","aud":["backend"],"sub":"admin","exp":9999999999}`)) + "." + parts[2], wantReason: "signature invalid"},
+		{name: "signature of another key", token: parts[0] + "." + parts[1] + "." + strings.Split(forged, ".")[2], wantReason: "signature invalid"},
+		{name: "algorithm differs from the key's", token: signWith(t, signer, jwa.RS256(), validClaims(signedAt)), wantReason: "signature invalid"},
+		{name: "unsigned", token: base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","kid":"`+keyID+`"}`)) + "." + parts[1] + ".", wantReason: "signature invalid"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			identity, err := verifier.Verify(t.Context(), testCase.token)
-			requireInvalidToken(t, err)
+			requireInvalidToken(t, err, testCase.wantReason)
 			require.Nil(t, identity)
+		})
+	}
+}
+
+// signPayload signs payload as it is with the signer's key and key ID, so claims may have any type.
+func signPayload(t *testing.T, signer *Signer, payload string) string {
+	t.Helper()
+	keyID, _ := signer.signingKey.KeyID()
+	headers := jws.NewHeaders()
+	require.NoError(t, headers.Set(jws.KeyIDKey, keyID))
+	signed, err := jws.Sign([]byte(payload), jws.WithKey(jwa.RS512(), signer.signingKey, jws.WithProtectedHeaders(headers)))
+	require.NoError(t, err)
+	return string(signed)
+}
+
+func TestVerifyKeepsTokenMaterialOutOfTheReason(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	signer := newTestSigner(t, clock.now)
+	verifier := newTestVerifier(t, testVerifierOptions(newKeySetServer(t, signer.JWKSHandler()).server.URL), clock)
+	longKeyID := strings.Repeat("K", 10<<10)
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS512","kid":"` + longKeyID + `"}`))
+	testCases := []struct {
+		name   string
+		token  string
+		marker string
+	}{
+		{name: "long unknown key ID", token: header + "." + strings.Split(signWith(t, signer, jwa.RS512(), validClaims(signedAt)), ".")[1] + ".c2ln", marker: "KKKK"},
+		{name: "claim value", token: signPayload(t, signer, `{"iss":"`+testIssuer+`","aud":["backend"],"exp":"MARKER-EXPIRY"}`), marker: "MARKER"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := verifier.Verify(t.Context(), testCase.token)
+
+			var refusal *auth.Error
+			require.ErrorAs(t, err, &refusal)
+			require.Less(t, len(err.Error()), 100)
+			require.NotContains(t, err.Error(), testCase.marker)
 		})
 	}
 }
@@ -316,13 +358,14 @@ func TestVerifyChecksTimesWithThirtySecondsSkew(t *testing.T) {
 	token, err := signer.Sign(&auth.Identity{Subject: "42"})
 	require.NoError(t, err)
 	testCases := []struct {
-		name      string
-		offset    time.Duration // verifier clock relative to signing
-		wantValid bool
+		name       string
+		offset     time.Duration // verifier clock relative to signing
+		wantValid  bool
+		wantReason string
 	}{
-		{name: "expired beyond skew", offset: 5*time.Minute + 31*time.Second},
+		{name: "expired beyond skew", offset: 5*time.Minute + 31*time.Second, wantReason: "token expired"},
 		{name: "expired within skew", offset: 5*time.Minute + 29*time.Second, wantValid: true},
-		{name: "issued in the future beyond skew", offset: -31 * time.Second},
+		{name: "issued in the future beyond skew", offset: -31 * time.Second, wantReason: "token issued in the future"},
 		{name: "issued in the future within skew", offset: -29 * time.Second, wantValid: true},
 	}
 	for _, testCase := range testCases {
@@ -336,7 +379,7 @@ func TestVerifyChecksTimesWithThirtySecondsSkew(t *testing.T) {
 				require.Equal(t, "42", identity.Subject)
 				return
 			}
-			requireInvalidToken(t, err)
+			requireInvalidToken(t, err, testCase.wantReason)
 		})
 	}
 }
@@ -359,18 +402,18 @@ func TestVerifyRefetchesForAnUnknownKeyIDAtMostOncePerMinute(t *testing.T) {
 	require.Equal(t, int32(2), keySets.fetches.Load())
 
 	_, err = verifier.Verify(t.Context(), sign(third))
-	requireInvalidToken(t, err)
+	requireInvalidToken(t, err, "unknown key ID")
 	require.Equal(t, int32(2), keySets.fetches.Load(), "no refetch within a minute")
 
 	clock.advance(time.Minute)
 	_, err = verifier.Verify(t.Context(), sign(third))
-	requireInvalidToken(t, err)
+	requireInvalidToken(t, err, "unknown key ID")
 	require.Equal(t, int32(3), keySets.fetches.Load(), "refetch after a minute, key still unknown")
 
 	keySets.serve(third.JWKSHandler())
 	clock.advance(59 * time.Second)
 	_, err = verifier.Verify(t.Context(), sign(third))
-	requireInvalidToken(t, err)
+	requireInvalidToken(t, err, "unknown key ID")
 	require.Equal(t, int32(3), keySets.fetches.Load())
 
 	clock.advance(time.Second)
@@ -379,7 +422,7 @@ func TestVerifyRefetchesForAnUnknownKeyIDAtMostOncePerMinute(t *testing.T) {
 	require.Equal(t, int32(4), keySets.fetches.Load())
 
 	_, err = verifier.Verify(t.Context(), sign(first))
-	requireInvalidToken(t, err)
+	requireInvalidToken(t, err, "unknown key ID")
 }
 
 func TestVerifyRefreshesKeysAfterTheRefreshInterval(t *testing.T) {

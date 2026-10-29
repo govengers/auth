@@ -123,15 +123,18 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*auth.Identity, er
 func (v *Verifier) verify(ctx context.Context, token string) (identity *auth.Identity, refreshError, err error) {
 	keyID, err := keyIDOf(token)
 	if err != nil {
-		return nil, nil, invalidToken("read token header", err)
+		return nil, nil, invalidToken(err.Error())
 	}
 	keys, refreshError, err := v.keysFor(ctx, keyID)
 	if err != nil {
 		return nil, nil, err
 	}
+	if _, found := keys.LookupKeyID(keyID); !found {
+		return nil, nil, invalidToken("unknown key ID")
+	}
 	parsed, err := jwxjwt.ParseString(token, v.parseOptions(keys)...)
 	if err != nil {
-		return nil, nil, invalidToken("verify token", err)
+		return nil, nil, invalidToken(invalidTokenReason(err))
 	}
 	claims, err := claimsOf(parsed)
 	if err != nil {
@@ -140,10 +143,12 @@ func (v *Verifier) verify(ctx context.Context, token string) (identity *auth.Ide
 	return identityFromClaims(claims), refreshError, nil
 }
 
+// keyIDOf returns the kid of the token's protected header. Its errors are fixed texts: the dependency's
+// message may quote token material.
 func keyIDOf(token string) (string, error) {
 	message, err := jws.ParseString(token, jws.WithCompact())
 	if err != nil {
-		return "", dependency.Error("parse token", err)
+		return "", errors.New("malformed token")
 	}
 	signatures := message.Signatures()
 	if len(signatures) != 1 {
@@ -249,10 +254,33 @@ func claimsOf(token jwxjwt.Token) (map[string]any, error) {
 	return claims, nil
 }
 
-// invalidToken is the refusal of a token that failed operation. The cause goes into Reason as text only
-// (LIB-010), and Reason never reaches the client.
-func invalidToken(operation string, err error) error {
-	return &auth.Error{Kind: auth.ErrUnauthenticated, Code: codeInvalidToken, Reason: operation + ": " + err.Error()}
+// invalidToken is the refusal of an invalid token. reason is a fixed text (it goes into the wide event)
+// and never reaches the client.
+func invalidToken(reason string) error {
+	return &auth.Error{Kind: auth.ErrUnauthenticated, Code: codeInvalidToken, Reason: reason}
+}
+
+// invalidTokenReason names why jwx refused a token. jwx's message quotes token material (the kid,
+// claim values) of any length, so it never becomes the Reason [LOG-009].
+func invalidTokenReason(err error) string {
+	switch {
+	case errors.Is(err, jws.VerificationError()):
+		return "signature invalid"
+	case errors.Is(err, jwxjwt.TokenExpiredError()):
+		return "token expired"
+	case errors.Is(err, jwxjwt.TokenNotYetValidError()):
+		return "token not yet valid"
+	case errors.Is(err, jwxjwt.InvalidIssuedAtError()):
+		return "token issued in the future"
+	case errors.Is(err, jwxjwt.InvalidIssuerError()):
+		return "issuer mismatch"
+	case errors.Is(err, jwxjwt.InvalidAudienceError()):
+		return "audience mismatch"
+	case errors.Is(err, jwxjwt.MissingRequiredClaimError()):
+		return "expiry missing"
+	default:
+		return "token invalid"
+	}
 }
 
 // Middleware requires a valid token in HeaderName ("Bearer <token>"): the identity goes into the request
