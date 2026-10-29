@@ -1,0 +1,168 @@
+// Package ginadapter integrates the module with gin and the wide-event logger: it runs the net/http
+// middleware of the providers in a gin chain, registers their routes on a gin router, gates routes
+// with authorization checks, and records authentication outcomes on the request's wide event.
+//
+// It is the only package of the library that imports gin and go-wide-event-logger. It records on the
+// wide event the wideevent.Middleware put into the request context and never emits one of its own; it
+// records IDs and decisions, never usernames, emails, names, tokens or codes. Everything in it is safe
+// for concurrent use.
+package ginadapter
+
+import (
+	"context"
+	"errors"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	wideevent "github.com/mxcd/go-wide-event-logger"
+
+	"github.com/govengers/auth"
+	"github.com/govengers/auth/authorization"
+)
+
+// Middleware runs net/http middleware in a gin chain: when it calls its next handler, ginContext.Request
+// becomes the (possibly enriched) request and the rest of the chain runs inside it; otherwise the chain is aborted.
+// Gin handlers keep writing to ginContext.Writer, so a writer the middleware wraps for its next handler is not seen.
+func Middleware(middleware func(http.Handler) http.Handler) gin.HandlerFunc {
+	return func(ginContext *gin.Context) {
+		passed := false
+		handler := middleware(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+			passed = true
+			ginContext.Request = request
+			ginContext.Next()
+		}))
+		handler.ServeHTTP(ginContext.Writer, ginContext.Request)
+		if !passed {
+			ginContext.Abort()
+		}
+	}
+}
+
+// RegisterRoutes registers each route with router.Handle(route.Method, route.Path, gin.WrapH(route.Handler)),
+// so gin route templates (and therefore metric labels) are the provider paths. Register on the engine root.
+// Like gin it panics on a path that conflicts with one already registered, which is a wiring mistake at startup.
+func RegisterRoutes(router gin.IRoutes, routes []auth.Route) {
+	for _, route := range routes {
+		router.Handle(route.Method, route.Path, gin.WrapH(route.Handler))
+	}
+}
+
+// Observe is an auth.Observer that records the outcome on the request's wide event: auth.provider,
+// auth.action, auth.result, the client code, reason and error of Err, degraded for a success with Err,
+// the subject and user ID of the identity, and the request outcome when the outcome decided it.
+// Without a wide event in ctx it does nothing.
+func Observe(ctx context.Context, outcome auth.Outcome) {
+	we := wideevent.FromContext(ctx)
+	if we == nil {
+		return
+	}
+	recordDecision(we, outcome)
+	recordOutcomeError(we, outcome)
+	recordIdentity(we, outcome.Identity)
+	recordRequestOutcome(we, outcome)
+}
+
+// errNilCheck is the internal failure a Require without a check answers with.
+var errNilCheck = errors.New("authorization check is nil")
+
+// Require runs check against the request context: allowed continues; refused aborts with auth.ResponseFor
+// (401/403/500) and records authorization.denied / authorization.reason / authorization.error and we.Failure(err).
+// A nil check is a wiring mistake: every request is answered 500.
+func Require(check authorization.Check) gin.HandlerFunc {
+	if check == nil {
+		check = func(context.Context) error { return errNilCheck }
+	}
+	return func(ginContext *gin.Context) {
+		err := check(ginContext.Request.Context())
+		if err == nil {
+			return
+		}
+		if we := wideevent.FromContext(ginContext.Request.Context()); we != nil {
+			recordDenial(we, err)
+		}
+		auth.WriteError(ginContext.Writer, err)
+		ginContext.Abort()
+	}
+}
+
+func recordDecision(we *wideevent.Event, outcome auth.Outcome) {
+	we.Str("auth.provider", outcome.Provider).
+		Str("auth.action", string(outcome.Action)).
+		Str("auth.result", string(outcome.Result))
+}
+
+// recordOutcomeError records what the client was told and why. A denial's or failure's error itself
+// becomes the request's error (recordRequestOutcome); a success with Err is a handled failure, so it is
+// recorded here and marks the event degraded.
+func recordOutcomeError(we *wideevent.Event, outcome auth.Outcome) {
+	if outcome.Err == nil {
+		return
+	}
+	_, response := auth.ResponseFor(outcome.Err)
+	we.Str("auth.code", response.Code)
+	if reason, _ := refusalReason(outcome.Err); reason != "" {
+		we.Str("auth.reason", reason)
+	}
+	switch outcome.Result {
+	case auth.ResultError:
+		we.Err("auth.error", outcome.Err)
+	case auth.ResultSuccess, auth.ResultChallenge:
+		we.Err("auth.error", outcome.Err).Bool("degraded", true)
+	case auth.ResultDenied:
+		// the refusal is recorded as the request's failure
+	}
+}
+
+func recordIdentity(we *wideevent.Event, identity *auth.Identity) {
+	if identity == nil {
+		return
+	}
+	we.Str("auth.subject", identity.Real().Subject)
+	if identity.Impersonator != nil {
+		we.Bool("auth.impersonating", true)
+	}
+	if identity.UserID != uuid.Nil {
+		we.UserID(identity.UserID)
+	}
+}
+
+// recordRequestOutcome sets the request outcome when the library answered the request: always for a
+// denial or failure, for a success only when the action was the request itself (a login, a logout),
+// not a per-request authentication or refresh that hands over to the application's handler.
+func recordRequestOutcome(we *wideevent.Event, outcome auth.Outcome) {
+	switch outcome.Result {
+	case auth.ResultDenied, auth.ResultError:
+		we.Failure(outcome.Err)
+	case auth.ResultSuccess, auth.ResultChallenge:
+		if outcome.Action != auth.ActionAuthenticate && outcome.Action != auth.ActionRefresh {
+			we.Success()
+		}
+	}
+}
+
+// recordDenial records a refused authorization check. The reason of an error that is no *auth.Error
+// is its message; such an error is an internal failure (500) and also recorded as authorization.error.
+func recordDenial(we *wideevent.Event, err error) {
+	reason, isRefusal := refusalReason(err)
+	if !isRefusal {
+		reason = err.Error()
+	}
+	we.Bool("authorization.denied", true)
+	if reason != "" {
+		we.Str("authorization.reason", reason)
+	}
+	if status, _ := auth.ResponseFor(err); status == http.StatusInternalServerError {
+		we.Err("authorization.error", err)
+	}
+	we.Failure(err)
+}
+
+// refusalReason returns the Reason of the *auth.Error in err and whether err carries one at all.
+func refusalReason(err error) (string, bool) {
+	var refusal *auth.Error
+	if !errors.As(err, &refusal) {
+		return "", false
+	}
+	return refusal.Reason, true
+}
