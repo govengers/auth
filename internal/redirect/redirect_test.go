@@ -246,3 +246,17 @@ func TestIsAbsoluteHTTPURL(t *testing.T) {
 		})
 	}
 }
+
+func TestWithQuery(t *testing.T) {
+	require.Equal(t, "https://app.example.com/error?code=login_failed", WithQuery("https://app.example.com/error", url.Values{"code": {"login_failed"}}))
+	require.Equal(t, "/login?x=1&code=forbidden", WithQuery("/login?x=1", url.Values{"code": {"forbidden"}}))
+	require.Equal(t, "/logout?a=1&b=x+y%26z", WithQuery("/logout", url.Values{"b": {"x y&z"}, "a": {"1"}}))
+}
+
+func TestTo(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	To(recorder, "/dashboard?tab=2")
+	require.Equal(t, http.StatusFound, recorder.Code)
+	require.Equal(t, "/dashboard?tab=2", recorder.Header().Get("Location"))
+	require.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
+}

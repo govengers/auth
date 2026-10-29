@@ -302,11 +302,6 @@ func TestCallbackRedirectsRefusalsToTheErrorURL(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, response.Code, "a failure is no refusal and stays a 500")
 }
 
-func TestErrorLocation(t *testing.T) {
-	require.Equal(t, "https://app.example.com/error?code=login_failed", errorLocation("https://app.example.com/error", "login_failed"))
-	require.Equal(t, "/login?x=1&code=forbidden", errorLocation("/login?x=1", "forbidden"))
-}
-
 func TestCallbackRunsOnLogin(t *testing.T) {
 	var received *auth.Identity
 	environment := newTestEnvironment(t, defaultTestTeams(), func(options *Options) {

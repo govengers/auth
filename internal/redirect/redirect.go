@@ -1,6 +1,6 @@
 // Package redirect validates where the library may send a browser or a credential: same-origin return
 // paths, login locations carrying a return path, configured external URLs and the endpoints of identity
-// providers. Every function is pure and safe for concurrent use.
+// providers. Every function is safe for concurrent use; all but To are pure.
 package redirect
 
 import (
@@ -45,11 +45,23 @@ func LoginLocation(loginURL, returnPath string) string {
 	if returnPath == "" {
 		return loginURL
 	}
+	return WithQuery(loginURL, url.Values{ReturnParameter: {returnPath}})
+}
+
+// WithQuery appends the encoded values to target, keeping a query target already has.
+func WithQuery(target string, values url.Values) string {
 	separator := "?"
-	if strings.Contains(loginURL, "?") {
+	if strings.Contains(target, "?") {
 		separator = "&"
 	}
-	return loginURL + separator + ReturnParameter + "=" + url.QueryEscape(returnPath)
+	return target + separator + values.Encode()
+}
+
+// To answers 302 Found to location with Cache-Control no-store.
+func To(writer http.ResponseWriter, location string) {
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Location", location)
+	writer.WriteHeader(http.StatusFound)
 }
 
 // ExternalURL validates an absolute http(s) URL without user info, query or fragment and trims a trailing "/".

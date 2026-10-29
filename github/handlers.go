@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/httpjson"
 	"github.com/govengers/auth/internal/oauthlogin"
+	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/session"
 )
 
@@ -69,7 +69,7 @@ func (p *Provider) login(writer http.ResponseWriter, request *http.Request) {
 		p.refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogin, Err: err})
 		return
 	}
-	redirectTo(writer, p.oauth.AuthCodeURL(state.State, oauth2.S256ChallengeOption(state.Verifier)))
+	redirect.To(writer, p.oauth.AuthCodeURL(state.State, oauth2.S256ChallengeOption(state.Verifier)))
 	p.report(ctx, auth.Outcome{Action: auth.ActionLogin, Result: auth.ResultSuccess})
 }
 
@@ -85,7 +85,7 @@ func (p *Provider) callback(writer http.ResponseWriter, request *http.Request) {
 		p.refuse(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err, Identity: completed.identity})
 		return
 	}
-	redirectTo(writer, p.options.ExternalURL+completed.returnPath)
+	redirect.To(writer, p.options.ExternalURL+completed.returnPath)
 	p.report(ctx, auth.Outcome{Action: auth.ActionCallback, Result: auth.ResultSuccess, Identity: completed.identity})
 }
 
@@ -176,7 +176,7 @@ func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) {
 	if identity != nil && p.options.OnLogout != nil {
 		p.options.OnLogout(ctx, identity)
 	}
-	redirectTo(writer, p.options.PostLogoutURL)
+	redirect.To(writer, p.options.PostLogoutURL)
 	p.report(ctx, outcome)
 }
 
@@ -261,7 +261,7 @@ func (p *Provider) refuseCallback(ctx context.Context, writer http.ResponseWrite
 		p.refuse(ctx, writer, outcome)
 		return
 	}
-	redirectTo(writer, errorLocation(p.options.ErrorURL, response.Code))
+	redirect.To(writer, redirect.WithQuery(p.options.ErrorURL, url.Values{"code": {response.Code}}))
 	p.reportFailure(ctx, outcome)
 }
 
@@ -280,19 +280,4 @@ func (p *Provider) report(ctx context.Context, outcome auth.Outcome) {
 	}
 	outcome.Provider = providerName
 	p.options.Observer(ctx, outcome)
-}
-
-func redirectTo(writer http.ResponseWriter, location string) {
-	writer.Header().Set("Cache-Control", "no-store")
-	writer.Header().Set("Location", location)
-	writer.WriteHeader(http.StatusFound)
-}
-
-// errorLocation appends code=<code> to errorURL, keeping an existing query.
-func errorLocation(errorURL, code string) string {
-	separator := "?"
-	if strings.Contains(errorURL, "?") {
-		separator = "&"
-	}
-	return errorURL + separator + "code=" + url.QueryEscape(code)
 }

@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/oauthlogin"
+	"github.com/govengers/auth/internal/redirect"
 )
 
 // verifiedLogin is what a callback learned from the IdP before any hook ran.
@@ -33,7 +33,7 @@ func (p *Provider) handleLogin(writer http.ResponseWriter, request *http.Request
 		p.refuse(writer, request, auth.Outcome{Action: auth.ActionLogin, Err: fmt.Errorf("oidc: begin login: %w", err)})
 		return
 	}
-	redirectTo(writer, p.oauth2Config.AuthCodeURL(state.State, gooidc.Nonce(state.Nonce), oauth2.S256ChallengeOption(state.Verifier)))
+	redirect.To(writer, p.oauth2Config.AuthCodeURL(state.State, gooidc.Nonce(state.Nonce), oauth2.S256ChallengeOption(state.Verifier)))
 	p.report(ctx, auth.Outcome{Action: auth.ActionLogin, Result: auth.ResultSuccess})
 }
 
@@ -61,7 +61,7 @@ func (p *Provider) handleCallback(writer http.ResponseWriter, request *http.Requ
 		p.refuseCallback(writer, request, err, identity)
 		return
 	}
-	redirectTo(writer, p.options.ExternalURL+state.ReturnPath)
+	redirect.To(writer, p.options.ExternalURL+state.ReturnPath)
 	p.report(ctx, auth.Outcome{Action: auth.ActionCallback, Result: auth.ResultSuccess, Identity: identity})
 }
 
@@ -190,7 +190,7 @@ func (p *Provider) refuseCallback(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	_, response := auth.ResponseFor(err)
-	redirectTo(writer, withQuery(p.options.ErrorURL, url.Values{"code": {response.Code}}))
+	redirect.To(writer, redirect.WithQuery(p.options.ErrorURL, url.Values{"code": {response.Code}}))
 	p.reportFailure(request.Context(), outcome)
 }
 
@@ -219,19 +219,4 @@ func (p *Provider) report(ctx context.Context, outcome auth.Outcome) {
 
 func loginFailed(reason string, cause error) error {
 	return &auth.Error{Kind: auth.ErrUnauthenticated, Code: "login_failed", Reason: reason, Err: cause}
-}
-
-func redirectTo(writer http.ResponseWriter, location string) {
-	writer.Header().Set("Cache-Control", "no-store")
-	writer.Header().Set("Location", location)
-	writer.WriteHeader(http.StatusFound)
-}
-
-// withQuery appends values to target, keeping a query target already has.
-func withQuery(target string, values url.Values) string {
-	separator := "?"
-	if strings.Contains(target, "?") {
-		separator = "&"
-	}
-	return target + separator + values.Encode()
 }

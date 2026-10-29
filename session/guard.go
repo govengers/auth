@@ -123,9 +123,7 @@ func (g *Guard) redirectToLogin(writer http.ResponseWriter, request *http.Reques
 		auth.WriteError(writer, err)
 		return
 	}
-	writer.Header().Set("Cache-Control", "no-store")
-	writer.Header().Set("Location", redirect.LoginLocation(g.options.LoginURL, g.returnPath(request)))
-	writer.WriteHeader(http.StatusFound)
+	redirect.To(writer, redirect.LoginLocation(g.options.LoginURL, g.returnPath(request)))
 }
 
 // returnPath is the safe original request path, or "" when it is not safe.
