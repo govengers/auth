@@ -31,12 +31,13 @@ type User struct {
 // concurrent use. The TOTP state (TOTPEnabled, TOTPSecret, BackupCodeHashes and a failed-attempt counter and the
 // last used time step the storage keeps) changes only through the TOTP methods below.
 type Storage interface {
-	// CreateUser stores a new user. A username or email another user already has is ErrUserExists; let a
-	// unique constraint decide it, not a lookup before the insert.
+	// CreateUser stores a new user. A username or email another user already has, ignoring case, is
+	// ErrUserExists; let a unique constraint decide it (e.g. on lower(email)), not a lookup before the insert.
 	CreateUser(ctx context.Context, user *User) error
-	// GetUserByUsername returns the user with username, or ErrUserNotFound.
+	// GetUserByUsername returns the user with username, ignoring case (e.g. WHERE lower(username) = lower($1)),
+	// or ErrUserNotFound. The provider passes identifiers as typed.
 	GetUserByUsername(ctx context.Context, username string) (*User, error)
-	// GetUserByEmail returns the user with email, or ErrUserNotFound.
+	// GetUserByEmail returns the user with email, ignoring case, or ErrUserNotFound.
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 	// GetUserByID returns the user with id, or ErrUserNotFound.
 	GetUserByID(ctx context.Context, id uuid.UUID) (*User, error)
