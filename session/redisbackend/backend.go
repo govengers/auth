@@ -82,7 +82,11 @@ func New(options *Options) (*Backend, error) {
 }
 
 // Put stores value under (sessionID, key) for ttl; session.ErrSessionRevoked when sessionID carries a marker.
+// Every method refuses an empty sessionID and one containing '{' or '}' with an error.
 func (b *Backend) Put(ctx context.Context, sessionID, key string, value []byte, ttl time.Duration) error {
+	if err := validateSessionID(sessionID); err != nil {
+		return err
+	}
 	keys := []string{b.markerKey(sessionID), b.valueKey(sessionID, key), b.indexKey(sessionID)}
 	stored, err := putScript.Run(ctx, b.client, keys, value, milliseconds(ttl)).Int()
 	if err != nil {
@@ -96,18 +100,27 @@ func (b *Backend) Put(ctx context.Context, sessionID, key string, value []byte, 
 
 // Get returns the live value under (sessionID, key).
 func (b *Backend) Get(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
+	if err := validateSessionID(sessionID); err != nil {
+		return nil, false, err
+	}
 	value, err := b.client.Get(ctx, b.valueKey(sessionID, key)).Bytes()
 	return valueOrAbsent(value, err, "read session value")
 }
 
 // Pop returns the live value under (sessionID, key) and deletes it in one atomic step.
 func (b *Backend) Pop(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
+	if err := validateSessionID(sessionID); err != nil {
+		return nil, false, err
+	}
 	value, err := popScript.Run(ctx, b.client, []string{b.valueKey(sessionID, key), b.indexKey(sessionID)}).Text()
 	return valueOrAbsent([]byte(value), err, "pop session value")
 }
 
 // Revoke deletes every key of sessionID and writes a marker that refuses Puts for ttl.
 func (b *Backend) Revoke(ctx context.Context, sessionID string, ttl time.Duration) error {
+	if err := validateSessionID(sessionID); err != nil {
+		return err
+	}
 	err := revokeScript.Run(ctx, b.client, []string{b.markerKey(sessionID), b.indexKey(sessionID)}, milliseconds(ttl)).Err()
 	if err != nil {
 		return dependencyError("revoke session", err)
@@ -125,6 +138,16 @@ func (b *Backend) markerKey(sessionID string) string {
 
 func (b *Backend) valueKey(sessionID, key string) string {
 	return b.indexKey(sessionID) + ":" + key
+}
+
+// validateSessionID keeps all keys of a session in one cluster slot: Redis hashes the text between the
+// first '{' and the next '}' of a key, and an empty tag makes it hash the whole key. The ID is not
+// part of the message.
+func validateSessionID(sessionID string) error {
+	if sessionID == "" || strings.ContainsAny(sessionID, "{}") {
+		return errors.New("redis session backend: session ID must be non-empty and must not contain '{' or '}'")
+	}
+	return nil
 }
 
 // milliseconds converts ttl for Redis, which rejects a zero expiry: anything shorter than 1 ms counts as 1 ms.

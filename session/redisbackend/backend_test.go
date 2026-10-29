@@ -206,26 +206,53 @@ func TestSubMillisecondTTLIsStoredAsOneMillisecond(t *testing.T) {
 	require.Equal(t, time.Millisecond, server.TTL("session:{other}#revoked"))
 }
 
+type operation struct {
+	name string
+	call func(sessionID string) error
+}
+
+// operations lists every Backend method as a call on sessionID.
+func operations(t *testing.T, backend *redisbackend.Backend) []operation {
+	t.Helper()
+	ctx := t.Context()
+	return []operation{
+		{name: "put", call: func(sessionID string) error {
+			return backend.Put(ctx, sessionID, "key", []byte("value"), time.Hour)
+		}},
+		{name: "get", call: func(sessionID string) error { _, _, err := backend.Get(ctx, sessionID, "key"); return err }},
+		{name: "pop", call: func(sessionID string) error { _, _, err := backend.Pop(ctx, sessionID, "key"); return err }},
+		{name: "revoke", call: func(sessionID string) error { return backend.Revoke(ctx, sessionID, time.Hour) }},
+	}
+}
+
+// A session ID that would split the keys of a session across cluster slots is refused before any I/O.
+func TestInvalidSessionIDIsRefused(t *testing.T) {
+	backend, server := newBackend(t, "")
+	invalidIDs := []string{"", "{", "}", "{}", "}abc{", "abc{def", "abc}def"}
+	for _, operation := range operations(t, backend) {
+		t.Run(operation.name, func(t *testing.T) {
+			for _, sessionID := range invalidIDs {
+				err := operation.call(sessionID)
+
+				require.ErrorContains(t, err, "session ID must be non-empty", "%q", sessionID)
+				require.NotErrorIs(t, err, session.ErrSessionRevoked, "%q", sessionID)
+				require.NotContains(t, err.Error(), "abc", "the ID stays out of the message")
+			}
+			require.Empty(t, server.Keys(), "a refused call writes nothing")
+		})
+	}
+}
+
 // A connection failure is an error, never "not found", and carries no go-redis error chain (LIB-010).
 func TestConnectionFailureSurfacesAsError(t *testing.T) {
 	server, client := newRedis(t)
 	backend, err := redisbackend.New(&redisbackend.Options{Client: client})
 	require.NoError(t, err)
 	server.Close()
-	ctx := t.Context()
 
-	testCases := []struct {
-		name string
-		call func() error
-	}{
-		{name: "put", call: func() error { return backend.Put(ctx, "s", "key", []byte("value"), time.Hour) }},
-		{name: "get", call: func() error { _, _, err := backend.Get(ctx, "s", "key"); return err }},
-		{name: "pop", call: func() error { _, _, err := backend.Pop(ctx, "s", "key"); return err }},
-		{name: "revoke", call: func() error { return backend.Revoke(ctx, "s", time.Hour) }},
-	}
-	for _, testCase := range testCases {
-		t.Run(testCase.name, func(t *testing.T) {
-			err := testCase.call()
+	for _, operation := range operations(t, backend) {
+		t.Run(operation.name, func(t *testing.T) {
+			err := operation.call("s")
 
 			require.Error(t, err)
 			require.ErrorContains(t, err, "redis session backend")
