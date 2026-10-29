@@ -60,6 +60,7 @@ type OIDCOptions struct {
 	OpaqueAccessToken      bool // a random access token instead of a JWT, as Google issues
 	WrongNonce             bool // the ID token carries another nonce than the authorize request
 	BadSignature           bool // ID and access token signatures do not verify
+	ExpiredIDToken         bool // the ID token expired a minute ago
 
 	TokenAnswer http.Handler // when set, answers every /token request in place of the fake: an IdP's error or broken answers
 
@@ -347,6 +348,9 @@ func (h *OIDCHandler) identityClaims(grant authorizationGrant, now time.Time) ma
 	}
 	if h.options.WrongNonce {
 		claims["nonce"] = "not-the-nonce-you-sent"
+	}
+	if h.options.ExpiredIDToken {
+		claims["exp"] = now.Add(-time.Minute).Unix()
 	}
 	return claims
 }

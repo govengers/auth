@@ -130,6 +130,15 @@ func TestTheTokenEndpointRejectsAWrongVerifierAndAReusedCode(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, status, "a code works once")
 }
 
+func TestExpiredIDToken(t *testing.T) {
+	issuer := fakeprovider.StartOIDC(t, fakeprovider.OIDCOptions{ClientID: "client", ClientSecret: "secret", ExpiredIDToken: true})
+
+	status, body := exchange(t, issuer, codeFrom(t, authorize(t, issuer, validParameters())), codeVerifier)
+
+	require.Equal(t, http.StatusOK, status)
+	require.Less(t, payload(t, body["id_token"].(string))["exp"], float64(time.Now().Unix()))
+}
+
 func TestTokenAnswerReplacesTheTokenEndpoint(t *testing.T) {
 	issuer := fakeprovider.StartOIDC(t, fakeprovider.OIDCOptions{
 		ClientID: "client", ClientSecret: "secret",

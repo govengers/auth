@@ -193,8 +193,6 @@ func (f freeTextFilter) RoundTrip(request *http.Request) (*http.Response, error)
 	if err != nil {
 		return nil, fmt.Errorf("read answer of %s: %w", request.URL.Path, err)
 	}
-	// ponytail: JSON that go-oidc cannot read as a key set still reaches its error; check the JWKS shape
-	// here if an IdP ever answers like that.
 	if response.StatusCode != http.StatusOK || !json.Valid(body) {
 		body = nil
 		response.Header.Del("Content-Type")
