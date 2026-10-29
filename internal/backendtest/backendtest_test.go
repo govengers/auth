@@ -1,6 +1,7 @@
 package backendtest_test
 
 import (
+	"bytes"
 	"context"
 	"slices"
 	"sync"
@@ -48,6 +49,18 @@ func (b *referenceBackend) Pop(_ context.Context, sessionID, key string) ([]byte
 	value, found := b.live(sessionID, key)
 	delete(b.values, [2]string{sessionID, key})
 	return value, found, nil
+}
+
+func (b *referenceBackend) CompareAndSwap(_ context.Context, sessionID, key string, previous, value []byte) (bool, error) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	current, found := b.live(sessionID, key)
+	if !found || !bytes.Equal(current, previous) {
+		return false, nil
+	}
+	entry := [2]string{sessionID, key}
+	b.values[entry] = referenceValue{value: slices.Clone(value), expiresAt: b.values[entry].expiresAt}
+	return true, nil
 }
 
 func (b *referenceBackend) live(sessionID, key string) ([]byte, bool) {

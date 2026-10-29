@@ -28,12 +28,14 @@ func Run(t *testing.T, newBackend func(t *testing.T) (session.Backend, func(dura
 		{name: "put replaces and get reads", run: testPutAndGet},
 		{name: "values are copied", run: testValuesAreCopied},
 		{name: "pop takes the value once", run: testPop},
+		{name: "compare and swap replaces only the expected value", run: testCompareAndSwap},
 		{name: "revoke deletes the session and refuses puts", run: testRevoke},
 		{name: "values expire after their ttl", run: testExpiry},
 		{name: "revoke reaches values outliving shorter ones", run: testRevokeAfterMixedTTLs},
 		{name: "revocation marker expires after its ttl", run: testMarkerExpiry},
 		{name: "revocation marker never outlives the revoked values", run: testMarkerLifetimeFollowsTheValues},
 		{name: "concurrent pops find the value once", run: testConcurrentPop},
+		{name: "concurrent swaps of one value succeed once", run: testConcurrentCompareAndSwap},
 		{name: "revoke racing a put leaves nothing", run: testRevokeRacingPut},
 	}
 	for _, testCase := range testCases {
@@ -85,6 +87,30 @@ func testPop(t *testing.T, backend session.Backend, _ func(time.Duration)) {
 	require.False(t, found)
 	requireAbsent(t, backend, "s", "key")
 	requireValue(t, backend, "s", "other", "kept")
+}
+
+func testCompareAndSwap(t *testing.T, backend session.Backend, advance func(time.Duration)) {
+	ctx := t.Context()
+	require.NoError(t, backend.Put(ctx, "s", "key", []byte("v1"), time.Hour))
+
+	require.False(t, swap(t, backend, "s", "other", "v2"))
+	requireValue(t, backend, "s", "key", "v1")
+	require.True(t, swap(t, backend, "s", "v1", "v2"))
+	requireValue(t, backend, "s", "key", "v2")
+	require.False(t, swap(t, backend, "missing", "", "v1"))
+	requireAbsent(t, backend, "missing", "key")
+
+	require.NoError(t, backend.Put(ctx, "short", "key", []byte("v1"), time.Minute))
+	advance(30 * time.Second)
+	require.True(t, swap(t, backend, "short", "v1", "v2"))
+	advance(30*time.Second + time.Second)
+	requireAbsent(t, backend, "short", "key")
+	require.False(t, swap(t, backend, "short", "v2", "v3"))
+	requireAbsent(t, backend, "short", "key")
+
+	require.NoError(t, backend.Revoke(ctx, "s", time.Hour))
+	require.False(t, swap(t, backend, "s", "v2", "v3"))
+	requireAbsent(t, backend, "s", "key")
 }
 
 func testRevoke(t *testing.T, backend session.Backend, _ func(time.Duration)) {
@@ -198,6 +224,33 @@ func testConcurrentPop(t *testing.T, backend session.Backend, _ func(time.Durati
 	}
 }
 
+func testConcurrentCompareAndSwap(t *testing.T, backend session.Backend, _ func(time.Duration)) {
+	ctx := t.Context()
+	for round := range raceRounds {
+		require.NoError(t, backend.Put(ctx, "s", "identity", []byte("read"), time.Hour))
+		swapped := make([]bool, 8)
+		swapErrors := make([]error, 8)
+		var waitGroup sync.WaitGroup
+		for index := range swapped {
+			waitGroup.Go(func() {
+				swapped[index], swapErrors[index] = backend.CompareAndSwap(ctx, "s", "identity", []byte("read"), fmt.Appendf(nil, "writer-%d", index))
+			})
+		}
+		waitGroup.Wait()
+
+		winner := -1
+		for index := range swapped {
+			require.NoError(t, swapErrors[index], "round %d", round)
+			if swapped[index] {
+				require.Equal(t, -1, winner, "round %d: two swaps of one value", round)
+				winner = index
+			}
+		}
+		require.NotEqual(t, -1, winner, "round %d: no swap", round)
+		requireValue(t, backend, "s", "identity", fmt.Sprintf("writer-%d", winner))
+	}
+}
+
 // testRevokeRacingPut: whatever the interleaving, once both are done the session holds nothing and
 // refuses further puts. A put either lands first and is revoked with the rest, or is refused.
 func testRevokeRacingPut(t *testing.T, backend session.Backend, _ func(time.Duration)) {
@@ -227,6 +280,14 @@ func requireValue(t *testing.T, backend session.Backend, sessionID, key, want st
 	require.NoError(t, err)
 	require.True(t, found, "%s/%s is absent", sessionID, key)
 	require.Equal(t, want, string(value))
+}
+
+// swap swaps previous for value under (sessionID, "key") and reports whether that happened.
+func swap(t *testing.T, backend session.Backend, sessionID, previous, value string) bool {
+	t.Helper()
+	swapped, err := backend.CompareAndSwap(t.Context(), sessionID, "key", []byte(previous), []byte(value))
+	require.NoError(t, err)
+	return swapped
 }
 
 func requireAbsent(t *testing.T, backend session.Backend, sessionID, key string) {

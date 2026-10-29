@@ -24,6 +24,9 @@ type Backend interface {
 	Get(ctx context.Context, sessionID, key string) (value []byte, found bool, err error)
 	// Pop returns and deletes the live value in one step: of two concurrent Pops at most one finds the value.
 	Pop(ctx context.Context, sessionID, key string) (value []byte, found bool, err error)
+	// CompareAndSwap replaces the live value under (sessionID, key) with value in one step, keeping its expiry,
+	// only when it still equals previous; swapped is false when it changed, expired or was revoked meanwhile.
+	CompareAndSwap(ctx context.Context, sessionID, key string, previous, value []byte) (swapped bool, err error)
 	// Revoke deletes every key of sessionID. When there was any, it writes a marker living ttl, or until the
 	// latest of the deleted values would have expired when that is sooner.
 	Revoke(ctx context.Context, sessionID string, ttl time.Duration) error

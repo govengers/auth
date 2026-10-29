@@ -27,6 +27,7 @@ type identityEnvelope struct {
 	Identity        *auth.Identity `json:"identity"`
 	AuthenticatedAt time.Time      `json:"authenticatedAt"`
 	RefreshedAt     time.Time      `json:"refreshedAt"`
+	sealed          []byte         // the stored value it was read from (never encoded): what swapEnvelope compares
 }
 
 // Put seals value and stores it under key for ttl (positive). A revoked session refuses with ErrUnauthenticated.
@@ -114,10 +115,11 @@ func (s Session) authenticatedAt(ctx context.Context) (time.Time, error) {
 }
 
 func (s Session) envelope(ctx context.Context) (identityEnvelope, error) {
-	encoded, found, err := s.Get(ctx, identityKey)
+	sealed, found, err := s.store.options.Backend.Get(ctx, s.id, identityKey)
 	if err != nil {
-		return identityEnvelope{}, err
+		return identityEnvelope{}, fmt.Errorf("get session value %q: %w", identityKey, err)
 	}
+	encoded, found := s.open(identityKey, sealed, found)
 	if !found {
 		return identityEnvelope{}, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "no session identity"}
 	}
@@ -128,19 +130,47 @@ func (s Session) envelope(ctx context.Context) (identityEnvelope, error) {
 	if s.store.now().After(s.expiresAt(envelope)) {
 		return identityEnvelope{}, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "session expired"}
 	}
+	envelope.sealed = sealed
 	return envelope, nil
 }
 
 func (s Session) saveEnvelope(ctx context.Context, envelope identityEnvelope) error {
+	encoded, ttl, err := s.encodeEnvelope(envelope)
+	if err != nil {
+		return err
+	}
+	return s.Put(ctx, identityKey, encoded, ttl)
+}
+
+// swapEnvelope saves envelope, keeping the stored lifetime, only while the stored value is still the one
+// envelope was read from; false when the session was saved, revoked or expired meanwhile.
+func (s Session) swapEnvelope(ctx context.Context, envelope identityEnvelope) (bool, error) {
+	encoded, _, err := s.encodeEnvelope(envelope)
+	if err != nil {
+		return false, err
+	}
+	sealed, err := seal(s.store.options.EncryptionKey, s.id, identityKey, encoded)
+	if err != nil {
+		return false, fmt.Errorf("swap session identity: %w", err)
+	}
+	swapped, err := s.store.options.Backend.CompareAndSwap(ctx, s.id, identityKey, envelope.sealed, sealed)
+	if err != nil {
+		return false, fmt.Errorf("swap session identity: %w", err)
+	}
+	return swapped, nil
+}
+
+// encodeEnvelope returns envelope's JSON and the time left of its absolute lifetime; refused once that is over.
+func (s Session) encodeEnvelope(envelope identityEnvelope) ([]byte, time.Duration, error) {
 	ttl := s.expiresAt(envelope).Sub(s.store.now())
 	if ttl <= 0 {
-		return &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "session expired"}
+		return nil, 0, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "session expired"}
 	}
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
-		return fmt.Errorf("encode session identity: %w", err)
+		return nil, 0, fmt.Errorf("encode session identity: %w", err)
 	}
-	return s.Put(ctx, identityKey, encoded, ttl)
+	return encoded, ttl, nil
 }
 
 func (s Session) expiresAt(envelope identityEnvelope) time.Time {

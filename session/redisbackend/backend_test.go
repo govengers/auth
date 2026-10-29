@@ -304,6 +304,10 @@ func operations(t *testing.T, backend *redisbackend.Backend) []operation {
 		}},
 		{name: "get", call: func(sessionID string) error { _, _, err := backend.Get(ctx, sessionID, "key"); return err }},
 		{name: "pop", call: func(sessionID string) error { _, _, err := backend.Pop(ctx, sessionID, "key"); return err }},
+		{name: "compare and swap", call: func(sessionID string) error {
+			_, err := backend.CompareAndSwap(ctx, sessionID, "key", []byte("previous"), []byte("value"))
+			return err
+		}},
 		{name: "revoke", call: func(sessionID string) error { return backend.Revoke(ctx, sessionID, time.Hour) }},
 	}
 }

@@ -137,6 +137,17 @@ func TestMemoryBackendRevokeTakesNoSlot(t *testing.T) {
 	require.NotContains(t, backend.sessions, "never-used")
 }
 
+func TestMemoryBackendRevokeOfExpiredValuesLeavesNothing(t *testing.T) {
+	clock := newTestClock()
+	backend := newTestMemoryBackend(t, clock)
+	require.NoError(t, backend.Put(t.Context(), "session", "key", []byte("value"), time.Minute))
+	clock.advance(2 * time.Minute)
+
+	require.NoError(t, backend.Revoke(t.Context(), "session", time.Hour))
+
+	require.Empty(t, backend.sessions)
+}
+
 func TestMemoryBackendDropsEmptiedSessions(t *testing.T) {
 	clock := newTestClock()
 	backend := newTestMemoryBackend(t, clock)

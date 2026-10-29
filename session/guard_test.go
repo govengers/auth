@@ -472,7 +472,79 @@ func TestGuardRefreshRacingALogout(t *testing.T) {
 	require.Len(t, outcomes, 1)
 	require.Equal(t, auth.ActionRefresh, outcomes[0].Action)
 	require.Equal(t, auth.ResultDenied, outcomes[0].Result)
-	require.ErrorIs(t, outcomes[0].Err, ErrSessionRevoked)
+	require.ErrorIs(t, outcomes[0].Err, auth.ErrUnauthenticated)
+	require.ErrorContains(t, outcomes[0].Err, "no session identity")
+}
+
+// A save completed while a refresh runs (another request's refresh, impersonation, a role change) wins: the
+// refresh must not write its older snapshot back, neither after a success nor after a degraded failure.
+func TestGuardRefreshLosesToAConcurrentSave(t *testing.T) {
+	testCases := []struct {
+		name    string
+		refresh func(identity *auth.Identity) (*auth.Identity, error)
+	}{
+		{name: "degraded refresh", refresh: func(*auth.Identity) (*auth.Identity, error) {
+			return nil, errors.New("provider unreachable")
+		}},
+		{name: "successful refresh", refresh: func(identity *auth.Identity) (*auth.Identity, error) {
+			return identity, nil
+		}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			saved := testIdentity()
+			saved.Roles = []string{"guest"}
+			var fixture *guardFixture
+			var request *http.Request
+			refresher := &fakeRefresher{name: "password", refresh: func(identity *auth.Identity) (*auth.Identity, error) {
+				concurrent, err := fixture.store.Open(request)
+				require.NoError(t, err)
+				require.NoError(t, concurrent.SaveIdentity(t.Context(), saved))
+				return testCase.refresh(identity)
+			}}
+			fixture = newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
+			request = login(t, fixture.store, testIdentity())
+			fixture.clock.advance(2 * time.Minute)
+
+			result := serveGuarded(fixture.guard.RequireAPI(), request)
+
+			require.Equal(t, http.StatusNoContent, result.recorder.Code)
+			require.Equal(t, saved, result.identity, "the request runs as the concurrent save left the session")
+			current, err := fixture.store.Open(request)
+			require.NoError(t, err)
+			stored, err := current.Identity(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, saved, stored, "the refresh did not write its snapshot back")
+		})
+	}
+}
+
+// swapFailingBackend fails every CompareAndSwap and passes everything else on.
+type swapFailingBackend struct {
+	Backend
+}
+
+func (swapFailingBackend) CompareAndSwap(context.Context, string, string, []byte, []byte) (bool, error) {
+	return false, errBackendDown
+}
+
+func TestGuardAnswersAFailedRefreshSaveWith500(t *testing.T) {
+	refresher := &fakeRefresher{name: "password", refresh: func(identity *auth.Identity) (*auth.Identity, error) {
+		return identity, nil
+	}}
+	fixture := newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
+	fixture.store.options.Backend = swapFailingBackend{Backend: fixture.store.options.Backend}
+	request := login(t, fixture.store, testIdentity())
+	fixture.clock.advance(2 * time.Minute)
+
+	result := serveGuarded(fixture.guard.RequireAPI(), request)
+
+	require.Equal(t, http.StatusInternalServerError, result.recorder.Code)
+	outcomes := fixture.observer.take()
+	require.Len(t, outcomes, 1)
+	require.Equal(t, auth.ActionRefresh, outcomes[0].Action)
+	require.Equal(t, auth.ResultError, outcomes[0].Result)
+	require.ErrorIs(t, outcomes[0].Err, errBackendDown)
 }
 
 func TestGuardRefreshRacingTheAbsoluteExpiry(t *testing.T) {

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"maps"
@@ -91,6 +92,20 @@ func (b *MemoryBackend) Pop(_ context.Context, sessionID, key string) ([]byte, b
 		b.remove(sessionID, key, now)
 	}
 	return value, found, nil
+}
+
+// CompareAndSwap replaces the live value under (sessionID, key) with a copy of value, keeping its expiry,
+// when it equals previous.
+func (b *MemoryBackend) CompareAndSwap(_ context.Context, sessionID, key string, previous, value []byte) (bool, error) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	current, found := b.lookup(sessionID, key, b.now())
+	if !found || !bytes.Equal(current, previous) {
+		return false, nil
+	}
+	values := b.sessions[sessionID].values
+	values[key] = memoryValue{value: slices.Clone(value), expiresAt: values[key].expiresAt}
+	return true, nil
 }
 
 // Revoke deletes every value of sessionID. When there was any, the entry becomes a marker that refuses Puts

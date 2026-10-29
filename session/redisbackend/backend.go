@@ -46,6 +46,15 @@ redis.call('SET', KEYS[3], v, 'PX', ARGV[1])
 return v
 `)
 
+	// swapScript replaces the value, keeping its expiry, when it still equals the expected one. A revoked
+	// session holds no value, so it never swaps.
+	// KEYS: value. ARGV: expected value, new value. Returns 1 when swapped, else 0.
+	swapScript = redis.NewScript(`
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
+return 1
+`)
+
 	// revokeScript deletes every indexed value and writes the marker for ttl, or for the index's remaining
 	// lifetime (the latest value expiry) when that is shorter; without an index (nothing stored) no marker.
 	// KEYS: marker, index. ARGV: ttl in ms.
@@ -128,6 +137,19 @@ func (b *Backend) Pop(ctx context.Context, sessionID, key string) ([]byte, bool,
 	keys := []string{b.valueKey(sessionID, key), b.indexKey(sessionID), b.indexKey(sessionID) + "#popped:" + rand.Text()}
 	value, err := popScript.Run(ctx, b.client, keys, popReceiptTTL.Milliseconds()).Text()
 	return valueOrAbsent([]byte(value), err, "pop session value")
+}
+
+// CompareAndSwap replaces the live value under (sessionID, key) with value, keeping its expiry, when it
+// still equals previous.
+func (b *Backend) CompareAndSwap(ctx context.Context, sessionID, key string, previous, value []byte) (bool, error) {
+	if err := validateSessionID(sessionID); err != nil {
+		return false, err
+	}
+	swapped, err := swapScript.Run(ctx, b.client, []string{b.valueKey(sessionID, key)}, previous, value).Int()
+	if err != nil {
+		return false, dependency.Error("redis session backend: swap session value", err)
+	}
+	return swapped == 1, nil
 }
 
 // Revoke deletes every key of sessionID. When there was any, it writes a marker that refuses Puts for ttl,

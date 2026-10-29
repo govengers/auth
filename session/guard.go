@@ -166,6 +166,8 @@ func (g *Guard) refreshDue(stored identityEnvelope) bool {
 // refresh runs the real identity's Refresher, saves the outcome and reports it (Action refresh). A
 // refusal ends the session; any other failure keeps the identity, only moves refreshedAt and is
 // reported as a degraded success (Result success with Err set): the request is still answered.
+// The save swaps against the envelope the refresh started from: when another request saved the
+// session meanwhile, that save wins and the request continues with it.
 func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, current Session, stored identityEnvelope) (*auth.Identity, error) {
 	ctx := request.Context()
 	realIdentity := stored.Identity.Real()
@@ -183,7 +185,11 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 		stored.Identity = impersonation.WithReal(stored.Identity, refreshed)
 	}
 	stored.RefreshedAt = g.now()
-	if err := current.saveEnvelope(ctx, stored); err != nil {
+	swapped, err := current.swapEnvelope(ctx, stored)
+	if err == nil && !swapped {
+		stored, err = current.envelope(ctx)
+	}
+	if err != nil {
 		outcome.Err = errors.Join(outcome.Err, err)
 		return nil, g.reportFailure(ctx, outcome)
 	}
