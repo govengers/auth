@@ -3,6 +3,7 @@ package oidc_test
 import (
 	"cmp"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -195,10 +196,10 @@ func TestCallbackClassifiesTokenEndpointErrorsWithoutTheirText(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			transport := &answeringTransport{path: "/token", status: testCase.status, contentType: testCase.contentType, body: testCase.body}
-			application := newApplication(t, startIssuer(t, nil), func(options *oidc.Options) {
-				options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
+			issuer := startIssuer(t, func(options *fakeprovider.OIDCOptions) {
+				options.TokenAnswer = answer(testCase.status, testCase.contentType, testCase.body)
 			})
+			application := newApplication(t, issuer, nil)
 
 			response := newBrowser(t).signIn(application, prefix+"/login")
 
@@ -211,31 +212,38 @@ func TestCallbackClassifiesTokenEndpointErrorsWithoutTheirText(t *testing.T) {
 	}
 }
 
-func TestCallbackKeepsTheJWKSAnswerOutOfTheOutcome(t *testing.T) {
+func TestCallbackKeepsTheIDTokenAndTheKeySetOutOfTheOutcome(t *testing.T) {
 	const marker = "alice@example.com"
+	page := "<p>" + marker + "</p>"
+	headerWithMarker := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"` + marker + `"}`))
 	testCases := []struct {
-		name     string
-		status   int
-		reason   string
-		wantText string
+		name       string
+		configure  func(options *fakeprovider.OIDCOptions)
+		transport  http.RoundTripper
+		wantReason string
 	}{
-		{name: "outage as a page", status: http.StatusServiceUnavailable, reason: marker, wantText: "503 Service Unavailable"},
-		{name: "a page instead of the key set", status: http.StatusOK, wantText: `got "text/html"`},
+		{name: "key set outage as a page", transport: &answeringTransport{path: "/jwks", status: http.StatusServiceUnavailable, reason: marker, contentType: "text/html", body: page}},
+		{name: "a page instead of the key set", transport: &answeringTransport{path: "/jwks", status: http.StatusOK, contentType: "text/html", body: page}},
+		{name: "key set unreachable", transport: &failingTransport{failPath: "/jwks", failure: marker}},
+		{name: "token header", configure: func(options *fakeprovider.OIDCOptions) {
+			options.TokenAnswer = answer(http.StatusOK, "application/json", `{"access_token":"a","token_type":"Bearer","id_token":"`+headerWithMarker+`.e30.c2ln"}`)
+		}},
+		{name: "expired token", configure: func(options *fakeprovider.OIDCOptions) { options.ExpiredIDToken = true }, wantReason: "ID token expired"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			transport := &answeringTransport{path: "/jwks", status: testCase.status, reason: testCase.reason, contentType: "text/html", body: "<p>" + marker + "</p>"}
-			application := newApplication(t, startIssuer(t, nil), func(options *oidc.Options) {
-				options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
+			application := newApplication(t, startIssuer(t, testCase.configure), func(options *oidc.Options) {
+				options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: cmp.Or(testCase.transport, http.DefaultTransport)}
 			})
 
 			response := newBrowser(t).signIn(application, prefix+"/login")
 
 			require.Equal(t, http.StatusUnauthorized, response.Code, response.Body.String())
 			outcome := application.outcomes.last(t)
-			require.ErrorContains(t, outcome.Err, "verify ID token")
-			require.ErrorContains(t, outcome.Err, testCase.wantText)
-			require.NotContains(t, outcome.Err.Error(), marker, "the JWKS answer's free text stays out of outcomes and events")
+			var refusal *auth.Error
+			require.ErrorAs(t, outcome.Err, &refusal)
+			require.Equal(t, cmp.Or(testCase.wantReason, "ID token verification"), refusal.Reason)
+			require.NotContains(t, outcome.Err.Error(), marker, "the token's and the key set's text stays out of outcomes and events")
 		})
 	}
 }
@@ -419,16 +427,17 @@ func messageOf(status int) string {
 	return response.Message
 }
 
-// failingTransport fails requests to failPath and counts the others.
+// failingTransport fails requests to failPath (with failure, default "connection refused") and counts the others.
 type failingTransport struct {
 	failPath string
+	failure  string
 	mutex    sync.Mutex
 	passed   int
 }
 
 func (f *failingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if strings.HasSuffix(request.URL.Path, f.failPath) {
-		return nil, errors.New("connection refused")
+		return nil, errors.New(cmp.Or(f.failure, "connection refused"))
 	}
 	f.mutex.Lock()
 	f.passed++
@@ -442,22 +451,36 @@ func (f *failingTransport) requests() int {
 	return f.passed
 }
 
+// answer is a handler answering status with contentType and body.
+func answer(status int, contentType, body string) http.HandlerFunc {
+	return func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", contentType)
+		writer.WriteHeader(status)
+		_, _ = io.WriteString(writer, body) // the test reads the outcome, not this write
+	}
+}
+
 // answeringTransport answers requests to path itself and passes the others on. The reason phrase of its
-// status line defaults to the standard one.
+// status line defaults to the standard one; withoutBody answers with a nil Body.
 type answeringTransport struct {
 	path        string
 	status      int
 	reason      string
 	contentType string
 	body        string
+	withoutBody bool
 }
 
 func (a *answeringTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if !strings.HasSuffix(request.URL.Path, a.path) {
 		return http.DefaultTransport.RoundTrip(request)
 	}
-	return &http.Response{
+	response := &http.Response{
 		Status: strconv.Itoa(a.status) + " " + cmp.Or(a.reason, http.StatusText(a.status)), StatusCode: a.status,
 		Header: http.Header{"Content-Type": {a.contentType}}, Body: io.NopCloser(strings.NewReader(a.body)), Request: request,
-	}, nil
+	}
+	if a.withoutBody {
+		response.Body = nil
+	}
+	return response, nil
 }

@@ -3,6 +3,7 @@ package oidc
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -104,7 +105,7 @@ func (p *Provider) verifyIdentityToken(ctx context.Context, token *oauth2.Token,
 	}
 	identityToken, err := p.identityTokenVerifier.Verify(ctx, rawIdentityToken)
 	if err != nil {
-		return verifiedLogin{}, loginFailed("ID token verification", dependency.Error("verify ID token", err))
+		return verifiedLogin{}, loginFailed(identityTokenRefusal(err), ctx.Err())
 	}
 	if subtle.ConstantTimeCompare([]byte(identityToken.Nonce), []byte(nonce)) != 1 {
 		return verifiedLogin{}, loginFailed("nonce mismatch", nil)
@@ -117,6 +118,17 @@ func (p *Provider) verifyIdentityToken(ctx context.Context, token *oauth2.Token,
 		return verifiedLogin{}, loginFailed("ID token claims", dependency.Error("decode ID token claims", err))
 	}
 	return verifiedLogin{rawIdentityToken: rawIdentityToken, subject: identityToken.Subject, identityClaims: claims}, nil
+}
+
+// identityTokenRefusal names why go-oidc refused an ID token with a fixed text: its message quotes the
+// token's header and claims and flattens the JWKS request's error with the server's text (LOG-009).
+// ponytail: a JWKS outage reads like an invalid token; wrap the key set to tell them apart if that matters.
+func identityTokenRefusal(err error) string {
+	var expired *gooidc.TokenExpiredError
+	if errors.As(err, &expired) {
+		return "ID token expired"
+	}
+	return "ID token verification"
 }
 
 // accessTokenClaims returns the claims of a JWT access token signed by the issuer, or nil. Not every IdP
