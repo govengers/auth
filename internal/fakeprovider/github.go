@@ -297,6 +297,11 @@ func (s *GitHubServer) userTeams(writer http.ResponseWriter, request *http.Reque
 	s.mutex.Lock()
 	teams := s.teams
 	s.mutex.Unlock()
+	writeGitHubJSON(writer, http.StatusOK, pageOf(teams, page, pageSize))
+}
+
+// pageOf returns page (from 1) of teams in GitHub's response form; past the end it is empty.
+func pageOf(teams []GitHubTeam, page, pageSize int) []githubTeamResponse {
 	start := len(teams)
 	if page <= len(teams) { // also keeps (page-1)*pageSize from overflowing
 		start = min((page-1)*pageSize, len(teams))
@@ -308,7 +313,7 @@ func (s *GitHubServer) userTeams(writer http.ResponseWriter, request *http.Reque
 		response.Organization.Login = team.Organization
 		body = append(body, response)
 	}
-	writeGitHubJSON(writer, http.StatusOK, body)
+	return body
 }
 
 func githubQueryNumber(request *http.Request, name string, fallback int) int {

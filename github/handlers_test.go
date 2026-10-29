@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -511,6 +512,7 @@ func TestLogoutFailsWhenTheSessionCannotBeEnded(t *testing.T) {
 	environment := newTestEnvironment(t, defaultTestTeams(), nil)
 	login := environment.login(t)
 	environment.backend.failRevoke.Store(true)
+	environment.backend.failGet.Store(true)
 
 	response := environment.serve(withSessionCookie(t, newRequest(t, http.MethodGet, testExternalURL+"/auth/github/logout"), login))
 
@@ -519,6 +521,8 @@ func TestLogoutFailsWhenTheSessionCannotBeEnded(t *testing.T) {
 	outcome := environment.outcomes.last(t)
 	require.Equal(t, auth.ResultError, outcome.Result)
 	require.ErrorIs(t, outcome.Err, errBackendDown)
+	require.ErrorContains(t, outcome.Err, "github: end session")
+	require.ErrorContains(t, outcome.Err, "github: read token", "the failed read is kept")
 }
 
 func TestLogoutIgnoresAClientDisconnect(t *testing.T) {
@@ -700,6 +704,27 @@ func TestRefreshTeamsRefusesSessionsItDoesNotOwn(t *testing.T) {
 	require.Zero(t, environment.fake.Calls(fakeprovider.GitHubEndpointTeams))
 }
 
+func TestRefreshTeamsRefusesACrossSiteRequest(t *testing.T) {
+	environment := newTestEnvironment(t, defaultTestTeams(), nil)
+	login := environment.login(t)
+	environment.fake.SetTeams([]fakeprovider.GitHubTeam{{Organization: "acme", Slug: "ops"}})
+	calls := environment.fake.Calls(fakeprovider.GitHubEndpointTeams)
+	request := withSessionCookie(t, newRequest(t, http.MethodPost, testExternalURL+"/auth/github/refresh-teams"), login)
+	request.Header.Set("Sec-Fetch-Site", "cross-site")
+
+	response := environment.serve(request)
+
+	require.Equal(t, http.StatusForbidden, response.Code)
+	require.JSONEq(t, `{"code":"forbidden","message":"access denied"}`, response.Body.String())
+	require.Equal(t, calls, environment.fake.Calls(fakeprovider.GitHubEndpointTeams), "GitHub is not called")
+	_, err := environment.sessionOf(t, login).Identity(t.Context())
+	require.NoError(t, err, "the session is untouched")
+	outcome := environment.outcomes.last(t)
+	require.Equal(t, auth.ActionRefreshTeams, outcome.Action)
+	require.Equal(t, auth.ResultDenied, outcome.Result)
+	require.ErrorIs(t, outcome.Err, auth.ErrForbidden)
+}
+
 func TestRefreshTeamsKeepsTheImpersonatedIdentity(t *testing.T) {
 	environment := newTestEnvironment(t, defaultTestTeams(), nil)
 	login := environment.login(t)
@@ -758,7 +783,7 @@ func TestRefreshTeamsKeepsAConcurrentSave(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			transport := &beforeTeamsTransport{}
 			environment := newTestEnvironment(t, defaultTestTeams(), func(options *Options) {
-				options.HTTPClient = &http.Client{Transport: transport}
+				options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
 				options.OnLogin = func(_ context.Context, identity *auth.Identity) (*auth.Identity, error) {
 					mapped := identity.Clone()
 					mapped.Permissions = []auth.Permission{{Resource: "builds", Access: auth.AccessWrite}}
@@ -788,6 +813,33 @@ func TestRefreshTeamsKeepsAConcurrentSave(t *testing.T) {
 			require.Equal(t, auth.ResultSuccess, environment.outcomes.last(t).Result)
 		})
 	}
+}
+
+// A refresh that read its teams before a newer refresh saved another membership does not write its stale
+// membership over it: the admin role the newer refresh removed stays removed.
+func TestRefreshTeamsRefusesWhenAnotherRequestChangedTheMembership(t *testing.T) {
+	transport := &beforeTeamsTransport{}
+	environment := newTestEnvironment(t, defaultTestTeams(), func(options *Options) {
+		options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
+	})
+	login := environment.login(t)
+	current := environment.sessionOf(t, login)
+	stored := environment.identityOf(t, login)
+	require.Contains(t, stored.Roles, auth.RoleAdmin)
+	newer := stored.Clone()
+	newer.Teams, newer.Roles = []string{"acme/developers", "acme/ops"}, nil
+	transport.set(func() {
+		require.NoError(t, current.SaveIdentity(t.Context(), newer)) // the newer refresh, saved while this one waits for GitHub
+	})
+
+	response := environment.serve(withSessionCookie(t, newRequest(t, http.MethodPost, testExternalURL+"/auth/github/refresh-teams"), login))
+
+	require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
+	require.Equal(t, newer, environment.identityOf(t, login), "the newer membership stays")
+	outcome := environment.outcomes.last(t)
+	require.Equal(t, auth.ResultDenied, outcome.Result)
+	require.ErrorIs(t, outcome.Err, auth.ErrConflict)
+	require.NotContains(t, outcome.Identity.Roles, auth.RoleAdmin)
 }
 
 func TestRefreshTeamsRefusesWhenOtherRequestsKeepSaving(t *testing.T) {
@@ -890,6 +942,15 @@ func TestRefresh(t *testing.T) {
 		other := environment.sessionOf(t, startSessionWith(t, environment, &auth.Identity{Provider: "password", Subject: "user-1"}))
 		_, err := environment.provider.Refresh(t.Context(), other, identity)
 		require.ErrorIs(t, err, auth.ErrUnauthenticated)
+	})
+	t.Run("unreadable token", func(t *testing.T) {
+		for stored, want := range map[string]string{"not json": "GitHub token does not decode", "{}": "session has no GitHub token"} {
+			other := environment.sessionOf(t, startSessionWith(t, environment, identity))
+			require.NoError(t, other.Put(t.Context(), tokenKey, []byte(stored), time.Minute))
+			_, err := environment.provider.Refresh(t.Context(), other, identity)
+			require.ErrorIs(t, err, auth.ErrUnauthenticated, stored)
+			require.ErrorContains(t, err, want, stored)
+		}
 	})
 	t.Run("nil identity", func(t *testing.T) {
 		_, err := environment.provider.Refresh(t.Context(), current, nil)

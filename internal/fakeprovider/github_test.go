@@ -54,3 +54,34 @@ func TestGitHubTokenEndpointBindsTheCodeToItsRedirectURI(t *testing.T) {
 	require.Empty(t, answer["error"])
 	require.True(t, strings.HasPrefix(answer["access_token"], "gho_"))
 }
+
+func TestGitHubTeamsArePagedLikeGitHub(t *testing.T) {
+	fake := fakeprovider.StartGitHub(t, fakeprovider.GitHubOptions{Teams: []fakeprovider.GitHubTeam{
+		{Organization: "acme", Slug: "a"}, {Organization: "acme", Slug: "b"}, {Organization: "acme", Slug: "c"},
+	}})
+	token := githubExchange(t, fake, githubCode(t, fake), redirectURI)["access_token"]
+	pages := map[string][]string{
+		"per_page=2":                        {"a", "b"},
+		"per_page=2&page=2":                 {"c"},
+		"per_page=2&page=3":                 nil,
+		"per_page=2&page=99999999999999999": nil,
+		"per_page=0&page=0":                 {"a", "b", "c"},
+	}
+	for query, want := range pages {
+		request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, fake.APIURL()+"/user/teams?"+query, nil)
+		require.NoError(t, err)
+		request.Header.Set("Authorization", "Bearer "+token)
+		response, err := noRedirects().Do(request)
+		require.NoError(t, err)
+		var teams []struct {
+			Slug string `json:"slug"`
+		}
+		require.NoError(t, json.NewDecoder(response.Body).Decode(&teams), query)
+		_ = response.Body.Close() // read-only response, close error carries no information
+		var slugs []string
+		for _, team := range teams {
+			slugs = append(slugs, team.Slug)
+		}
+		require.Equal(t, want, slugs, query)
+	}
+}

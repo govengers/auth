@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 
 	"golang.org/x/oauth2"
 
@@ -173,7 +174,7 @@ func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) {
 	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the reads or OnLogout
 	identity, token, readError := p.sessionState(ctx, request)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
-		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: fmt.Errorf("github: end session: %w", err), Identity: identity})
+		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: errors.Join(fmt.Errorf("github: end session: %w", err), readError), Identity: identity})
 		return
 	}
 	outcome := auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity, Err: readError}
@@ -208,9 +209,14 @@ func unlessAbsent(err error) error {
 	return err
 }
 
-// refreshTeams refreshes the teams of the request's GitHub session and answers its IdentityResponse.
+// refreshTeams refreshes the teams of the request's GitHub session and answers its IdentityResponse. A
+// cross-site request is refused before GitHub is called: it could end the session (SameSite=None cookies).
 func (p *Provider) refreshTeams(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
+	if err := fetchmetadata.RefuseCrossSite(request); err != nil {
+		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionRefreshTeams, Err: err})
+		return
+	}
 	identity, err := p.refreshSession(ctx, writer, request)
 	if err != nil {
 		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionRefreshTeams, Err: err, Identity: identity})
@@ -250,9 +256,10 @@ func (p *Provider) refreshSession(ctx context.Context, writer http.ResponseWrite
 }
 
 // saveMembership saves stored with userMembership applied to its real identity, swapping against stored.
-// When another request saved the session since stored was read (a deactivation, an impersonation, the
-// Guard's refresh), the membership is applied to that save once more, so neither change is lost; a second
-// conflict refuses with ErrConflict.
+// When another request saved the session since stored was read (a deactivation, an impersonation), the
+// membership is applied to that save once more, so neither change is lost. A save that changed the
+// membership or the real user (a newer refresh, which may have revoked the admin role) or a second
+// conflict refuses with ErrConflict: the membership read here may be the older one.
 func (p *Provider) saveMembership(ctx context.Context, current session.Session, stored *auth.Identity, userMembership membership) (*auth.Identity, error) {
 	for attempt := 1; ; attempt++ {
 		updated := impersonation.WithReal(stored, withMembership(stored.Real(), userMembership))
@@ -270,18 +277,35 @@ func (p *Provider) saveMembership(ctx context.Context, current session.Session, 
 		if err != nil {
 			return stored, fmt.Errorf("github: refresh teams: %w", err)
 		}
+		if !sameMembership(stored.Real(), latest.Real()) {
+			return latest, &auth.Error{Kind: auth.ErrConflict, Reason: "team membership changed by another request during the team refresh"}
+		}
 		stored = latest
 	}
 }
 
-// sessionToken returns the GitHub token stored in current; none or unreadable: ErrUnauthenticated.
+// sameMembership reports whether read and latest are the same GitHub user with the same teams and admin
+// role, the fields withMembership owns.
+func sameMembership(read, latest *auth.Identity) bool {
+	return read.Provider == latest.Provider && read.Subject == latest.Subject && slices.Equal(read.Teams, latest.Teams) &&
+		slices.Contains(read.Roles, auth.RoleAdmin) == slices.Contains(latest.Roles, auth.RoleAdmin)
+}
+
+// sessionToken returns the GitHub token stored in current; none or undecodable: ErrUnauthenticated. The
+// decode error is not kept: its text can quote the stored token.
 func sessionToken(ctx context.Context, current session.Session) (*oauth2.Token, error) {
 	encoded, found, err := current.Get(ctx, tokenKey)
 	if err != nil {
 		return nil, fmt.Errorf("github: read token: %w", err)
 	}
+	if !found {
+		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "session has no GitHub token"}
+	}
 	var token oauth2.Token
-	if !found || json.Unmarshal(encoded, &token) != nil || token.AccessToken == "" {
+	if err := json.Unmarshal(encoded, &token); err != nil {
+		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "session's GitHub token does not decode"}
+	}
+	if token.AccessToken == "" {
 		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "session has no GitHub token"}
 	}
 	return &token, nil
