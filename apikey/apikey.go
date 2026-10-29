@@ -61,8 +61,8 @@ type Authenticator struct {
 	observer   auth.Observer
 }
 
-// New validates options and returns an Authenticator. It does not modify options, and changing them
-// afterwards has no effect.
+// New validates options and returns an Authenticator; an error names a key by its position in Keys,
+// counting from 1. It does not modify options, and changing them afterwards has no effect.
 func New(options *Options) (*Authenticator, error) {
 	if options == nil {
 		return nil, errors.New("apikey: options are required")
@@ -88,11 +88,11 @@ func newStaticKeys(keys []Key) ([]staticKey, error) {
 	static := make([]staticKey, 0, len(keys))
 	for index, key := range keys {
 		if err := validateKey(key); err != nil {
-			return nil, fmt.Errorf("apikey: key %d: %w", index, err)
+			return nil, fmt.Errorf("apikey: key %d: %w", index+1, err)
 		}
 		hash := sha256.Sum256([]byte(key.Secret))
 		if slices.ContainsFunc(static, func(other staticKey) bool { return other.name == key.Name || other.hash == hash }) {
-			return nil, fmt.Errorf("apikey: key %d: name or secret is used by another key", index)
+			return nil, fmt.Errorf("apikey: key %d: name or secret is used by another key", index+1)
 		}
 		static = append(static, staticKey{hash: hash, name: key.Name, roles: slices.Clone(key.Roles), permissions: slices.Clone(key.Permissions)})
 	}
