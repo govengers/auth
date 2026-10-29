@@ -20,6 +20,8 @@ const (
 	defaultCookieName = "auth_session"
 	defaultMaxAge     = 24 * time.Hour
 	cookieValueBytes  = 32
+	// revokeTimeout bounds End's revocation, which a disconnecting client cannot cancel.
+	revokeTimeout = 10 * time.Second
 )
 
 // StoreOptions configures NewStore.
@@ -117,14 +119,17 @@ func (s *Store) Open(request *http.Request) (Session, error) {
 	return Session{store: s, id: id}, nil
 }
 
-// End revokes the request's session (with context.WithoutCancel, so a disconnecting client cannot keep it) and expires the cookie. No cookie: only expires it.
+// End revokes the request's session (with context.WithoutCancel and its own 10 s timeout, so a disconnecting
+// client cannot keep it and a hung backend cannot hold the request) and expires the cookie. No cookie: only expires it.
 func (s *Store) End(ctx context.Context, writer http.ResponseWriter, request *http.Request) error {
 	http.SetCookie(writer, sessionCookie(s.options, "", -1))
 	id, found := s.sessionID(request)
 	if !found {
 		return nil
 	}
-	return s.revoke(context.WithoutCancel(ctx), id)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revokeTimeout)
+	defer cancel()
+	return s.revoke(ctx, id)
 }
 
 // MaxAge returns the configured absolute session lifetime.

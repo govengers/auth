@@ -265,6 +265,8 @@ func TestEnd(t *testing.T) {
 
 	requireExpiredCookie(t, recorder)
 	require.Equal(t, []error{nil}, recording.revokeErrors, "revoked with a context the client cannot cancel")
+	require.Len(t, recording.revokeDeadlines, 1)
+	require.WithinDuration(t, time.Now().Add(revokeTimeout), recording.revokeDeadlines[0], revokeTimeout, "but with its own timeout")
 	_, found, err := current.Get(t.Context(), "app.key")
 	require.NoError(t, err)
 	require.False(t, found)
