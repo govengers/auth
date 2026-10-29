@@ -10,6 +10,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/fetchmetadata"
 	"github.com/govengers/auth/internal/hook"
 	"github.com/govengers/auth/internal/httpjson"
 	"github.com/govengers/auth/internal/impersonation"
@@ -148,9 +149,14 @@ func (p *Provider) startSession(ctx context.Context, writer http.ResponseWriter,
 }
 
 // logout ends the session, revokes the GitHub token (a failure only degrades the outcome), runs
-// OnLogout and redirects to PostLogoutURL.
+// OnLogout and redirects to PostLogoutURL. A cross-site request (logout CSRF) is refused before the
+// session is touched.
 func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
+	if err := fetchmetadata.RefuseCrossSite(request); err != nil {
+		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: err})
+		return
+	}
 	identity, token, readError := p.sessionState(context.WithoutCancel(ctx), request)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
 		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: fmt.Errorf("github: end session: %w", err), Identity: identity})

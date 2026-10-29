@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/fetchmetadata"
 	"github.com/govengers/auth/internal/httpjson"
 )
 
@@ -58,8 +59,12 @@ func (p *Provider) register(writer http.ResponseWriter, request *http.Request) r
 	return p.continueLogin(writer, request, user, http.StatusCreated)
 }
 
-// logout ends the request's session, whatever it holds, and tells OnLogout about the identity it had.
+// logout ends the request's session, whatever it holds, and tells OnLogout about the identity it had. A
+// cross-site request (logout CSRF) is refused before the session is touched.
 func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) reply {
+	if err := fetchmetadata.RefuseCrossSite(request); err != nil {
+		return refused(err)
+	}
 	ctx := request.Context()
 	identity := p.sessionIdentity(ctx, request)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {

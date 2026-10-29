@@ -426,6 +426,47 @@ func TestLogoutEndsTheSessionAndRevokesTheToken(t *testing.T) {
 	require.Equal(t, auth.Outcome{Provider: "github", Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: loggedOut[0]}, outcome)
 }
 
+func TestLogoutRefusesACrossSiteRequest(t *testing.T) {
+	called := false
+	environment := newTestEnvironment(t, defaultTestTeams(), func(options *Options) {
+		options.OnLogout = func(context.Context, *auth.Identity) { called = true }
+	})
+	login := environment.login(t)
+	request := withSessionCookie(t, newRequest(t, http.MethodGet, testExternalURL+"/auth/github/logout"), login)
+	request.Header.Set("Sec-Fetch-Site", "cross-site")
+
+	response := environment.serve(request)
+
+	require.Equal(t, http.StatusForbidden, response.Code)
+	require.JSONEq(t, `{"code":"forbidden","message":"access denied"}`, response.Body.String())
+	require.Empty(t, response.Result().Cookies())
+	_, err := environment.sessionOf(t, login).Identity(t.Context())
+	require.NoError(t, err, "the session is untouched")
+	require.Zero(t, environment.fake.Calls(fakeprovider.GitHubEndpointRevoke))
+	require.False(t, called)
+	outcome := environment.outcomes.last(t)
+	require.Equal(t, auth.ActionLogout, outcome.Action)
+	require.Equal(t, auth.ResultDenied, outcome.Result)
+	require.ErrorIs(t, outcome.Err, auth.ErrForbidden)
+}
+
+func TestLogoutAcceptsSameSiteRequests(t *testing.T) {
+	for _, site := range []string{"same-origin", "same-site", "none"} {
+		t.Run(site, func(t *testing.T) {
+			environment := newTestEnvironment(t, defaultTestTeams(), nil)
+			login := environment.login(t)
+			request := withSessionCookie(t, newRequest(t, http.MethodGet, testExternalURL+"/auth/github/logout"), login)
+			request.Header.Set("Sec-Fetch-Site", site)
+
+			response := environment.serve(request)
+
+			require.Equal(t, http.StatusFound, response.Code)
+			_, err := environment.sessionOf(t, login).Identity(t.Context())
+			require.ErrorIs(t, err, auth.ErrUnauthenticated)
+		})
+	}
+}
+
 func TestLogoutWithFailedRevocationIsADegradedSuccess(t *testing.T) {
 	environment := newTestEnvironment(t, defaultTestTeams(), nil)
 	login := environment.login(t)

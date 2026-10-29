@@ -6,6 +6,7 @@ import (
 	"net/url"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/fetchmetadata"
 	"github.com/govengers/auth/internal/redirect"
 )
 
@@ -14,10 +15,15 @@ const loggedOutPage = "<!doctype html><html><head><title>Logged out</title></hea
 // handleLogout is RP-initiated logout: end the session, then send the browser to the IdP's
 // end_session_endpoint with the ID token as hint, or to PostLogoutURL. A call that looks like the IdP's
 // front-channel iframe (iss or sid present, or Sec-Fetch-Dest: iframe unless disabled) is handled as
-// front-channel logout, for IdPs that accept only one logout URI per client.
+// front-channel logout, for IdPs that accept only one logout URI per client. Any other cross-site request
+// (logout CSRF) is refused before the session is touched.
 func (p *Provider) handleLogout(writer http.ResponseWriter, request *http.Request) {
 	if p.isFrontChannelLogout(request) {
 		p.handleFrontChannelLogout(writer, request)
+		return
+	}
+	if err := fetchmetadata.RefuseCrossSite(request); err != nil {
+		p.reporter.Refuse(request.Context(), writer, auth.Outcome{Action: auth.ActionLogout, Err: err})
 		return
 	}
 	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the hint or OnLogout
