@@ -15,7 +15,8 @@ func seal(storeKey []byte, sessionID, key string, plaintext []byte) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
-	return aead.Seal(nil, nil, plaintext, additionalData(sessionID, key)), nil
+	// NewGCMWithRandomNonce generates the nonce itself and requires Seal's nonce argument to be nil.
+	return aead.Seal(nil, nil, plaintext, additionalData(sessionID, key)), nil //nolint:gosec // G407 false positive, see above
 }
 
 // open decrypts a sealed value; false when it does not decrypt (moved, tampered, other key).
