@@ -174,7 +174,7 @@ func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) {
 	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the reads or OnLogout
 	identity, token, readError := p.sessionState(ctx, request)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
-		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: fmt.Errorf("github: end session: %w", err), Identity: identity})
+		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: errors.Join(fmt.Errorf("github: end session: %w", err), readError), Identity: identity})
 		return
 	}
 	outcome := auth.Outcome{Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: identity, Err: readError}

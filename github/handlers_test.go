@@ -512,6 +512,7 @@ func TestLogoutFailsWhenTheSessionCannotBeEnded(t *testing.T) {
 	environment := newTestEnvironment(t, defaultTestTeams(), nil)
 	login := environment.login(t)
 	environment.backend.failRevoke.Store(true)
+	environment.backend.failGet.Store(true)
 
 	response := environment.serve(withSessionCookie(t, newRequest(t, http.MethodGet, testExternalURL+"/auth/github/logout"), login))
 
@@ -520,6 +521,8 @@ func TestLogoutFailsWhenTheSessionCannotBeEnded(t *testing.T) {
 	outcome := environment.outcomes.last(t)
 	require.Equal(t, auth.ResultError, outcome.Result)
 	require.ErrorIs(t, outcome.Err, errBackendDown)
+	require.ErrorContains(t, outcome.Err, "github: end session")
+	require.ErrorContains(t, outcome.Err, "github: read token", "the failed read is kept")
 }
 
 func TestLogoutIgnoresAClientDisconnect(t *testing.T) {
