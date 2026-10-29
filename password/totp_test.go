@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pquerna/otp"
+	"github.com/pquerna/otp/totp"
 	"github.com/stretchr/testify/require"
 
 	"github.com/govengers/auth"
@@ -162,6 +164,27 @@ func TestVerifyTOTP(t *testing.T) {
 			require.Equal(t, user.ID, identity.UserID)
 		})
 	}
+}
+
+func TestTOTPUsesTheConfiguredPeriodAndDigits(t *testing.T) {
+	options := totpOptions()
+	options.TOTP.Period, options.TOTP.Digits = 60, 8
+	fixture := newFixture(t, options)
+	user := fixture.createUser(t, "ada", "")
+	browser := loggedInClient(t, fixture)
+
+	setup := decodeBody[setupResponse](t, browser.post(setupPath, map[string]any{}))
+	require.Contains(t, setup.OTPAuthURL, "digits=8")
+	require.Contains(t, setup.OTPAuthURL, "period=60")
+	enable := browser.post(enablePath, map[string]any{"code": fixture.code(t, setup.Secret, 0), "password": testPassword})
+	require.Equal(t, http.StatusOK, enable.Code, enable.Body.String())
+
+	pending := fixture.pendingClient(t, "ada")
+	fixture.clock.advance(time.Minute) // the enable code used the current step
+	sixDigits, err := totp.GenerateCodeCustom(setup.Secret, fixture.clock.now(), totp.ValidateOpts{Period: 60, Digits: otp.DigitsSix})
+	require.NoError(t, err)
+	requireRefusal(t, pending.post(verifyPath, map[string]any{"code": sixDigits}), http.StatusUnauthorized, "invalid_totp_code")
+	requireIdentity(t, pending.post(verifyPath, map[string]any{"code": fixture.code(t, setup.Secret, 0)}), http.StatusOK, user)
 }
 
 func TestVerifyFailsOnAnUndecodableSecret(t *testing.T) {

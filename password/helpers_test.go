@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 	"github.com/stretchr/testify/require"
 
@@ -155,10 +156,13 @@ func requireSetTOTP(t *testing.T, storage Storage, id uuid.UUID, secret string, 
 	require.True(t, enabled)
 }
 
-// code returns the TOTP code of secret at the fixture's time plus offset.
+// code returns the TOTP code of secret at the fixture's time plus offset, on the provider's period and digits.
 func (f *fixture) code(t *testing.T, secret string, offset time.Duration) string {
 	t.Helper()
-	code, err := totp.GenerateCodeCustom(secret, f.clock.now().Add(offset), totp.ValidateOpts{Period: 30, Digits: 6})
+	code, err := totp.GenerateCodeCustom(secret, f.clock.now().Add(offset), totp.ValidateOpts{
+		Period: f.provider.options.TOTP.Period,
+		Digits: otp.Digits(f.provider.options.TOTP.Digits),
+	})
 	require.NoError(t, err)
 	return code
 }
