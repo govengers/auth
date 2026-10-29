@@ -249,7 +249,7 @@ func TestOpen(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.Equal(t, sessionIDOf(validValue), current.id)
-			require.Zero(t, current.startedAt)
+			require.Nil(t, current.start, "an opened session has no first save")
 		})
 	}
 }

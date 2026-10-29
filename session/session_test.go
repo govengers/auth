@@ -1,7 +1,9 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -214,6 +216,86 @@ func TestStartedHandleCannotRestartAnExpiredLifetime(t *testing.T) {
 	require.NoError(t, err)
 	_, err = opened.Identity(ctx)
 	require.ErrorIs(t, err, auth.ErrUnauthenticated, "the original cookie stays logged out")
+}
+
+// A full memory backend evicts revocation markers (MemoryBackend), so a logged-out session must not get its
+// identity back through a handle that outlived the logout: neither the retained Start handle nor a save that
+// read the identity before the logout.
+func TestSaveIdentityCannotResurrectAnEndedSession(t *testing.T) {
+	testCases := []struct {
+		name string
+		save func(t *testing.T, store *Store, started Session, request *http.Request, logout func()) error
+	}{
+		{name: "retained Start handle", save: func(t *testing.T, _ *Store, started Session, _ *http.Request, logout func()) error {
+			logout()
+			return started.SaveIdentity(t.Context(), testIdentity())
+		}},
+		{name: "save racing the logout", save: func(t *testing.T, store *Store, _ Session, request *http.Request, logout func()) error {
+			store.options.Backend = &afterGetBackend{Backend: store.options.Backend, afterGet: logout}
+			opened, err := store.Open(request)
+			require.NoError(t, err)
+			return opened.SaveIdentity(t.Context(), testIdentity())
+		}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			clock := newTestClock()
+			backend, err := NewMemoryBackend(&MemoryBackendOptions{MaximumSessions: 1})
+			require.NoError(t, err)
+			backend.now = clock.now
+			store := newTestStoreOn(t, clock, backend)
+			started, request := startSession(t, store)
+			require.NoError(t, started.SaveIdentity(t.Context(), testIdentity()))
+			logout := func() {
+				require.NoError(t, store.End(t.Context(), httptest.NewRecorder(), request))
+				other := Session{store: store, id: "other"}
+				require.NoError(t, other.Put(t.Context(), "login.state", []byte("state"), time.Minute), "evicts the marker")
+			}
+
+			err = testCase.save(t, store, started, request, logout)
+
+			require.ErrorIs(t, err, auth.ErrUnauthenticated)
+			opened, err := store.Open(request)
+			require.NoError(t, err)
+			_, err = opened.Identity(t.Context())
+			require.ErrorIs(t, err, auth.ErrUnauthenticated, "the original cookie stays logged out")
+		})
+	}
+}
+
+func TestSaveIdentityGivesUpAfterLosingEverySwap(t *testing.T) {
+	store := newTestStore(t, newTestClock())
+	request := login(t, store, testIdentity())
+	store.options.Backend = losingSwapBackend{Backend: store.options.Backend}
+	opened, err := store.Open(request)
+	require.NoError(t, err)
+
+	require.ErrorContains(t, opened.SaveIdentity(t.Context(), testIdentity()), "lost 3 swaps to concurrent saves")
+}
+
+// losingSwapBackend answers every CompareAndSwap as if another save came first.
+type losingSwapBackend struct {
+	Backend
+}
+
+func (losingSwapBackend) CompareAndSwap(context.Context, string, string, []byte, []byte) (bool, error) {
+	return false, nil
+}
+
+// afterGetBackend runs afterGet once, after the first Get returned.
+type afterGetBackend struct {
+	Backend
+	afterGet func()
+}
+
+func (b *afterGetBackend) Get(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
+	value, found, err := b.Backend.Get(ctx, sessionID, key)
+	if b.afterGet != nil {
+		afterGet := b.afterGet
+		b.afterGet = nil
+		afterGet()
+	}
+	return value, found, err
 }
 
 func TestIdentityChecksTheEnvelopeExpiry(t *testing.T) {
