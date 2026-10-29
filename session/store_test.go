@@ -260,12 +260,15 @@ func TestEnd(t *testing.T) {
 	cancel()
 	recorder := httptest.NewRecorder()
 
+	before := time.Now()
 	require.NoError(t, store.End(canceled, recorder, request))
+	after := time.Now()
 
 	requireExpiredCookie(t, recorder)
 	require.Equal(t, []error{nil}, recording.revokeErrors, "revoked with a context the client cannot cancel")
 	require.Len(t, recording.revokeDeadlines, 1)
-	require.WithinDuration(t, time.Now().Add(10*time.Second), recording.revokeDeadlines[0], time.Second, "but with its own 10 s timeout")
+	require.False(t, recording.revokeDeadlines[0].Before(before.Add(10*time.Second)), "but with its own 10 s timeout")
+	require.False(t, recording.revokeDeadlines[0].After(after.Add(10*time.Second)), "but with its own 10 s timeout")
 	_, found, err := current.Get(t.Context(), "app.key")
 	require.NoError(t, err)
 	require.False(t, found)
