@@ -152,6 +152,11 @@ func TestNewVerifierAppliesDefaultsToACopy(t *testing.T) {
 	require.Equal(t, int32(1), keySets.fetches.Load())
 }
 
+// truncatedKeySet serves a JWKS document that ends early.
+var truncatedKeySet = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	_, _ = writer.Write([]byte(`{"keys":`)) // the client reads what arrives; a lost write fails the parse as well
+})
+
 func TestNewVerifierFailsWhenTheJWKSCannotBeFetched(t *testing.T) {
 	closed := httptest.NewServer(failingHandler)
 	closed.Close()
@@ -162,9 +167,10 @@ func TestNewVerifierFailsWhenTheJWKSCannotBeFetched(t *testing.T) {
 	}{
 		{name: "unreachable", jwksURL: closed.URL, wantError: "fetch JWKS"},
 		{name: "server error", jwksURL: newKeySetServer(t, failingHandler).server.URL, wantError: "status 500"},
-		{name: "not a key set", jwksURL: newKeySetServer(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-			_, _ = writer.Write([]byte(`{"keys":`)) // the client reads what arrives; a lost write fails the parse as well
-		})).server.URL, wantError: "parse JWKS"},
+		{name: "not a key set", jwksURL: newKeySetServer(t, truncatedKeySet).server.URL, wantError: "parse JWKS"},
+		{name: "larger than 1 MiB", jwksURL: newKeySetServer(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write([]byte(`{"keys":[],"padding":"` + strings.Repeat("x", 1<<20) + `"}`)) // a lost write fails the test
+		})).server.URL, wantError: "is larger than 1 MiB"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -213,6 +219,11 @@ func TestNewVerifierFailsWithoutAnRSASigningKey(t *testing.T) {
 	encryptionKey["use"] = "enc"
 	keyWithoutAlgorithm := maps.Clone(signerKey)
 	delete(keyWithoutAlgorithm, "alg")
+	keyWithEncryptionAlgorithm := maps.Clone(signerKey)
+	keyWithEncryptionAlgorithm["alg"] = "RSA-OAEP"
+	delete(keyWithEncryptionAlgorithm, "use")
+	keyWithECAlgorithm := maps.Clone(signerKey)
+	keyWithECAlgorithm["alg"] = "ES256"
 	testCases := []struct {
 		name string
 		key  map[string]any
@@ -220,6 +231,8 @@ func TestNewVerifierFailsWithoutAnRSASigningKey(t *testing.T) {
 		{name: "symmetric key", key: symmetricKey},
 		{name: "encryption key", key: encryptionKey},
 		{name: "key without alg", key: keyWithoutAlgorithm},
+		{name: "RSA key with an encryption alg and no use", key: keyWithEncryptionAlgorithm},
+		{name: "RSA key with an EC alg", key: keyWithECAlgorithm},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -255,6 +268,23 @@ func TestVerifyIgnoresSymmetricKeysOfTheJWKS(t *testing.T) {
 	require.Equal(t, "42", identity.Subject)
 }
 
+func TestVerifySkipsUnparsableKeysOfTheJWKS(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	signer := newTestSigner(t, clock.now)
+	unknownType := map[string]any{"kty": "AKP", "kid": "pq-1", "alg": "ML-DSA-44", "pub": "AAAA"}
+	brokenModulus := map[string]any{"kty": "RSA", "kid": "broken-1", "alg": "RS512", "n": "!!!", "e": "AQAB"}
+	withoutType := map[string]any{"kid": "no-kty"}
+	keySets := newKeySetServer(t, keySetHandler(t, unknownType, brokenModulus, withoutType, publishedKey(t, signer)))
+	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
+	require.NoError(t, err)
+
+	identity, err := verifier.Verify(t.Context(), token)
+
+	require.NoError(t, err)
+	require.Equal(t, "42", identity.Subject)
+}
+
 func TestVerifierErrorsOmitCredentialsOfTheJWKSURL(t *testing.T) {
 	withCredentials := func(serverURL string) string {
 		location, err := url.Parse(serverURL)
@@ -274,7 +304,7 @@ func TestVerifierErrorsOmitCredentialsOfTheJWKSURL(t *testing.T) {
 		{name: "other scheme", jwksURL: "ftp://user:secret-password@auth.example.com/jwks?token=secret-query", wantError: "JWKSURL ftp://auth.example.com/jwks must be"},
 		{name: "unreachable", jwksURL: withCredentials(closed.URL), wantError: "fetch JWKS: Get \"" + closed.URL + "\""},
 		{name: "server error", jwksURL: withCredentials(newKeySetServer(t, failingHandler).server.URL), wantError: "status 500"},
-		{name: "not a key set", jwksURL: withCredentials(newKeySetServer(t, keySetHandler(t, map[string]any{"kty": "RSA"})).server.URL), wantError: "parse JWKS http://127.0.0.1"},
+		{name: "not a key set", jwksURL: withCredentials(newKeySetServer(t, truncatedKeySet).server.URL), wantError: "parse JWKS http://127.0.0.1"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -631,6 +661,57 @@ func TestVerifyFailsWhenTheRefetchForAnUnknownKeyIDFails(t *testing.T) {
 	require.Nil(t, identity)
 }
 
+func TestVerifyDoesNotWaitForARefetchWithAKnownKeyID(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	signer, rotated := newTestSigner(t, clock.now), newTestSigner(t, clock.now)
+	keySets := newKeySetServer(t, signer.JWKSHandler())
+	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
+	fetchStarted, releaseFetch := make(chan struct{}), make(chan struct{})
+	started, release := sync.OnceFunc(func() { close(fetchStarted) }), sync.OnceFunc(func() { close(releaseFetch) })
+	defer release()
+	rotatedKeys := keySetHandler(t, publishedKey(t, signer), publishedKey(t, rotated))
+	keySets.serve(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		started()
+		<-releaseFetch
+		rotatedKeys.ServeHTTP(writer, request)
+	}))
+	clock.advance(time.Minute)
+	sign := func(signer *Signer) string {
+		token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
+		require.NoError(t, err)
+		return token
+	}
+	unknownToken, knownToken, laterUnknownToken := sign(rotated), sign(signer), sign(rotated)
+
+	unknownVerified := make(chan error, 1)
+	go func() {
+		_, err := verifier.Verify(t.Context(), unknownToken)
+		unknownVerified <- err
+	}()
+	<-fetchStarted
+	knownVerified := make(chan error, 1)
+	go func() {
+		_, err := verifier.Verify(t.Context(), knownToken)
+		knownVerified <- err
+	}()
+	laterUnknownVerified := make(chan error, 1)
+	go func() {
+		_, err := verifier.Verify(t.Context(), laterUnknownToken)
+		laterUnknownVerified <- err
+	}()
+
+	select {
+	case err := <-knownVerified:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "a known key ID waited for the JWKS fetch")
+	}
+	release()
+	require.NoError(t, <-unknownVerified, "the fetch brought the rotated key")
+	require.NoError(t, <-laterUnknownVerified, "an unknown key ID during the fetch gets the fetched keys")
+	require.Equal(t, int32(2), keySets.fetches.Load(), "one refetch for all")
+}
+
 func TestVerifyIsSafeForConcurrentUse(t *testing.T) {
 	clock := &testClock{instant: signedAt}
 	signer := newTestSigner(t, clock.now)
@@ -675,6 +756,9 @@ func TestMiddleware(t *testing.T) {
 		{name: "empty bearer", header: http.Header{"Authorization": {"Bearer "}}, wantStatus: http.StatusUnauthorized, wantBody: `{"code":"unauthenticated","message":"authentication required"}`, wantResult: auth.ResultDenied},
 		{name: "invalid token", header: http.Header{"Authorization": {"Bearer " + token + "x"}}, wantStatus: http.StatusUnauthorized, wantBody: `{"code":"invalid_token","message":"authentication required"}`, wantResult: auth.ResultDenied},
 		{name: "valid token", header: http.Header{"Authorization": {"bearer " + token}}, wantStatus: http.StatusOK, wantBody: "42", wantResult: auth.ResultSuccess},
+		{name: "two spaces after the scheme", header: http.Header{"Authorization": {"Bearer  " + token}}, wantStatus: http.StatusOK, wantBody: "42", wantResult: auth.ResultSuccess},
+		{name: "space after the token", header: http.Header{"Authorization": {"Bearer " + token + " "}}, wantStatus: http.StatusOK, wantBody: "42", wantResult: auth.ResultSuccess},
+		{name: "only spaces after the scheme", header: http.Header{"Authorization": {"Bearer   "}}, wantStatus: http.StatusUnauthorized, wantBody: `{"code":"unauthenticated","message":"authentication required"}`, wantResult: auth.ResultDenied},
 		{name: "valid token in another header", headerName: "X-Auth-Token", header: http.Header{"X-Auth-Token": {"Bearer " + token}}, wantStatus: http.StatusOK, wantBody: "42", wantResult: auth.ResultSuccess},
 		{name: "token in the default header while another is configured", headerName: "X-Auth-Token", header: http.Header{"Authorization": {"Bearer " + token}}, wantStatus: http.StatusUnauthorized, wantBody: `{"code":"unauthenticated","message":"authentication required"}`, wantResult: auth.ResultDenied},
 	}
