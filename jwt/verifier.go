@@ -1,0 +1,306 @@
+package jwt
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/lestrrat-go/jwx/v3/jwk"
+	"github.com/lestrrat-go/jwx/v3/jws"
+	jwxjwt "github.com/lestrrat-go/jwx/v3/jwt"
+
+	"github.com/govengers/auth"
+)
+
+const (
+	defaultRefreshInterval = time.Hour
+	minimumFetchSpacing    = time.Minute
+	clockSkew              = 30 * time.Second
+	defaultHTTPTimeout     = 10 * time.Second
+	defaultHeaderName      = "Authorization"
+	maximumKeySetBytes     = 1 << 20
+	providerName           = "jwt" // Outcome.Provider of the verifier's outcomes
+	codeInvalidToken       = "invalid_token"
+)
+
+// VerifierOptions configure a Verifier.
+type VerifierOptions struct {
+	JWKSURL         string        // required: absolute http(s) URL of the signer's JWKS
+	Issuer          string        // required: expected iss
+	Audience        string        // optional: when set, aud must contain it
+	RefreshInterval time.Duration // default 1 h, at least 1 min; an unknown kid triggers a refetch at most once per minute
+	HTTPClient      *http.Client  // default 10 s timeout
+	HeaderName      string        // default "Authorization", value "Bearer <token>"
+	Observer        auth.Observer // optional; Middleware reports one ActionAuthenticate outcome per request
+}
+
+// Verifier checks RS512 tokens against a JWKS URL and turns them into identities. It keeps no token
+// cache and starts no goroutine: Verify refetches the JWKS lazily, after RefreshInterval or for an
+// unknown key ID, at most once per minute. It is safe for concurrent use.
+type Verifier struct {
+	options VerifierOptions
+	now     func() time.Time
+
+	mutex       sync.Mutex // guards the fields below; held during a JWKS fetch
+	keys        jwk.Set
+	fetchedAt   time.Time // last successful fetch
+	attemptedAt time.Time // last fetch, successful or not
+}
+
+// NewVerifier fetches the JWKS once and fails when it cannot (fail fast). ctx bounds that fetch only.
+func NewVerifier(ctx context.Context, options *VerifierOptions) (*Verifier, error) {
+	resolved, err := resolveVerifierOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	verifier := &Verifier{options: resolved, now: time.Now}
+	if err := verifier.refreshKeys(ctx); err != nil {
+		return nil, fmt.Errorf("new JWT verifier: %w", err)
+	}
+	return verifier, nil
+}
+
+func resolveVerifierOptions(options *VerifierOptions) (VerifierOptions, error) {
+	if options == nil {
+		return VerifierOptions{}, errors.New("new JWT verifier: options are required")
+	}
+	resolved := *options
+	if err := validateJWKSURL(resolved.JWKSURL); err != nil {
+		return VerifierOptions{}, fmt.Errorf("new JWT verifier: %w", err)
+	}
+	if resolved.Issuer == "" {
+		return VerifierOptions{}, errors.New("new JWT verifier: Issuer is required")
+	}
+	if resolved.RefreshInterval == 0 {
+		resolved.RefreshInterval = defaultRefreshInterval
+	}
+	if resolved.RefreshInterval < minimumFetchSpacing {
+		return VerifierOptions{}, fmt.Errorf("new JWT verifier: RefreshInterval %s is below %s", resolved.RefreshInterval, minimumFetchSpacing)
+	}
+	if resolved.HTTPClient == nil {
+		resolved.HTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
+	}
+	if resolved.HeaderName == "" {
+		resolved.HeaderName = defaultHeaderName
+	}
+	return resolved, nil
+}
+
+func validateJWKSURL(jwksURL string) error {
+	parsed, err := url.Parse(jwksURL)
+	if err != nil {
+		return fmt.Errorf("JWKSURL: %w", err)
+	}
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return fmt.Errorf("JWKSURL %q must be an absolute http or https URL", jwksURL)
+	}
+	return nil
+}
+
+// Verify checks the token's signature (with the JWKS key named by its kid, under the key's algorithm),
+// iss, aud, exp (required), nbf and iat with 30 s clock skew, and returns the identity it carries: Active,
+// the fields of the package claim table and Claims = all claims of the token. Claims of the wrong type
+// are skipped. An invalid token is an *auth.Error{Kind: auth.ErrUnauthenticated, Code: "invalid_token"};
+// a failed JWKS fetch for an unknown kid is a plain error. A failed periodic refresh keeps the previous
+// keys (Middleware reports it as a degraded outcome).
+func (v *Verifier) Verify(ctx context.Context, token string) (*auth.Identity, error) {
+	// The refresh error is survived with the previous keys; Verify has no channel for it, Middleware reports it.
+	identity, _, err := v.verify(ctx, token)
+	return identity, err
+}
+
+// verify is Verify that also returns, on success, the error of a failed periodic refresh it survived
+// with the previous keys.
+func (v *Verifier) verify(ctx context.Context, token string) (identity *auth.Identity, refreshError, err error) {
+	keyID, err := keyIDOf(token)
+	if err != nil {
+		return nil, nil, invalidToken("read token header", err)
+	}
+	keys, refreshError, err := v.keysFor(ctx, keyID)
+	if err != nil {
+		return nil, nil, err
+	}
+	parsed, err := jwxjwt.ParseString(token, v.parseOptions(keys)...)
+	if err != nil {
+		return nil, nil, invalidToken("verify token", err)
+	}
+	claims, err := claimsOf(parsed)
+	if err != nil {
+		return nil, nil, err
+	}
+	return identityFromClaims(claims), refreshError, nil
+}
+
+func keyIDOf(token string) (string, error) {
+	message, err := jws.ParseString(token, jws.WithCompact())
+	if err != nil {
+		return "", dependencyError("parse token", err)
+	}
+	signatures := message.Signatures()
+	if len(signatures) != 1 {
+		return "", fmt.Errorf("token has %d signatures, want 1", len(signatures))
+	}
+	keyID, _ := signatures[0].ProtectedHeaders().KeyID()
+	if keyID == "" {
+		return "", errors.New("token header has no kid")
+	}
+	return keyID, nil
+}
+
+// keysFor returns the keys to verify a token with key ID keyID, refetching them first when they are
+// stale or lack keyID and the last fetch is at least a minute ago. A failed refetch is err when the
+// keys lack keyID, and refreshError (the previous keys are returned) when they have it.
+func (v *Verifier) keysFor(ctx context.Context, keyID string) (keys jwk.Set, refreshError, err error) {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+	// ponytail: the fetch runs under the lock, so verifications wait for it (at most HTTPClient's timeout,
+	// at most once a minute); switch to a fetch-in-flight flag if that latency matters.
+	_, known := v.keys.LookupKeyID(keyID)
+	if !v.fetchDue(known) {
+		return v.keys, nil, nil
+	}
+	fetchError := v.refreshKeys(ctx)
+	switch {
+	case fetchError == nil:
+		return v.keys, nil, nil
+	case known:
+		return v.keys, fetchError, nil
+	default:
+		return nil, nil, fetchError
+	}
+}
+
+func (v *Verifier) fetchDue(keyKnown bool) bool {
+	now := v.now()
+	stale := now.Sub(v.fetchedAt) >= v.options.RefreshInterval
+	return (stale || !keyKnown) && now.Sub(v.attemptedAt) >= minimumFetchSpacing
+}
+
+// refreshKeys fetches the JWKS and replaces the keys on success. The caller holds the mutex (or owns the
+// verifier exclusively, as NewVerifier does).
+func (v *Verifier) refreshKeys(ctx context.Context) error {
+	v.attemptedAt = v.now()
+	keys, err := fetchKeySet(ctx, v.options.HTTPClient, v.options.JWKSURL)
+	if err != nil {
+		return err
+	}
+	v.keys = keys
+	v.fetchedAt = v.attemptedAt
+	return nil
+}
+
+func fetchKeySet(ctx context.Context, httpClient *http.Client, jwksURL string) (jwk.Set, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build JWKS request: %w", err)
+	}
+	response, err := httpClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("fetch JWKS: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch JWKS %s: status %d", jwksURL, response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maximumKeySetBytes))
+	if err != nil {
+		return nil, fmt.Errorf("read JWKS %s: %w", jwksURL, err)
+	}
+	keys, err := jwk.Parse(body)
+	if err != nil {
+		return nil, dependencyError("parse JWKS "+jwksURL, err)
+	}
+	return keys, nil
+}
+
+func (v *Verifier) parseOptions(keys jwk.Set) []jwxjwt.ParseOption {
+	options := []jwxjwt.ParseOption{
+		jwxjwt.WithKeySet(keys),
+		jwxjwt.WithIssuer(v.options.Issuer),
+		jwxjwt.WithRequiredClaim(jwxjwt.ExpirationKey),
+		jwxjwt.WithAcceptableSkew(clockSkew),
+		jwxjwt.WithClock(jwxjwt.ClockFunc(v.now)),
+	}
+	if v.options.Audience != "" {
+		options = append(options, jwxjwt.WithAudience(v.options.Audience))
+	}
+	return options
+}
+
+// claimsOf returns the claims of a verified token as JSON values (numbers are float64).
+func claimsOf(token jwxjwt.Token) (map[string]any, error) {
+	payload, err := json.Marshal(token)
+	if err != nil {
+		return nil, dependencyError("encode verified claims", err)
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, fmt.Errorf("decode verified claims: %w", err)
+	}
+	return claims, nil
+}
+
+// invalidToken is the refusal of a token that failed operation. The cause goes into Reason as text only
+// (LIB-010), and Reason never reaches the client.
+func invalidToken(operation string, err error) error {
+	return &auth.Error{Kind: auth.ErrUnauthenticated, Code: codeInvalidToken, Reason: operation + ": " + err.Error()}
+}
+
+// Middleware requires a valid token in HeaderName ("Bearer <token>"): the identity goes into the request
+// context, a missing or invalid token is answered 401 JSON, a failed JWKS fetch 500. It reports one
+// ActionAuthenticate outcome per request to the Observer.
+func (v *Verifier) Middleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			ctx := request.Context()
+			identity, refreshError, err := v.authenticate(ctx, request.Header.Get(v.options.HeaderName))
+			v.report(ctx, outcomeOf(identity, refreshError, err))
+			if err != nil {
+				auth.WriteError(writer, err)
+				return
+			}
+			next.ServeHTTP(writer, request.WithContext(auth.WithIdentity(ctx, identity)))
+		})
+	}
+}
+
+func (v *Verifier) authenticate(ctx context.Context, headerValue string) (identity *auth.Identity, refreshError, err error) {
+	token, ok := bearerToken(headerValue)
+	if !ok {
+		return nil, nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "no bearer token in header " + v.options.HeaderName}
+	}
+	return v.verify(ctx, token)
+}
+
+func bearerToken(headerValue string) (string, bool) {
+	scheme, token, found := strings.Cut(headerValue, " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") || token == "" {
+		return "", false
+	}
+	return token, true
+}
+
+func outcomeOf(identity *auth.Identity, refreshError, err error) auth.Outcome {
+	outcome := auth.Outcome{Provider: providerName, Action: auth.ActionAuthenticate, Result: auth.ResultSuccess, Err: refreshError, Identity: identity}
+	var refusal *auth.Error
+	switch {
+	case errors.As(err, &refusal):
+		outcome.Result, outcome.Err = auth.ResultDenied, err
+	case err != nil:
+		outcome.Result, outcome.Err = auth.ResultError, err
+	}
+	return outcome
+}
+
+func (v *Verifier) report(ctx context.Context, outcome auth.Outcome) {
+	if v.options.Observer != nil {
+		v.options.Observer(ctx, outcome)
+	}
+}
