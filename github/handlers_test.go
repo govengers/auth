@@ -452,7 +452,10 @@ func TestLogoutFailsWhenTheSessionCannotBeEnded(t *testing.T) {
 }
 
 func TestLogoutIgnoresAClientDisconnect(t *testing.T) {
-	environment := newTestEnvironment(t, defaultTestTeams(), nil)
+	var loggedOut []*auth.Identity
+	environment := newTestEnvironment(t, defaultTestTeams(), func(options *Options) {
+		options.OnLogout = func(_ context.Context, identity *auth.Identity) { loggedOut = append(loggedOut, identity) }
+	})
 	login := environment.login(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -462,7 +465,27 @@ func TestLogoutIgnoresAClientDisconnect(t *testing.T) {
 
 	require.Equal(t, http.StatusFound, response.Code)
 	require.Len(t, environment.fake.RevokedTokens(), 1)
-	require.NoError(t, environment.outcomes.last(t).Err)
+	require.Len(t, loggedOut, 1)
+	outcome := environment.outcomes.last(t)
+	require.NoError(t, outcome.Err)
+	require.Equal(t, "42", outcome.Identity.Subject)
+}
+
+func TestLogoutWithAnUnreadableSessionIsADegradedSuccess(t *testing.T) {
+	environment := newTestEnvironment(t, defaultTestTeams(), nil)
+	login := environment.login(t)
+	environment.backend.failGet.Store(true)
+
+	response := environment.serve(withSessionCookie(t, newRequest(t, http.MethodGet, testExternalURL+"/auth/github/logout"), login))
+
+	require.Equal(t, http.StatusFound, response.Code)
+	require.Equal(t, -1, sessionCookie(t, response).MaxAge)
+	environment.backend.failGet.Store(false)
+	_, err := environment.sessionOf(t, login).Identity(t.Context())
+	require.ErrorIs(t, err, auth.ErrUnauthenticated, "the session is ended all the same")
+	outcome := environment.outcomes.last(t)
+	require.Equal(t, auth.ResultSuccess, outcome.Result)
+	require.ErrorIs(t, outcome.Err, errBackendDown)
 }
 
 func TestRefreshTeams(t *testing.T) {
