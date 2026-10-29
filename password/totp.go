@@ -92,13 +92,16 @@ func (p *Provider) startPendingSession(writer http.ResponseWriter, request *http
 	ctx := request.Context()
 	current, err := p.options.Sessions.Start(ctx, writer, request)
 	if err != nil {
-		return err
+		return fmt.Errorf("start pending login of user %s: %w", pending.UserID, err)
 	}
 	encoded, err := json.Marshal(pending)
 	if err != nil {
 		return fmt.Errorf("encode pending login: %w", err)
 	}
-	return current.Put(ctx, pendingKey, encoded, p.options.TOTP.PendingTTL)
+	if err := current.Put(ctx, pendingKey, encoded, p.options.TOTP.PendingTTL); err != nil {
+		return fmt.Errorf("store pending login of user %s: %w", pending.UserID, err)
+	}
+	return nil
 }
 
 // openPendingLogin returns the request's pending login with purpose; none, expired or another purpose is
@@ -110,7 +113,7 @@ func (p *Provider) openPendingLogin(ctx context.Context, request *http.Request, 
 	}
 	encoded, found, err := current.Get(ctx, pendingKey)
 	if err != nil {
-		return session.Session{}, pendingLogin{}, err
+		return session.Session{}, pendingLogin{}, fmt.Errorf("read pending login: %w", err)
 	}
 	if !found {
 		return session.Session{}, pendingLogin{}, noPendingLogin("no pending login", nil)
@@ -281,7 +284,7 @@ func (p *Provider) sessionAccount(ctx context.Context, request *http.Request) (t
 	}
 	identity, err := current.Identity(ctx)
 	if err != nil {
-		return totpAccount{}, err
+		return totpAccount{}, fmt.Errorf("read session identity: %w", err)
 	}
 	if identity.Impersonator != nil {
 		return totpAccount{}, &auth.Error{Kind: auth.ErrForbidden, Reason: "TOTP change while impersonating"}

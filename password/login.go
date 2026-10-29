@@ -68,7 +68,7 @@ func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) rep
 	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip OnLogout
 	identity, readError := p.sessionIdentity(ctx, request)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
-		return refused(err).degradedBy(readError)
+		return refused(fmt.Errorf("end session: %w", err)).degradedBy(readError)
 	}
 	if identity != nil && p.options.OnLogout != nil {
 		p.options.OnLogout(ctx, identity)

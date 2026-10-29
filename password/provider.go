@@ -176,7 +176,7 @@ func (p *Provider) signIn(writer http.ResponseWriter, request *http.Request, use
 		return nil, err
 	}
 	if err := current.SaveIdentity(request.Context(), identity); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("save session identity of user %s: %w", user.ID, err)
 	}
 	return identity, nil
 }
@@ -194,7 +194,7 @@ func (p *Provider) admit(writer http.ResponseWriter, request *http.Request, user
 	}
 	current, err := p.options.Sessions.Start(ctx, writer, request)
 	if err != nil {
-		return session.Session{}, nil, err
+		return session.Session{}, nil, fmt.Errorf("start session of user %s: %w", user.ID, err)
 	}
 	return current, identity, nil
 }

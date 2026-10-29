@@ -749,24 +749,25 @@ func TestTOTPManagementStorageFailures(t *testing.T) {
 
 func TestSessionBackendFailures(t *testing.T) {
 	testCases := []struct {
-		name    string
-		options Options
-		prepare func(t *testing.T, fixture *fixture) *client
-		path    string
-		body    any
+		name     string
+		options  Options
+		prepare  func(t *testing.T, fixture *fixture) *client
+		path     string
+		body     any
+		wantStep string // the step the error names
 	}{
-		{name: "login", prepare: func(t *testing.T, fixture *fixture) *client { return fixture.newClient(t) }, path: "/auth/password/login", body: map[string]any{"identifier": "ada", "password": testPassword}},
+		{name: "login", prepare: func(t *testing.T, fixture *fixture) *client { return fixture.newClient(t) }, path: "/auth/password/login", body: map[string]any{"identifier": "ada", "password": testPassword}, wantStep: "save session identity of user"},
 		{name: "login with a TOTP challenge", options: totpOptions(), prepare: func(t *testing.T, fixture *fixture) *client {
 			requireSetTOTP(t, fixture.storage, mustUserID(t, fixture, "ada"), testSecret, nil)
 			return fixture.newClient(t)
-		}, path: "/auth/password/login", body: map[string]any{"identifier": "ada", "password": testPassword}},
-		{name: "logout", prepare: loggedInClient, path: "/auth/password/logout", body: map[string]any{}},
+		}, path: "/auth/password/login", body: map[string]any{"identifier": "ada", "password": testPassword}, wantStep: "store pending login of user"},
+		{name: "logout", prepare: loggedInClient, path: "/auth/password/logout", body: map[string]any{}, wantStep: "end session"},
 		{name: "TOTP verify", options: totpOptions(), prepare: func(t *testing.T, fixture *fixture) *client {
 			requireSetTOTP(t, fixture.storage, mustUserID(t, fixture, "ada"), testSecret, nil)
 			return fixture.pendingClient(t, "ada")
-		}, path: verifyPath, body: map[string]any{"code": "000000"}},
-		{name: "TOTP setup", options: totpOptions(), prepare: loggedInClient, path: setupPath, body: map[string]any{}},
-		{name: "TOTP enable", options: totpOptions(), prepare: loggedInClient, path: enablePath, body: map[string]any{"code": "000000", "password": testPassword}},
+		}, path: verifyPath, body: map[string]any{"code": "000000"}, wantStep: "read pending login"},
+		{name: "TOTP setup", options: totpOptions(), prepare: loggedInClient, path: setupPath, body: map[string]any{}, wantStep: "read session identity"},
+		{name: "TOTP enable", options: totpOptions(), prepare: loggedInClient, path: enablePath, body: map[string]any{"code": "000000", "password": testPassword}, wantStep: "read session identity"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -782,6 +783,7 @@ func TestSessionBackendFailures(t *testing.T) {
 			outcome := fixture.outcomes.last(t)
 			require.Equal(t, auth.ResultError, outcome.Result)
 			require.ErrorIs(t, outcome.Err, errStorageDown)
+			require.ErrorContains(t, outcome.Err, testCase.wantStep)
 		})
 	}
 }
@@ -800,6 +802,7 @@ func TestEndingAPendingLoginReportsAFailedRevocation(t *testing.T) {
 	outcome := fixture.outcomes.last(t)
 	require.Equal(t, auth.ResultError, outcome.Result)
 	require.ErrorIs(t, outcome.Err, errStorageDown)
+	require.ErrorContains(t, outcome.Err, "end pending login")
 }
 
 func loggedInClient(t *testing.T, fixture *fixture) *client {

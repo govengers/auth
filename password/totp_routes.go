@@ -109,7 +109,7 @@ func (p *Provider) resumeVerification(writer http.ResponseWriter, request *http.
 // returned instead, so it is reported as the failure it is.
 func (p *Provider) endPendingLogin(writer http.ResponseWriter, request *http.Request, code, reason string) error {
 	if err := p.options.Sessions.End(request.Context(), writer, request); err != nil {
-		return err
+		return fmt.Errorf("end pending login: %w", err)
 	}
 	return &auth.Error{Kind: auth.ErrUnauthenticated, Code: code, Reason: reason}
 }
@@ -146,7 +146,7 @@ func (p *Provider) setupTOTP(writer http.ResponseWriter, request *http.Request) 
 		return refused(fmt.Errorf("encode TOTP setup: %w", err))
 	}
 	if err := account.session.Put(ctx, totpSetupKey, encoded, totpSetupTTL); err != nil {
-		return refused(err)
+		return refused(fmt.Errorf("store TOTP setup of user %s: %w", account.user.ID, err))
 	}
 	response := setupResponse{Secret: key.Secret(), OTPAuthURL: key.URL(), Issuer: key.Issuer(), AccountName: key.AccountName()}
 	return succeeded(http.StatusOK, response, account.outcomeIdentity())
@@ -198,7 +198,7 @@ func (p *Provider) enableTOTP(writer http.ResponseWriter, request *http.Request)
 func setupSecret(ctx context.Context, current session.Session) (string, error) {
 	encoded, found, err := current.Get(ctx, totpSetupKey)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read TOTP setup: %w", err)
 	}
 	var setup totpSetup
 	if !found || json.Unmarshal(encoded, &setup) != nil || setup.Secret == "" {
@@ -227,7 +227,7 @@ func (p *Provider) storeTOTP(writer http.ResponseWriter, request *http.Request, 
 		return nil, err
 	}
 	if err := current.SaveIdentity(ctx, identity); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("save session identity of user %s: %w", account.user.ID, err)
 	}
 	return identity, nil
 }
