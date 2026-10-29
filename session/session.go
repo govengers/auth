@@ -16,6 +16,8 @@ const identityKey = "identity"
 // Values are AES-256-GCM sealed with a random 12-byte nonce and additional data "<sessionID>\x00<key>";
 // a value that does not decrypt (moved, tampered, other key) counts as absent. A Session is safe for
 // concurrent use; the zero value is not usable.
+// The name repeats the package on purpose (NAM-003): it is the package's domain noun, like time.Time, and
+// session.Handle would hide what it is a handle on.
 type Session struct {
 	store     *Store
 	id        string
