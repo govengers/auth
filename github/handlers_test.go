@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -788,6 +789,33 @@ func TestRefreshTeamsKeepsAConcurrentSave(t *testing.T) {
 			require.Equal(t, auth.ResultSuccess, environment.outcomes.last(t).Result)
 		})
 	}
+}
+
+// A refresh that read its teams before a newer refresh saved another membership does not write its stale
+// membership over it: the admin role the newer refresh removed stays removed.
+func TestRefreshTeamsRefusesWhenAnotherRequestChangedTheMembership(t *testing.T) {
+	transport := &beforeTeamsTransport{}
+	environment := newTestEnvironment(t, defaultTestTeams(), func(options *Options) {
+		options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
+	})
+	login := environment.login(t)
+	current := environment.sessionOf(t, login)
+	stored := environment.identityOf(t, login)
+	require.Contains(t, stored.Roles, auth.RoleAdmin)
+	newer := stored.Clone()
+	newer.Teams, newer.Roles = []string{"acme/developers", "acme/ops"}, nil
+	transport.set(func() {
+		require.NoError(t, current.SaveIdentity(t.Context(), newer)) // the newer refresh, saved while this one waits for GitHub
+	})
+
+	response := environment.serve(withSessionCookie(t, newRequest(t, http.MethodPost, testExternalURL+"/auth/github/refresh-teams"), login))
+
+	require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
+	require.Equal(t, newer, environment.identityOf(t, login), "the newer membership stays")
+	outcome := environment.outcomes.last(t)
+	require.Equal(t, auth.ResultDenied, outcome.Result)
+	require.ErrorIs(t, outcome.Err, auth.ErrConflict)
+	require.NotContains(t, outcome.Identity.Roles, auth.RoleAdmin)
 }
 
 func TestRefreshTeamsRefusesWhenOtherRequestsKeepSaving(t *testing.T) {

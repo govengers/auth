@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 
 	"golang.org/x/oauth2"
 
@@ -250,9 +251,10 @@ func (p *Provider) refreshSession(ctx context.Context, writer http.ResponseWrite
 }
 
 // saveMembership saves stored with userMembership applied to its real identity, swapping against stored.
-// When another request saved the session since stored was read (a deactivation, an impersonation, the
-// Guard's refresh), the membership is applied to that save once more, so neither change is lost; a second
-// conflict refuses with ErrConflict.
+// When another request saved the session since stored was read (a deactivation, an impersonation), the
+// membership is applied to that save once more, so neither change is lost. A save that changed the
+// membership or the real user (a newer refresh, which may have revoked the admin role) or a second
+// conflict refuses with ErrConflict: the membership read here may be the older one.
 func (p *Provider) saveMembership(ctx context.Context, current session.Session, stored *auth.Identity, userMembership membership) (*auth.Identity, error) {
 	for attempt := 1; ; attempt++ {
 		updated := impersonation.WithReal(stored, withMembership(stored.Real(), userMembership))
@@ -270,8 +272,18 @@ func (p *Provider) saveMembership(ctx context.Context, current session.Session, 
 		if err != nil {
 			return stored, fmt.Errorf("github: refresh teams: %w", err)
 		}
+		if !sameMembership(stored.Real(), latest.Real()) {
+			return latest, &auth.Error{Kind: auth.ErrConflict, Reason: "team membership changed by another request during the team refresh"}
+		}
 		stored = latest
 	}
+}
+
+// sameMembership reports whether a and b are the same GitHub user with the same teams and admin role, the
+// fields withMembership owns.
+func sameMembership(a, b *auth.Identity) bool {
+	return a.Provider == b.Provider && a.Subject == b.Subject && slices.Equal(a.Teams, b.Teams) &&
+		slices.Contains(a.Roles, auth.RoleAdmin) == slices.Contains(b.Roles, auth.RoleAdmin)
 }
 
 // sessionToken returns the GitHub token stored in current; none or unreadable: ErrUnauthenticated.
