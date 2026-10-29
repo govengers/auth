@@ -172,3 +172,73 @@ type unreachableTransport struct{}
 func (unreachableTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, errUnreachable
 }
+
+func TestExchangeKeepsGitHubTextOutOfErrors(t *testing.T) {
+	const marker = "marker-secret alice@example.test"
+	testCases := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+		wantStatus  int
+		wantText    string
+	}{
+		{
+			name: "error answer with description", status: http.StatusOK, contentType: "application/json",
+			body:       `{"error":"bad_verification_code","error_description":"` + marker + `","error_uri":"https://docs.example.com/` + marker + `"}`,
+			wantStatus: http.StatusUnauthorized, wantText: `GitHub answered 200 bad_verification_code`,
+		},
+		{
+			name: "malformed error code", status: http.StatusBadRequest, contentType: "application/json",
+			body:       `{"error":"` + marker + `"}`,
+			wantStatus: http.StatusUnauthorized, wantText: "GitHub answered 400",
+		},
+		{
+			name: "refusal with a non-JSON body", status: http.StatusUnauthorized, contentType: "text/html",
+			body:       "<p>" + marker + "</p>",
+			wantStatus: http.StatusUnauthorized, wantText: "GitHub answered 401",
+		},
+		{
+			name: "outage with a body", status: http.StatusBadGateway, contentType: "text/html",
+			body:       "<p>" + marker + "</p>",
+			wantStatus: http.StatusInternalServerError, wantText: "GitHub answered 502",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", testCase.contentType)
+				writer.WriteHeader(testCase.status)
+				// A write error means the client under test hung up; its own assertion reports that.
+				_, _ = writer.Write([]byte(testCase.body))
+			}))
+			t.Cleanup(server.Close)
+			options := validOptions(t)
+			options.TokenURL = server.URL
+			provider, err := New(options)
+			require.NoError(t, err)
+
+			_, err = provider.exchange(t.Context(), "the-code", "the-verifier")
+
+			require.ErrorContains(t, err, testCase.wantText)
+			status, _ := auth.ResponseFor(err)
+			require.Equal(t, testCase.wantStatus, status)
+			for _, secret := range []string{"marker-secret", "alice", "the-code", "the-verifier", "client-secret"} {
+				require.NotContains(t, err.Error(), secret)
+			}
+		})
+	}
+}
+
+func TestExchangeKeepsACancelledContextDetectable(t *testing.T) {
+	options := validOptions(t)
+	options.TokenURL = "http://127.0.0.1:1/token"
+	provider, err := New(options)
+	require.NoError(t, err)
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err = provider.exchange(cancelled, "the-code", "the-verifier")
+
+	require.ErrorIs(t, err, context.Canceled)
+}
