@@ -10,6 +10,7 @@ require (
 	github.com/mxcd/go-wide-event-logger v0.3.2
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/stretchr/testify v1.12.1
+	golang.org/x/oauth2 v0.37.0
 )
 
 require (
