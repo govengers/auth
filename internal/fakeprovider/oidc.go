@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -96,7 +97,8 @@ type authorizationGrant struct {
 	redirectURI string
 }
 
-// NewOIDCHandler returns a fake issuer with a fresh RSA signing key.
+// NewOIDCHandler returns a fake issuer with a fresh RSA signing key. It keeps a copy of options:
+// changing them afterwards has no effect.
 func NewOIDCHandler(options *OIDCOptions) (*OIDCHandler, error) {
 	if options == nil || options.ClientID == "" || options.ClientSecret == "" {
 		return nil, errors.New("fakeprovider: ClientID and ClientSecret are required")
@@ -110,6 +112,9 @@ func NewOIDCHandler(options *OIDCOptions) (*OIDCHandler, error) {
 		return nil, fmt.Errorf("fakeprovider: generate signing key: %w", err)
 	}
 	resolved := *options
+	resolved.RedirectURIs = slices.Clone(options.RedirectURIs)
+	resolved.PostLogoutRedirectURIs = slices.Clone(options.PostLogoutRedirectURIs)
+	resolved.User = cloneUser(options.User)
 	if resolved.User.Subject == "" {
 		resolved.User.Subject = defaultSubject
 	}
@@ -126,6 +131,18 @@ func NewOIDCHandler(options *OIDCOptions) (*OIDCHandler, error) {
 	}
 	handler.mux = handler.routes(strings.TrimSuffix(issuer.Path, "/"))
 	return handler, nil
+}
+
+// cloneUser copies the slices and maps of user, so the caller's options cannot change a running issuer.
+func cloneUser(user OIDCUser) OIDCUser {
+	user.RealmRoles = slices.Clone(user.RealmRoles)
+	user.ClientRoles = slices.Clone(user.ClientRoles)
+	user.Groups = slices.Clone(user.Groups)
+	user.Attributes = maps.Clone(user.Attributes)
+	for name, values := range user.Attributes {
+		user.Attributes[name] = slices.Clone(values)
+	}
+	return user
 }
 
 func (h *OIDCHandler) routes(issuerPath string) *http.ServeMux {

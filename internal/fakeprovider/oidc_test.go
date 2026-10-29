@@ -193,3 +193,55 @@ func TestNewOIDCHandlerValidatesOptions(t *testing.T) {
 	_, err = fakeprovider.NewOIDCHandler(&fakeprovider.OIDCOptions{IssuerURL: "http://127.0.0.1:1"})
 	require.Error(t, err)
 }
+
+func TestTheIssuerKeepsNoSliceOrMapOfTheCaller(t *testing.T) {
+	options := fakeprovider.OIDCOptions{
+		ClientID: "client", ClientSecret: "secret",
+		RedirectURIs: []string{redirectURI}, PostLogoutRedirectURIs: []string{"http://app.test/bye"},
+		User: fakeprovider.OIDCUser{
+			Subject: "sub-alice", RealmRoles: []string{"admin"}, ClientRoles: []string{"editor"}, Groups: []string{"/staff"},
+			Attributes: map[string][]string{"team": {"chassis"}},
+		},
+		KeycloakRealm: "staff", KeycloakClientID: "service", KeycloakClientSecret: "service-secret",
+	}
+	issuer := fakeprovider.StartOIDC(t, options)
+
+	options.RedirectURIs[0], options.PostLogoutRedirectURIs[0] = "http://evil.test/callback", "http://evil.test/bye"
+	options.User.RealmRoles[0], options.User.ClientRoles[0], options.User.Groups[0] = "changed", "changed", "/changed"
+	options.User.Attributes["team"][0] = "changed"
+	options.User.Attributes["added"] = []string{"changed"}
+
+	status, body := exchange(t, issuer, codeFrom(t, authorize(t, issuer, validParameters())), codeVerifier)
+	require.Equal(t, http.StatusOK, status)
+	accessClaims := payload(t, body["access_token"].(string))
+	require.Equal(t, map[string]any{"roles": []any{"admin"}}, accessClaims["realm_access"])
+	require.Equal(t, map[string]any{"client": map[string]any{"roles": []any{"editor"}}}, accessClaims["resource_access"])
+	require.Equal(t, []any{"/staff"}, accessClaims["groups"])
+	require.Equal(t, "http://app.test/bye", get(t, issuer.IssuerURL()+"/end_session?post_logout_redirect_uri=http://app.test/bye").location)
+	require.Equal(t, map[string]any{"team": []any{"chassis"}}, keycloakAttributes(t, issuer))
+}
+
+// keycloakAttributes reads the user's attributes from the Admin API of the issuer's realm "staff".
+func keycloakAttributes(t *testing.T, issuer *fakeprovider.OIDCServer) any {
+	t.Helper()
+	form := url.Values{"grant_type": {"client_credentials"}, "client_id": {"service"}, "client_secret": {"service-secret"}}
+	tokenRequest, err := http.NewRequestWithContext(t.Context(), http.MethodPost, issuer.URL()+"/realms/staff/protocol/openid-connect/token", strings.NewReader(form.Encode()))
+	require.NoError(t, err)
+	tokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenResponse, err := noRedirects().Do(tokenRequest)
+	require.NoError(t, err)
+	defer func() { _ = tokenResponse.Body.Close() }() // read-only response, close error carries no information
+	var token struct {
+		AccessToken string `json:"access_token"`
+	}
+	require.NoError(t, json.NewDecoder(tokenResponse.Body).Decode(&token))
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, issuer.URL()+"/admin/realms/staff/users/sub-alice", nil)
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	response, err := noRedirects().Do(request)
+	require.NoError(t, err)
+	defer func() { _ = response.Body.Close() }() // read-only response, close error carries no information
+	var user map[string]any
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&user))
+	return user["attributes"]
+}
