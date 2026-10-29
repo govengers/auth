@@ -156,6 +156,15 @@ func (r reply) degradedBy(err error) reply {
 	return r
 }
 
+// decodeRequest decodes the request's JSON body into target; a malformed body is an ErrInvalidRequest refusal
+// naming the request.
+func decodeRequest(writer http.ResponseWriter, request *http.Request, target any, name string) error {
+	if err := httpjson.Decode(writer, request, target); err != nil {
+		return &auth.Error{Kind: auth.ErrInvalidRequest, Reason: "malformed " + name + " request", Err: err}
+	}
+	return nil
+}
+
 func (r reply) write(writer http.ResponseWriter) {
 	switch {
 	case r.result == auth.ResultDenied || r.result == auth.ResultError:

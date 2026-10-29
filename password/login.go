@@ -10,7 +10,6 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/fetchmetadata"
-	"github.com/govengers/auth/internal/httpjson"
 )
 
 type loginRequest struct {
@@ -21,8 +20,8 @@ type loginRequest struct {
 // login is flow F1: credentials, then a second-factor challenge or a session.
 func (p *Provider) login(writer http.ResponseWriter, request *http.Request) reply {
 	var body loginRequest
-	if err := httpjson.Decode(writer, request, &body); err != nil {
-		return refused(&auth.Error{Kind: auth.ErrInvalidRequest, Reason: "malformed login request", Err: err})
+	if err := decodeRequest(writer, request, &body, "login"); err != nil {
+		return refused(err)
 	}
 	user, rehash, err := p.checkCredentials(request.Context(), body.Identifier, body.Password)
 	if err != nil {
@@ -38,8 +37,8 @@ func (p *Provider) login(writer http.ResponseWriter, request *http.Request) repl
 // register creates a user and logs it in like a password login would (F3 register).
 func (p *Provider) register(writer http.ResponseWriter, request *http.Request) reply {
 	var body registerRequest
-	if err := httpjson.Decode(writer, request, &body); err != nil {
-		return refused(&auth.Error{Kind: auth.ErrInvalidRequest, Reason: "malformed registration request", Err: err})
+	if err := decodeRequest(writer, request, &body, "registration"); err != nil {
+		return refused(err)
 	}
 	if err := validateRegistration(body, p.options); err != nil {
 		return refused(err)

@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/govengers/auth"
-	"github.com/govengers/auth/internal/httpjson"
 	"github.com/govengers/auth/session"
 )
 
@@ -47,8 +46,8 @@ type statusResponse struct {
 func (p *Provider) verifyTOTP(writer http.ResponseWriter, request *http.Request) reply {
 	ctx := request.Context()
 	var body verifyRequest
-	if err := httpjson.Decode(writer, request, &body); err != nil {
-		return refused(&auth.Error{Kind: auth.ErrInvalidRequest, Reason: "malformed TOTP verify request", Err: err})
+	if err := decodeRequest(writer, request, &body, "TOTP verify"); err != nil {
+		return refused(err)
 	}
 	user, err := p.resumeVerification(writer, request)
 	if err != nil {
@@ -127,8 +126,8 @@ func (p *Provider) totpStatus(_ http.ResponseWriter, request *http.Request) repl
 // session until enable confirms it.
 func (p *Provider) setupTOTP(writer http.ResponseWriter, request *http.Request) reply {
 	ctx := request.Context()
-	if err := httpjson.Decode(writer, request, &struct{}{}); err != nil {
-		return refused(&auth.Error{Kind: auth.ErrInvalidRequest, Reason: "malformed TOTP setup request", Err: err})
+	if err := decodeRequest(writer, request, &struct{}{}, "TOTP setup"); err != nil {
+		return refused(err)
 	}
 	account, err := p.enrollmentAccount(ctx, request)
 	if err != nil {
@@ -157,8 +156,8 @@ func (p *Provider) setupTOTP(writer http.ResponseWriter, request *http.Request) 
 func (p *Provider) enableTOTP(writer http.ResponseWriter, request *http.Request) reply {
 	ctx := request.Context()
 	var body enableRequest
-	if err := httpjson.Decode(writer, request, &body); err != nil {
-		return refused(&auth.Error{Kind: auth.ErrInvalidRequest, Reason: "malformed TOTP enable request", Err: err})
+	if err := decodeRequest(writer, request, &body, "TOTP enable"); err != nil {
+		return refused(err)
 	}
 	account, err := p.enrollmentAccount(ctx, request)
 	if err != nil {
@@ -248,8 +247,8 @@ func (p *Provider) setTOTP(ctx context.Context, id uuid.UUID, secret string, has
 func (p *Provider) disableTOTP(writer http.ResponseWriter, request *http.Request) reply {
 	ctx := request.Context()
 	var body disableRequest
-	if err := httpjson.Decode(writer, request, &body); err != nil {
-		return refused(&auth.Error{Kind: auth.ErrInvalidRequest, Reason: "malformed TOTP disable request", Err: err})
+	if err := decodeRequest(writer, request, &body, "TOTP disable"); err != nil {
+		return refused(err)
 	}
 	account, err := p.sessionAccount(ctx, request)
 	if err != nil {
