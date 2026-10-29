@@ -646,6 +646,9 @@ func validateSession(configuration *Configuration) error {
 	if sameSite == http.SameSiteNoneMode && configuration.SessionInsecureCookie {
 		problems = append(problems, errors.New("SESSION_SAME_SITE=none requires a secure cookie: unset SESSION_INSECURE_COOKIE"))
 	}
+	if !configuration.SessionInsecureCookie && !redirect.IsSecureURL(configuration.ExternalURL) {
+		problems = append(problems, errors.New("EXTERNAL_URL is plain http on a host that is not loopback: browsers drop the Secure session cookie; use https or set SESSION_INSECURE_COOKIE=true (development only)"))
+	}
 	problems = append(problems,
 		minimumProblem("SESSION_MAXIMUM_AGE_SECONDS", configuration.SessionMaximumAgeSeconds, 1),
 		minimumProblem("SESSION_REFRESH_INTERVAL_SECONDS", configuration.SessionRefreshIntervalSeconds, 1),

@@ -51,6 +51,16 @@ func TestValidateConfigurationAcceptsCompleteSetups(t *testing.T) {
 			configuration.ExternalURL = "https://app.example.com/"
 			return configuration
 		}},
+		{name: "http loopback external URL", configuration: func() *Configuration {
+			configuration := validOIDCConfiguration()
+			configuration.ExternalURL = "http://127.0.0.1:8080"
+			return configuration
+		}},
+		{name: "http external URL with an insecure cookie", configuration: func() *Configuration {
+			configuration := validOIDCConfiguration()
+			configuration.ExternalURL, configuration.SessionInsecureCookie = "http://app.internal", true
+			return configuration
+		}},
 		{name: "oidc with keycloak (client credentials), redis, jwt and api keys", configuration: func() *Configuration {
 			configuration := validOIDCConfiguration()
 			configuration.KeycloakEnabled = true
@@ -110,6 +120,7 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		{name: "same site none with insecure cookie", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.SessionSameSite, configuration.SessionInsecureCookie = "none", true
 		}, problems: []string{"SESSION_SAME_SITE=none requires a secure cookie"}},
+		{name: "http external URL with a secure cookie", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.ExternalURL = "http://app.internal" }, problems: []string{"EXTERNAL_URL is plain http on a host that is not loopback"}},
 		{name: "redis without address", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionRedisEnabled = true }, problems: []string{"SESSION_REDIS_ADDRESS"}},
 		{name: "oidc without issuer and client", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.OIDCIssuer, configuration.OIDCClientID, configuration.OIDCClientSecret = "", "", " "
