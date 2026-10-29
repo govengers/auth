@@ -167,6 +167,15 @@ func TestOnLogin(t *testing.T) {
 			wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError,
 		},
 		{
+			name: "replaces the user ID",
+			hook: func(_ context.Context, identity *auth.Identity) (*auth.Identity, error) {
+				mapped := identity.Clone()
+				mapped.UserID = uuid.New()
+				return mapped, nil
+			},
+			wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError,
+		},
+		{
 			name:       "returns no identity",
 			hook:       func(context.Context, *auth.Identity) (*auth.Identity, error) { return nil, nil },
 			wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError,

@@ -60,7 +60,7 @@ type Options struct {
 	TOTP                 TOTPOptions
 	HashParameters       Parameters                                      // zero value: DefaultParameters(); at least 32 MiB, 1 iteration, salt and key 16 bytes
 	LegacyVerifier       func(password, storedHash string) (bool, error) // optional, e.g. VerifyBcrypt; consulted for stored hashes that are not Argon2id
-	OnLogin              auth.Hook
+	OnLogin              auth.Hook                                       // must keep UserID, the Storage user ID that Refresh and the TOTP routes look users up by; a login whose hook replaces it fails (500)
 	OnLogout             auth.LogoutHook
 	Observer             auth.Observer
 }
