@@ -22,7 +22,7 @@ func ExampleNew() {
 	}
 	defer server.Close()
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
-	defer func() { _ = client.Close() }()
+	defer func() { _ = client.Close() }() // nothing to flush
 
 	backend, err := redisbackend.New(&redisbackend.Options{Client: client, KeyPrefix: "myapp:session"})
 	if err != nil {

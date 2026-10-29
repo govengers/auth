@@ -933,50 +933,57 @@ func TestMiddlewareAnswersAFailedKeyFetchWithInternalError(t *testing.T) {
 	require.ErrorContains(t, outcomes[0].Err, "status 500")
 }
 
-func TestMiddlewareReportsAFailedRefreshAsDegradedSuccess(t *testing.T) {
-	clock := &testClock{instant: signedAt}
-	var outcomes []auth.Outcome
-	signer := newTestSigner(t, clock.now)
-	keySets := newKeySetServer(t, signer.JWKSHandler())
-	options := testVerifierOptions(keySets.server.URL)
-	options.Observer = func(_ context.Context, outcome auth.Outcome) { outcomes = append(outcomes, outcome) }
-	verifier := newTestVerifier(t, options, clock)
-	keySets.serve(failingHandler)
-	clock.advance(time.Hour)
-	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
-	require.NoError(t, err)
-	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/items", nil)
-	request.Header.Set("Authorization", "Bearer "+token)
-	recorder := httptest.NewRecorder()
+func TestMiddlewareReportsAFailedRefresh(t *testing.T) {
+	testCases := []struct {
+		name       string
+		sign       func(t *testing.T, signer *Signer, now time.Time) string
+		wantStatus int
+		wantBody   string
+		wantResult auth.Result
+		wantError  error // checked with ErrorIs when set
+	}{
+		{
+			name: "valid token: degraded success",
+			sign: func(t *testing.T, signer *Signer, _ time.Time) string {
+				token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
+				require.NoError(t, err)
+				return token
+			},
+			wantStatus: http.StatusOK, wantBody: "42", wantResult: auth.ResultSuccess,
+		},
+		{
+			name: "refused token: refusal",
+			sign: func(t *testing.T, signer *Signer, now time.Time) string {
+				return signWith(t, signer, jwa.RS512(), withClaim(validClaims(now), "iss", "https://evil.example.com"))
+			},
+			wantStatus: http.StatusUnauthorized, wantBody: `{"code":"invalid_token","message":"authentication required"}`, wantResult: auth.ResultDenied, wantError: auth.ErrUnauthenticated,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			clock := &testClock{instant: signedAt}
+			var outcomes []auth.Outcome
+			signer := newTestSigner(t, clock.now)
+			keySets := newKeySetServer(t, signer.JWKSHandler())
+			options := testVerifierOptions(keySets.server.URL)
+			options.Observer = func(_ context.Context, outcome auth.Outcome) { outcomes = append(outcomes, outcome) }
+			verifier := newTestVerifier(t, options, clock)
+			keySets.serve(failingHandler)
+			clock.advance(time.Hour)
+			request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/items", nil)
+			request.Header.Set("Authorization", "Bearer "+testCase.sign(t, signer, clock.now()))
+			recorder := httptest.NewRecorder()
 
-	verifier.Middleware()(subjectHandler()).ServeHTTP(recorder, request)
+			verifier.Middleware()(subjectHandler()).ServeHTTP(recorder, request)
 
-	require.Equal(t, http.StatusOK, recorder.Code)
-	require.Len(t, outcomes, 1)
-	require.Equal(t, auth.ResultSuccess, outcomes[0].Result)
-	require.ErrorContains(t, outcomes[0].Err, "status 500")
-}
-
-func TestMiddlewareReportsAFailedRefreshWithARefusal(t *testing.T) {
-	clock := &testClock{instant: signedAt}
-	var outcomes []auth.Outcome
-	signer := newTestSigner(t, clock.now)
-	keySets := newKeySetServer(t, signer.JWKSHandler())
-	options := testVerifierOptions(keySets.server.URL)
-	options.Observer = func(_ context.Context, outcome auth.Outcome) { outcomes = append(outcomes, outcome) }
-	verifier := newTestVerifier(t, options, clock)
-	keySets.serve(failingHandler)
-	clock.advance(time.Hour)
-	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/items", nil)
-	request.Header.Set("Authorization", "Bearer "+signWith(t, signer, jwa.RS512(), withClaim(validClaims(clock.now()), "iss", "https://evil.example.com")))
-	recorder := httptest.NewRecorder()
-
-	verifier.Middleware()(subjectHandler()).ServeHTTP(recorder, request)
-
-	require.Equal(t, http.StatusUnauthorized, recorder.Code)
-	require.JSONEq(t, `{"code":"invalid_token","message":"authentication required"}`, recorder.Body.String())
-	require.Len(t, outcomes, 1)
-	require.Equal(t, auth.ResultDenied, outcomes[0].Result)
-	require.ErrorIs(t, outcomes[0].Err, auth.ErrUnauthenticated)
-	require.ErrorContains(t, outcomes[0].Err, "status 500")
+			require.Equal(t, testCase.wantStatus, recorder.Code)
+			require.Equal(t, testCase.wantBody, strings.TrimSpace(recorder.Body.String()))
+			require.Len(t, outcomes, 1)
+			require.Equal(t, testCase.wantResult, outcomes[0].Result)
+			if testCase.wantError != nil {
+				require.ErrorIs(t, outcomes[0].Err, testCase.wantError)
+			}
+			require.ErrorContains(t, outcomes[0].Err, "status 500")
+		})
+	}
 }

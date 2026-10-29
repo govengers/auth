@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -261,33 +262,37 @@ func TestMiddlewarePassesRequestsWithoutKey(t *testing.T) {
 	}
 }
 
-func TestMiddlewareGivesEveryRequestItsOwnPermissions(t *testing.T) {
-	authenticator := newStatic(t, apikey.Options{})
-	handler := authenticator.Middleware()(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		identity := auth.IdentityFrom(request.Context())
-		_, _ = fmt.Fprint(writer, identity.Permissions)
-		identity.Permissions[0] = auth.Permission{Resource: "tampered", Access: auth.AccessWrite}
-	}))
-
-	for range 2 {
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, requestWith(t, headerValues{"X-API-Key": buildSecret}))
-		require.Equal(t, "[builds:write *:read]", recorder.Body.String())
+func TestMiddlewareGivesEveryRequestItsOwnSlices(t *testing.T) {
+	testCases := []struct {
+		name     string
+		secret   string
+		tamper   func(identity *auth.Identity) string // prints the slice under test, then changes it
+		wantBody string
+	}{
+		{name: "permissions", secret: buildSecret, tamper: func(identity *auth.Identity) string {
+			printed := fmt.Sprint(identity.Permissions)
+			identity.Permissions[0] = auth.Permission{Resource: "tampered", Access: auth.AccessWrite}
+			return printed
+		}, wantBody: "[builds:write *:read]"},
+		{name: "roles", secret: adminSecret, tamper: func(identity *auth.Identity) string {
+			printed := fmt.Sprint(identity.Roles)
+			identity.Roles[0] = "tampered"
+			return printed
+		}, wantBody: "[admin]"},
 	}
-}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			authenticator := newStatic(t, apikey.Options{})
+			handler := authenticator.Middleware()(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				_, _ = io.WriteString(writer, testCase.tamper(auth.IdentityFrom(request.Context()))) // the recorder never fails a write
+			}))
 
-func TestMiddlewareGivesEveryRequestItsOwnRoles(t *testing.T) {
-	authenticator := newStatic(t, apikey.Options{})
-	handler := authenticator.Middleware()(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		identity := auth.IdentityFrom(request.Context())
-		_, _ = fmt.Fprint(writer, identity.Roles)
-		identity.Roles[0] = "tampered"
-	}))
-
-	for range 2 {
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, requestWith(t, headerValues{"X-API-Key": adminSecret}))
-		require.Equal(t, "[admin]", recorder.Body.String())
+			for range 2 {
+				recorder := httptest.NewRecorder()
+				handler.ServeHTTP(recorder, requestWith(t, headerValues{"X-API-Key": testCase.secret}))
+				require.Equal(t, testCase.wantBody, recorder.Body.String())
+			}
+		})
 	}
 }
 

@@ -30,7 +30,7 @@ func newRedis(t *testing.T) (*miniredis.Miniredis, *redis.Client) {
 func newRedisOn(t *testing.T, server *miniredis.Miniredis) (*miniredis.Miniredis, *redis.Client) {
 	t.Helper()
 	client := redis.NewClient(&redis.Options{Addr: server.Addr(), MaxRetries: -1, DialerRetries: 1})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = client.Close() }) // nothing to flush
 	return server, client
 }
 
@@ -252,7 +252,7 @@ func newReplyDroppingBackend(t *testing.T, server *miniredis.Miniredis, onDrop f
 		}
 		return &replyDroppingConnection{Conn: connection, dropReply: dropReply, onDrop: onDrop}, nil
 	}})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = client.Close() }) // nothing to flush
 	backend, err := redisbackend.New(&redisbackend.Options{Client: client})
 	require.NoError(t, err)
 	return backend, dropReply
@@ -279,7 +279,7 @@ func (c *replyDroppingConnection) Read(buffer []byte) (int, error) {
 	if c.dropping {
 		c.dropping = false
 		_, _ = c.Conn.Read(buffer) // the reply arrived: the script ran
-		_ = c.Close()
+		_ = c.Close()              // the reply is lost on purpose; nothing to flush
 		c.onDrop()
 		return 0, io.EOF
 	}

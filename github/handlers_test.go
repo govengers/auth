@@ -145,7 +145,7 @@ func TestCallbackRefusals(t *testing.T) {
 		wantStatus int
 		wantCode   string
 		wantResult auth.Result
-		wantErr    string
+		wantError  string
 	}{
 		{
 			name:       "state mismatch",
@@ -207,7 +207,7 @@ func TestCallbackRefusals(t *testing.T) {
 		{
 			name:       "session store fails",
 			callback:   failingPutCallback,
-			wantStatus: http.StatusInternalServerError, wantCode: "internal", wantResult: auth.ResultError, wantErr: "github: store token",
+			wantStatus: http.StatusInternalServerError, wantCode: "internal", wantResult: auth.ResultError, wantError: "github: store token",
 		},
 		{
 			name: "identity cannot be saved",
@@ -216,7 +216,7 @@ func TestCallbackRefusals(t *testing.T) {
 				environment.backend.failPutKey = "identity"
 				return environment.callback(t, login, callbackURL)
 			},
-			wantStatus: http.StatusInternalServerError, wantCode: "internal", wantResult: auth.ResultError, wantErr: "github: save identity",
+			wantStatus: http.StatusInternalServerError, wantCode: "internal", wantResult: auth.ResultError, wantError: "github: save identity",
 		},
 	}
 	for _, testCase := range testCases {
@@ -241,7 +241,7 @@ func TestCallbackRefusals(t *testing.T) {
 			outcome := environment.outcomes.last(t)
 			require.Equal(t, auth.ActionCallback, outcome.Action)
 			require.Equal(t, testCase.wantResult, outcome.Result)
-			require.ErrorContains(t, outcome.Err, testCase.wantErr)
+			require.ErrorContains(t, outcome.Err, testCase.wantError)
 		})
 	}
 }
@@ -628,7 +628,7 @@ func TestRefreshTeamsRefusals(t *testing.T) {
 		wantStatus int
 		wantEnded  bool
 		wantResult auth.Result
-		wantErr    error  // checked with ErrorIs when set
+		wantError  error  // checked with ErrorIs when set
 		wantText   string // checked with ErrorContains
 	}{
 		{
@@ -644,7 +644,7 @@ func TestRefreshTeamsRefusals(t *testing.T) {
 				environment.fake.SetTeams([]fakeprovider.GitHubTeam{{Organization: "acme", Slug: "ops"}})
 				environment.backend.failRevoke.Store(true)
 			},
-			wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError, wantErr: errBackendDown, wantText: "github: end refused session",
+			wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError, wantError: errBackendDown, wantText: "github: end refused session",
 		},
 		{
 			name:       "token revoked at GitHub",
@@ -659,7 +659,7 @@ func TestRefreshTeamsRefusals(t *testing.T) {
 		{
 			name:       "session store fails",
 			prepare:    func(environment *testEnvironment) { environment.backend.failPut.Store(true) },
-			wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError, wantErr: errBackendDown, wantText: "github: save refreshed identity",
+			wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError, wantError: errBackendDown, wantText: "github: save refreshed identity",
 		},
 	}
 	for _, testCase := range testCases {
@@ -682,8 +682,8 @@ func TestRefreshTeamsRefusals(t *testing.T) {
 			require.Equal(t, auth.ActionRefreshTeams, outcome.Action)
 			require.Equal(t, testCase.wantResult, outcome.Result)
 			require.Equal(t, "42", outcome.Identity.Subject)
-			if testCase.wantErr != nil {
-				require.ErrorIs(t, outcome.Err, testCase.wantErr)
+			if testCase.wantError != nil {
+				require.ErrorIs(t, outcome.Err, testCase.wantError)
 			}
 			require.ErrorContains(t, outcome.Err, testCase.wantText)
 		})

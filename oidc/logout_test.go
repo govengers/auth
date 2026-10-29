@@ -350,11 +350,11 @@ func TestLogoutFailureKeepsTheSessionReadError(t *testing.T) {
 		target     string
 		failRevoke bool
 		wantStatus int
-		wantErr    error
+		wantError  error
 	}{
-		{name: "RP-initiated, session not ended", target: prefix + "/logout", failRevoke: true, wantStatus: http.StatusInternalServerError, wantErr: errRevokeFailed},
-		{name: "front-channel, session not ended", target: prefix + "/frontchannel-logout", failRevoke: true, wantStatus: http.StatusInternalServerError, wantErr: errRevokeFailed},
-		{name: "front-channel, refused", target: prefix + "/frontchannel-logout?iss=https%3A%2F%2Fother.example.com&sid=idp-session-1", wantStatus: http.StatusBadRequest, wantErr: auth.ErrInvalidRequest},
+		{name: "RP-initiated, session not ended", target: prefix + "/logout", failRevoke: true, wantStatus: http.StatusInternalServerError, wantError: errRevokeFailed},
+		{name: "front-channel, session not ended", target: prefix + "/frontchannel-logout", failRevoke: true, wantStatus: http.StatusInternalServerError, wantError: errRevokeFailed},
+		{name: "front-channel, refused", target: prefix + "/frontchannel-logout?iss=https%3A%2F%2Fother.example.com&sid=idp-session-1", wantStatus: http.StatusBadRequest, wantError: auth.ErrInvalidRequest},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -371,7 +371,7 @@ func TestLogoutFailureKeepsTheSessionReadError(t *testing.T) {
 
 			require.Equal(t, testCase.wantStatus, response.Code)
 			outcome := application.outcomes.last(t)
-			require.ErrorIs(t, outcome.Err, testCase.wantErr)
+			require.ErrorIs(t, outcome.Err, testCase.wantError)
 			require.ErrorIs(t, outcome.Err, errBackendDown, "the failed read shows on the outcome too")
 		})
 	}

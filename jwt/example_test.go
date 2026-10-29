@@ -15,17 +15,22 @@ import (
 )
 
 // examplePrivateKeyPEM stands in for the PEM key a deployment loads from its secret store.
-func examplePrivateKeyPEM() []byte {
+func examplePrivateKeyPEM() ([]byte, error) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+	return pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)}), nil
 }
 
 // The forward-auth server signs the identity of every checked request and serves the public key.
 func ExampleSigner() {
-	signer, err := jwt.NewSigner(&jwt.SignerOptions{PrivateKey: examplePrivateKeyPEM(), Issuer: "https://auth.example.com"})
+	privateKey, err := examplePrivateKeyPEM()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	signer, err := jwt.NewSigner(&jwt.SignerOptions{PrivateKey: privateKey, Issuer: "https://auth.example.com"})
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -47,7 +52,12 @@ func ExampleSigner() {
 
 // A backend verifies the token the forward-auth server put into the Authorization header.
 func ExampleVerifier() {
-	signer, err := jwt.NewSigner(&jwt.SignerOptions{PrivateKey: examplePrivateKeyPEM(), Issuer: "https://auth.example.com"})
+	privateKey, err := examplePrivateKeyPEM()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	signer, err := jwt.NewSigner(&jwt.SignerOptions{PrivateKey: privateKey, Issuer: "https://auth.example.com"})
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -62,7 +72,7 @@ func ExampleVerifier() {
 	}
 	api := verifier.Middleware()(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		identity := auth.IdentityFrom(request.Context())
-		fmt.Fprintln(writer, identity.Provider, identity.Username, identity.Permissions, identity.Permits("builds", auth.AccessRead))
+		_, _ = fmt.Fprintln(writer, identity.Provider, identity.Username, identity.Permissions, identity.Permits("builds", auth.AccessRead)) // the recorder never fails a write
 	}))
 
 	token, err := signer.Sign(&auth.Identity{Provider: "apikey", Subject: "ci", Username: "ci", Active: true, Permissions: []auth.Permission{{Resource: "builds", Access: auth.AccessWrite}}})

@@ -140,7 +140,7 @@ func rawServer(t *testing.T, answer string) string {
 			if _, err := http.ReadRequest(bufio.NewReader(connection)); err == nil {
 				_, _ = connection.Write([]byte(answer)) // the client may already have given up
 			}
-			_ = connection.Close()
+			_ = connection.Close() // nothing to flush
 		}
 	}()
 	t.Cleanup(func() {

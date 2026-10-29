@@ -25,7 +25,7 @@ func ExampleNew() {
 	}
 	protected := authenticator.Middleware()(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		identity := auth.IdentityFrom(request.Context())
-		fmt.Fprintln(writer, identity.Subject, identity.Roles, identity.Permissions)
+		_, _ = fmt.Fprintln(writer, identity.Subject, identity.Roles, identity.Permissions) // the recorder never fails a write
 	}))
 
 	for _, key := range []string{"ci-secret-0123456789", "guess"} {
