@@ -159,14 +159,11 @@ func (v *Verifier) verify(ctx context.Context, token string) (identity *auth.Ide
 // message may quote token material.
 func keyIDOf(token string) (string, error) {
 	message, err := jws.ParseString(token, jws.WithCompact())
-	if err != nil {
+	// The compact serialization carries exactly one signature; the length check only guards the index.
+	if err != nil || len(message.Signatures()) != 1 {
 		return "", errors.New("malformed token")
 	}
-	signatures := message.Signatures()
-	if len(signatures) != 1 {
-		return "", fmt.Errorf("token has %d signatures, want 1", len(signatures))
-	}
-	keyID, _ := signatures[0].ProtectedHeaders().KeyID()
+	keyID, _ := message.Signatures()[0].ProtectedHeaders().KeyID()
 	if keyID == "" {
 		return "", errors.New("token header has no kid")
 	}
