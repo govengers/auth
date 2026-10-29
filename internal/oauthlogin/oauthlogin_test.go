@@ -99,6 +99,34 @@ func TestBegin(t *testing.T) {
 	}
 }
 
+// A cross-site link to a login route must not end the visitor's session: Begin puts the state into an
+// authenticated session instead of starting a fresh one, and the callback finds it there.
+func TestBeginKeepsAnAuthenticatedSession(t *testing.T) {
+	store, _ := newRecordingStore(t)
+	loginRecorder := httptest.NewRecorder()
+	authenticated, err := store.Start(t.Context(), loginRecorder, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
+	require.NoError(t, err)
+	require.NoError(t, authenticated.SaveIdentity(t.Context(), &auth.Identity{Provider: "oidc", Subject: "user-1", Active: true}))
+	cookie, err := http.ParseSetCookie(loginRecorder.Header().Get("Set-Cookie"))
+	require.NoError(t, err)
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/login", nil)
+	request.AddCookie(cookie)
+	recorder := httptest.NewRecorder()
+
+	state, err := Begin(t.Context(), store, recorder, request, loginKey)
+
+	require.NoError(t, err)
+	require.Empty(t, recorder.Header().Values("Set-Cookie"), "the session cookie stays")
+	identity, err := authenticated.Identity(t.Context())
+	require.NoError(t, err, "the session stays authenticated")
+	require.Equal(t, "user-1", identity.Subject)
+	callback := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/callback?"+url.Values{"state": {state.State}, "code": {"code"}}.Encode(), nil)
+	callback.AddCookie(cookie)
+	completed, err := Complete(t.Context(), store, callback, loginKey)
+	require.NoError(t, err)
+	require.Equal(t, state, completed)
+}
+
 func TestBeginFailsWhenTheStateCannotBeStored(t *testing.T) {
 	store, err := session.NewStore(&session.StoreOptions{Backend: failingBackend{}, EncryptionKey: []byte("0123456789abcdef0123456789abcdef")})
 	require.NoError(t, err)
@@ -109,7 +137,21 @@ func TestBeginFailsWhenTheStateCannotBeStored(t *testing.T) {
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/login", nil)
 	request.Header.Set("Cookie", "auth_session=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 	_, err = Begin(t.Context(), store, httptest.NewRecorder(), request, loginKey)
-	require.ErrorIs(t, err, errBackendDown, "the previous session cannot be revoked")
+	require.ErrorIs(t, err, errBackendDown, "the previous session cannot be read")
+
+	store, err = session.NewStore(&session.StoreOptions{Backend: emptyFailingBackend{}, EncryptionKey: []byte("0123456789abcdef0123456789abcdef")})
+	require.NoError(t, err)
+	_, err = Begin(t.Context(), store, httptest.NewRecorder(), request, loginKey)
+	require.ErrorIs(t, err, errBackendDown, "the previous session without identity cannot be revoked")
+}
+
+// emptyFailingBackend finds nothing and fails every write.
+type emptyFailingBackend struct {
+	failingBackend
+}
+
+func (emptyFailingBackend) Get(context.Context, string, string) ([]byte, bool, error) {
+	return nil, false, nil
 }
 
 func TestComplete(t *testing.T) {

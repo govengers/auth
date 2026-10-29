@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -31,15 +32,16 @@ type State struct {
 	ReturnPath string `json:"returnPath"` // redirect.ReturnPath(request)
 }
 
-// Begin starts a fresh session (Store.Start), generates State (32 bytes), Nonce (32 bytes) and Verifier and stores them as JSON under key for 10 min.
+// Begin generates State (32 bytes), Nonce (32 bytes) and Verifier and stores them as JSON under key for 10 min,
+// in the session startLoginSession returns.
 func Begin(ctx context.Context, store *session.Store, writer http.ResponseWriter, request *http.Request, key string) (State, error) {
 	state, err := newState(request)
 	if err != nil {
 		return State{}, err
 	}
-	current, err := store.Start(ctx, writer, request)
+	current, err := startLoginSession(ctx, store, writer, request)
 	if err != nil {
-		return State{}, fmt.Errorf("start login session: %w", err)
+		return State{}, err
 	}
 	encoded, err := json.Marshal(state)
 	if err != nil {
@@ -68,6 +70,26 @@ func Complete(ctx context.Context, store *session.Store, request *http.Request, 
 		return State{}, err
 	}
 	return stored, nil
+}
+
+// startLoginSession keeps the request's session while it holds a live identity, so a cross-site link to a
+// login route cannot end it (the callback rotates the session after authentication anyway); otherwise it
+// starts a fresh one (Store.Start), which revokes the request's session.
+func startLoginSession(ctx context.Context, store *session.Store, writer http.ResponseWriter, request *http.Request) (session.Session, error) {
+	if current, err := store.Open(request); err == nil {
+		_, err := current.Identity(ctx)
+		if err == nil {
+			return current, nil
+		}
+		if !errors.Is(err, auth.ErrUnauthenticated) {
+			return session.Session{}, fmt.Errorf("read login session: %w", err)
+		}
+	}
+	current, err := store.Start(ctx, writer, request)
+	if err != nil {
+		return session.Session{}, fmt.Errorf("start login session: %w", err)
+	}
+	return current, nil
 }
 
 func newState(request *http.Request) (State, error) {
