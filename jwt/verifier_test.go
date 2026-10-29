@@ -168,6 +168,9 @@ func TestNewVerifierFailsWhenTheJWKSCannotBeFetched(t *testing.T) {
 		{name: "unreachable", jwksURL: closed.URL, wantError: "fetch JWKS"},
 		{name: "server error", jwksURL: newKeySetServer(t, failingHandler).server.URL, wantError: "status 500"},
 		{name: "not a key set", jwksURL: newKeySetServer(t, truncatedKeySet).server.URL, wantError: "parse JWKS"},
+		{name: "larger than 1 MiB", jwksURL: newKeySetServer(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write([]byte(`{"keys":[],"padding":"` + strings.Repeat("x", 1<<20) + `"}`)) // a lost write fails the test
+		})).server.URL, wantError: "is larger than 1 MiB"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

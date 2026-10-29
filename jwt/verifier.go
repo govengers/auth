@@ -36,7 +36,7 @@ const (
 
 // VerifierOptions configure a Verifier.
 type VerifierOptions struct {
-	JWKSURL         string        // required: absolute http(s) URL of the signer's JWKS; only its RSA keys with an RSA signature alg (RS*, PS*) and use "sig" (or none) count
+	JWKSURL         string        // required: absolute http(s) URL of the signer's JWKS (at most 1 MiB); only its RSA keys with an RSA signature alg (RS*, PS*) and use "sig" (or none) count
 	Issuer          string        // required: expected iss
 	Audience        string        // optional: when set, aud must contain it
 	RefreshInterval time.Duration // default 1 h, at least 1 min; an unknown kid triggers a refetch at most once per minute
@@ -235,9 +235,12 @@ func fetchKeySet(ctx context.Context, httpClient *http.Client, jwksURL string) (
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch JWKS %s: status %d", location, response.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, maximumKeySetBytes))
+	body, err := io.ReadAll(io.LimitReader(response.Body, maximumKeySetBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read JWKS %s: %w", location, err)
+	}
+	if len(body) > maximumKeySetBytes {
+		return nil, fmt.Errorf("JWKS %s is larger than 1 MiB", location)
 	}
 	// An entry jwx cannot parse (an unknown kty, a broken modulus) is dropped like the other keys that
 	// cannot verify a token, instead of failing the whole set; signingKeys fails when none is left.
