@@ -685,6 +685,9 @@ func validateKeycloak(configuration *Configuration) error {
 
 func validateJWT(configuration *Configuration) error {
 	problems := []error{minimumProblem("JWT_LIFETIME_SECONDS", configuration.JWTLifetimeSeconds, 1)}
+	if err := forwardauth.ValidateJWTHeader(configuration.JWTHeader); err != nil {
+		problems = append(problems, fmt.Errorf("JWT_HEADER %w", err))
+	}
 	if configuration.JWTEnabled {
 		problems = append(problems, requireValues("JWT_ENABLED=true", namedValue{"JWT_PRIVATE_KEY", configuration.JWTPrivateKey}))
 	}

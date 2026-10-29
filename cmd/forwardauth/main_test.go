@@ -118,6 +118,8 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 			configuration.KeycloakEnabled, configuration.KeycloakGrantType = true, "implicit"
 		}, problems: []string{"KEYCLOAK_GRANT_TYPE \"implicit\""}},
 		{name: "jwt without key", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTEnabled = true }, problems: []string{"JWT_PRIVATE_KEY"}},
+		{name: "jwt header that is no header name", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "X Auth" }, problems: []string{"JWT_HEADER \"X Auth\" is not an HTTP header name"}},
+		{name: "jwt header the check answer sets", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "Cache-Control" }, problems: []string{"JWT_HEADER \"Cache-Control\" is set by the check answer"}},
 		{name: "permissions for an unknown key", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.APIKeyPermissions = []string{"ci=builds:write"}
 		}, problems: []string{"API_KEY_PERMISSIONS names \"ci\""}},

@@ -41,6 +41,9 @@ const (
 // characters gin would read as a parameter or wildcard.
 var pathPattern = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
 
+// headerNamePattern is an RFC 9110 field name (a token); net/http silently drops a header with any other name.
+var headerNamePattern = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+
 // ServerOptions configure a Server. main fills them from the configuration.
 type ServerOptions struct {
 	Version           string
@@ -50,7 +53,7 @@ type ServerOptions struct {
 	Guard             *session.Guard                  // required
 	APIKeys           *apikey.Authenticator           // optional; runs before the Guard on the checks
 	Signer            *jwt.Signer                     // optional; enables the JWT header and {prefix}/jwks
-	JWTHeader         string                          // default "Authorization"; value "Bearer <jwt>"
+	JWTHeader         string                          // default "Authorization"; value "Bearer <jwt>"; see ValidateJWTHeader
 	IdentityEndpoint  bool                            // mounts {prefix}/me
 	Emitter           wideevent.Emitter               // required
 	SampleRate        int                             // required, >= 1: keep every Nth successful event
@@ -112,6 +115,9 @@ func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
 	if !validPathPrefix(resolved.PathPrefix) {
 		problems = append(problems, fmt.Errorf("PathPrefix %q must be an absolute path without a trailing \"/\"", resolved.PathPrefix))
 	}
+	if err := ValidateJWTHeader(resolved.JWTHeader); err != nil {
+		problems = append(problems, fmt.Errorf("JWTHeader %w", err))
+	}
 	if !validPort(resolved.Port) || !validPort(resolved.MetricsPort) {
 		problems = append(problems, fmt.Errorf("ports %d and %d must be between 0 and %d", resolved.Port, resolved.MetricsPort, maximumPort))
 	}
@@ -125,6 +131,19 @@ func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
 		return ServerOptions{}, fmt.Errorf("forwardauth server: %w", errors.Join(problems...))
 	}
 	return resolved, nil
+}
+
+// ValidateJWTHeader reports why name cannot carry the JWT of a check answer: it must be a header name,
+// and not one the check answer or net/http sets itself, which would overwrite or drop the token.
+func ValidateJWTHeader(name string) error {
+	if !headerNamePattern.MatchString(name) {
+		return fmt.Errorf("%q is not an HTTP header name", name)
+	}
+	switch http.CanonicalHeaderKey(name) {
+	case "Cache-Control", "Set-Cookie", "Connection", "Content-Length", "Transfer-Encoding":
+		return fmt.Errorf("%q is set by the check answer itself", name)
+	}
+	return nil
 }
 
 func validPathPrefix(pathPrefix string) bool {
