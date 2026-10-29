@@ -29,6 +29,16 @@ const (
 	signingKeyBits   = 2048
 )
 
+// oauthErrorCode is an OAuth error code (RFC 6749 4.1.2.1 and 5.2).
+type oauthErrorCode string
+
+const (
+	invalidRequest       oauthErrorCode = "invalid_request"
+	invalidClient        oauthErrorCode = "invalid_client"
+	invalidGrant         oauthErrorCode = "invalid_grant"
+	unsupportedGrantType oauthErrorCode = "unsupported_grant_type"
+)
+
 // OIDCUser is the one user the fake issuer logs in. With a Keycloak realm the Admin API answers with
 // the same roles and groups the access token carries.
 type OIDCUser struct {
@@ -246,7 +256,7 @@ func (h *OIDCHandler) authorize(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	if problem := authorizeProblem(query); problem != "" {
-		redirectWith(writer, request, redirectURI, url.Values{"error": {"invalid_request"}, "error_description": {problem}, "state": {query.Get("state")}})
+		redirectWith(writer, request, redirectURI, url.Values{"error": {string(invalidRequest)}, "error_description": {problem}, "state": {query.Get("state")}})
 		return
 	}
 	code := rand.Text()
@@ -281,26 +291,26 @@ func (h *OIDCHandler) token(writer http.ResponseWriter, request *http.Request) {
 	}
 	form, err := readForm(writer, request)
 	if err != nil {
-		oauthError(writer, http.StatusBadRequest, "invalid_request")
+		oauthError(writer, http.StatusBadRequest, invalidRequest)
 		return
 	}
 	clientID, clientSecret := clientCredentials(request, form)
 	if !matches(clientID, h.options.ClientID) || !matches(clientSecret, h.options.ClientSecret) {
-		oauthError(writer, http.StatusUnauthorized, "invalid_client")
+		oauthError(writer, http.StatusUnauthorized, invalidClient)
 		return
 	}
 	if form.Get("grant_type") != "authorization_code" {
-		oauthError(writer, http.StatusBadRequest, "unsupported_grant_type")
+		oauthError(writer, http.StatusBadRequest, unsupportedGrantType)
 		return
 	}
 	grant, found := h.takeCode(form.Get("code"))
 	switch {
 	case !found:
-		oauthError(writer, http.StatusBadRequest, "invalid_grant") // unknown or reused code
+		oauthError(writer, http.StatusBadRequest, invalidGrant) // unknown or reused code
 	case grant.redirectURI != form.Get("redirect_uri"):
-		oauthError(writer, http.StatusBadRequest, "invalid_grant")
+		oauthError(writer, http.StatusBadRequest, invalidGrant)
 	case challengeOf(form.Get("code_verifier")) != grant.challenge:
-		oauthError(writer, http.StatusBadRequest, "invalid_grant") // PKCE verification failed
+		oauthError(writer, http.StatusBadRequest, invalidGrant) // PKCE verification failed
 	default:
 		h.issueTokens(writer, grant)
 	}
@@ -469,8 +479,8 @@ func redirectWith(writer http.ResponseWriter, request *http.Request, target stri
 	http.Redirect(writer, request, parsed.String(), http.StatusFound) //nolint:gosec // G710: only to registered URIs, or to any when the test registered none
 }
 
-func oauthError(writer http.ResponseWriter, status int, code string) {
-	writeJSON(writer, status, map[string]string{"error": code})
+func oauthError(writer http.ResponseWriter, status int, code oauthErrorCode) {
+	writeJSON(writer, status, map[string]oauthErrorCode{"error": code})
 }
 
 func writeJSON(writer http.ResponseWriter, status int, body any) {

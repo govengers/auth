@@ -59,11 +59,11 @@ func (h *OIDCHandler) keycloakToken(writer http.ResponseWriter, request *http.Re
 	}
 	form, err := readForm(writer, request)
 	if err != nil {
-		oauthError(writer, http.StatusBadRequest, "invalid_request")
+		oauthError(writer, http.StatusBadRequest, invalidRequest)
 		return
 	}
 	if !h.adminGrantValid(request, form) {
-		oauthError(writer, http.StatusUnauthorized, "invalid_grant")
+		oauthError(writer, http.StatusUnauthorized, invalidGrant)
 		return
 	}
 	token := rand.Text()
