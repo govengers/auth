@@ -51,17 +51,29 @@ func RegisterRoutes(router gin.IRoutes, routes []auth.Route) {
 // Observe is an auth.Observer that records the outcome on the request's wide event: auth.provider,
 // auth.action, auth.result, the client code, reason and error of Err, degraded for a success with Err,
 // the subject and user ID of the identity, and the request outcome when the outcome decided it.
+// A session.Guard reports a refresh on the same event before the request's authenticate outcome, so a
+// refresh outcome goes under auth.refresh.* instead, without the user ID: no key is set twice.
 // Without a wide event in ctx it does nothing.
 func Observe(ctx context.Context, outcome auth.Outcome) {
 	we := wideevent.FromContext(ctx)
 	if we == nil {
 		return
 	}
-	recordDecision(we, outcome)
-	recordOutcomeError(we, outcome)
-	recordIdentity(we, outcome.Identity)
+	prefix := requestPrefix
+	if outcome.Action == auth.ActionRefresh {
+		prefix = refreshPrefix
+	}
+	recordDecision(we, prefix, outcome)
+	recordOutcomeError(we, prefix, outcome)
+	recordIdentity(we, prefix, outcome.Identity)
 	recordRequestOutcome(we, outcome)
 }
+
+// The key prefixes of an outcome's fields.
+const (
+	requestPrefix = "auth."
+	refreshPrefix = "auth.refresh."
+)
 
 // errNilCheck is the internal failure a Require without a check answers with.
 var errNilCheck = errors.New("authorization check is nil")
@@ -101,43 +113,45 @@ func RequireMethodPermission(resource string) gin.HandlerFunc {
 	}
 }
 
-func recordDecision(we *wideevent.Event, outcome auth.Outcome) {
-	we.Str("auth.provider", outcome.Provider).
-		Str("auth.action", string(outcome.Action)).
-		Str("auth.result", string(outcome.Result))
+func recordDecision(we *wideevent.Event, prefix string, outcome auth.Outcome) {
+	we.Str(prefix+"provider", outcome.Provider).
+		Str(prefix+"action", string(outcome.Action)).
+		Str(prefix+"result", string(outcome.Result))
 }
 
 // recordOutcomeError records what the client was told and why. A denial's or failure's error itself
 // becomes the request's error (recordRequestOutcome); a success with Err is a handled failure, so it is
 // recorded here and marks the event degraded.
-func recordOutcomeError(we *wideevent.Event, outcome auth.Outcome) {
+func recordOutcomeError(we *wideevent.Event, prefix string, outcome auth.Outcome) {
 	if outcome.Err == nil {
 		return
 	}
 	_, response := auth.ResponseFor(outcome.Err)
-	we.Str("auth.code", response.Code)
+	we.Str(prefix+"code", response.Code)
 	if reason, _ := refusalReason(outcome.Err); reason != "" {
-		we.Str("auth.reason", reason)
+		we.Str(prefix+"reason", reason)
 	}
 	switch outcome.Result {
 	case auth.ResultError:
-		we.Err("auth.error", outcome.Err)
+		we.Err(prefix+"error", outcome.Err)
 	case auth.ResultSuccess, auth.ResultChallenge:
-		we.Err("auth.error", outcome.Err).Bool("degraded", true)
+		we.Err(prefix+"error", outcome.Err).Bool("degraded", true)
 	case auth.ResultDenied:
 		// the refusal is recorded as the request's failure
 	}
 }
 
-func recordIdentity(we *wideevent.Event, identity *auth.Identity) {
+// recordIdentity records the identity's subject; the user ID only for the request's own outcome, since
+// user.id has no prefix.
+func recordIdentity(we *wideevent.Event, prefix string, identity *auth.Identity) {
 	if identity == nil {
 		return
 	}
-	we.Str("auth.subject", identity.Real().Subject)
+	we.Str(prefix+"subject", identity.Real().Subject)
 	if identity.Impersonator != nil {
-		we.Bool("auth.impersonating", true)
+		we.Bool(prefix+"impersonating", true)
 	}
-	if identity.UserID != uuid.Nil {
+	if prefix == requestPrefix && identity.UserID != uuid.Nil {
 		we.UserID(identity.UserID)
 	}
 }

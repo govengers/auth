@@ -33,7 +33,7 @@ func ExampleSigner() {
 	serveMux := http.NewServeMux()
 	auth.RegisterRoutes(serveMux, []auth.Route{{Method: http.MethodGet, Path: "/auth/jwks", Handler: signer.JWKSHandler()}})
 
-	token, err := signer.Sign(&auth.Identity{Provider: "github", Subject: "583231", Username: "octocat", Teams: []string{"org/team"}})
+	token, err := signer.Sign(&auth.Identity{Provider: "github", Subject: "583231", Username: "octocat", Active: true, Teams: []string{"org/team"}})
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -65,7 +65,7 @@ func ExampleVerifier() {
 		fmt.Fprintln(writer, identity.Provider, identity.Username, identity.Permissions, identity.Permits("builds", auth.AccessRead))
 	}))
 
-	token, err := signer.Sign(&auth.Identity{Provider: "apikey", Subject: "ci", Username: "ci", Permissions: []auth.Permission{{Resource: "builds", Access: auth.AccessWrite}}})
+	token, err := signer.Sign(&auth.Identity{Provider: "apikey", Subject: "ci", Username: "ci", Active: true, Permissions: []auth.Permission{{Resource: "builds", Access: auth.AccessWrite}}})
 	if err != nil {
 		fmt.Println(err)
 		return

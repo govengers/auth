@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lestrrat-go/jwx/v3/jwa"
 	"github.com/lestrrat-go/jwx/v3/jwk"
 	"github.com/lestrrat-go/jwx/v3/jws"
 	jwxjwt "github.com/lestrrat-go/jwx/v3/jwt"
@@ -34,7 +35,7 @@ const (
 
 // VerifierOptions configure a Verifier.
 type VerifierOptions struct {
-	JWKSURL         string        // required: absolute http(s) URL of the signer's JWKS
+	JWKSURL         string        // required: absolute http(s) URL of the signer's JWKS; only its RSA keys with alg and use "sig" (or none) count
 	Issuer          string        // required: expected iss
 	Audience        string        // optional: when set, aud must contain it
 	RefreshInterval time.Duration // default 1 h, at least 1 min; an unknown kid triggers a refetch at most once per minute
@@ -45,7 +46,8 @@ type VerifierOptions struct {
 
 // Verifier checks RS512 tokens against a JWKS URL and turns them into identities. It keeps no token
 // cache and starts no goroutine: Verify refetches the JWKS lazily, after RefreshInterval or for an
-// unknown key ID, at most once per minute. It is safe for concurrent use.
+// unknown key ID, at most once per minute; the refetch is not cancelled with the triggering request and
+// takes at most 10 s. It is safe for concurrent use.
 type Verifier struct {
 	options VerifierOptions
 	now     func() time.Time
@@ -95,15 +97,25 @@ func resolveVerifierOptions(options *VerifierOptions) (VerifierOptions, error) {
 	return resolved, nil
 }
 
+// validateJWKSURL checks jwksURL. Its errors never quote user info or query, which may carry credentials.
 func validateJWKSURL(jwksURL string) error {
 	parsed, err := url.Parse(jwksURL)
 	if err != nil {
-		return fmt.Errorf("JWKSURL: %w", err)
+		var urlError *url.Error
+		if errors.As(err, &urlError) {
+			err = urlError.Err // without the URL
+		}
+		return fmt.Errorf("JWKSURL is no URL: %w", err)
 	}
 	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return fmt.Errorf("JWKSURL %q must be an absolute http or https URL", jwksURL)
+		return fmt.Errorf("JWKSURL %s must be an absolute http or https URL", redactedURL(parsed))
 	}
 	return nil
+}
+
+// redactedURL is location without user info, query and fragment, for error messages [LOG-009].
+func redactedURL(location *url.URL) string {
+	return (&url.URL{Scheme: location.Scheme, Host: location.Host, Path: location.Path}).String()
 }
 
 // Verify checks the token's signature (with the JWKS key named by its kid, under the key's algorithm),
@@ -118,32 +130,37 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*auth.Identity, er
 	return identity, err
 }
 
-// verify is Verify that also returns, on success, the error of a failed periodic refresh it survived
-// with the previous keys.
+// verify is Verify that also returns the error of a failed periodic refresh it survived with the previous
+// keys, whether the token then verifies or not.
 func (v *Verifier) verify(ctx context.Context, token string) (identity *auth.Identity, refreshError, err error) {
 	keyID, err := keyIDOf(token)
 	if err != nil {
-		return nil, nil, invalidToken("read token header", err)
+		return nil, nil, invalidToken(err.Error())
 	}
 	keys, refreshError, err := v.keysFor(ctx, keyID)
 	if err != nil {
 		return nil, nil, err
 	}
+	if _, found := keys.LookupKeyID(keyID); !found {
+		return nil, nil, invalidToken("unknown key ID")
+	}
 	parsed, err := jwxjwt.ParseString(token, v.parseOptions(keys)...)
 	if err != nil {
-		return nil, nil, invalidToken("verify token", err)
+		return nil, refreshError, invalidToken(invalidTokenReason(err))
 	}
 	claims, err := claimsOf(parsed)
 	if err != nil {
-		return nil, nil, err
+		return nil, refreshError, err
 	}
 	return identityFromClaims(claims), refreshError, nil
 }
 
+// keyIDOf returns the kid of the token's protected header. Its errors are fixed texts: the dependency's
+// message may quote token material.
 func keyIDOf(token string) (string, error) {
 	message, err := jws.ParseString(token, jws.WithCompact())
 	if err != nil {
-		return "", dependency.Error("parse token", err)
+		return "", errors.New("malformed token")
 	}
 	signatures := message.Signatures()
 	if len(signatures) != 1 {
@@ -162,13 +179,17 @@ func keyIDOf(token string) (string, error) {
 func (v *Verifier) keysFor(ctx context.Context, keyID string) (keys jwk.Set, refreshError, err error) {
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
-	// ponytail: the fetch runs under the lock, so verifications wait for it (at most HTTPClient's timeout,
-	// at most once a minute); switch to a fetch-in-flight flag if that latency matters.
+	// ponytail: the fetch runs under the lock, so verifications wait for it (at most 10 s, at most once a
+	// minute); switch to a fetch-in-flight flag if that latency matters.
 	_, known := v.keys.LookupKeyID(keyID)
 	if !v.fetchDue(known) {
 		return v.keys, nil, nil
 	}
-	fetchError := v.refreshKeys(ctx)
+	// The fetch serves every verification waiting for the lock and uses up the minute's attempt, so the
+	// triggering request's cancellation must not end it; it gets its own timeout instead [CON-003].
+	fetchContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultHTTPTimeout)
+	defer cancel()
+	fetchError := v.refreshKeys(fetchContext)
 	switch {
 	case fetchError == nil:
 		return v.keys, nil, nil
@@ -203,23 +224,50 @@ func fetchKeySet(ctx context.Context, httpClient *http.Client, jwksURL string) (
 	if err != nil {
 		return nil, fmt.Errorf("build JWKS request: %w", err)
 	}
+	location := redactedURL(request.URL)
 	response, err := httpClient.Do(request)
 	if err != nil {
+		var urlError *url.Error
+		if errors.As(err, &urlError) {
+			urlError.URL = location
+		}
 		return nil, fmt.Errorf("fetch JWKS: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch JWKS %s: status %d", jwksURL, response.StatusCode)
+		return nil, fmt.Errorf("fetch JWKS %s: status %d", location, response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maximumKeySetBytes))
 	if err != nil {
-		return nil, fmt.Errorf("read JWKS %s: %w", jwksURL, err)
+		return nil, fmt.Errorf("read JWKS %s: %w", location, err)
 	}
 	keys, err := jwk.Parse(body)
 	if err != nil {
-		return nil, dependency.Error("parse JWKS "+jwksURL, err)
+		return nil, dependency.Error("parse JWKS "+location, err)
 	}
-	return keys, nil
+	return signingKeys(keys)
+}
+
+// signingKeys returns the keys of keys a token may be verified with: RSA keys for signatures (use "sig"
+// or unset) that name their algorithm. A JWKS is public, so a symmetric key in it would let anyone sign
+// tokens; a key without alg cannot bind the token's algorithm.
+func signingKeys(keys jwk.Set) (jwk.Set, error) {
+	usable := jwk.NewSet()
+	for index := range keys.Len() {
+		key, _ := keys.Key(index)
+		usage, _ := key.KeyUsage()
+		_, hasAlgorithm := key.Algorithm()
+		if key.KeyType() != jwa.RSA() || (usage != "" && usage != string(jwk.ForSignature)) || !hasAlgorithm {
+			continue
+		}
+		if err := usable.AddKey(key); err != nil {
+			return nil, dependency.Error("keep JWKS key", err)
+		}
+	}
+	if usable.Len() == 0 {
+		return nil, errors.New("JWKS has no RSA signing key with alg")
+	}
+	return usable, nil
 }
 
 func (v *Verifier) parseOptions(keys jwk.Set) []jwxjwt.ParseOption {
@@ -249,15 +297,38 @@ func claimsOf(token jwxjwt.Token) (map[string]any, error) {
 	return claims, nil
 }
 
-// invalidToken is the refusal of a token that failed operation. The cause goes into Reason as text only
-// (LIB-010), and Reason never reaches the client.
-func invalidToken(operation string, err error) error {
-	return &auth.Error{Kind: auth.ErrUnauthenticated, Code: codeInvalidToken, Reason: operation + ": " + err.Error()}
+// invalidToken is the refusal of an invalid token. reason is a fixed text (it goes into the wide event)
+// and never reaches the client.
+func invalidToken(reason string) error {
+	return &auth.Error{Kind: auth.ErrUnauthenticated, Code: codeInvalidToken, Reason: reason}
+}
+
+// invalidTokenReason names why jwx refused a token. jwx's message quotes token material (the kid,
+// claim values) of any length, so it never becomes the Reason [LOG-009].
+func invalidTokenReason(err error) string {
+	switch {
+	case errors.Is(err, jws.VerificationError()):
+		return "signature invalid"
+	case errors.Is(err, jwxjwt.TokenExpiredError()):
+		return "token expired"
+	case errors.Is(err, jwxjwt.TokenNotYetValidError()):
+		return "token not yet valid"
+	case errors.Is(err, jwxjwt.InvalidIssuedAtError()):
+		return "token issued in the future"
+	case errors.Is(err, jwxjwt.InvalidIssuerError()):
+		return "issuer mismatch"
+	case errors.Is(err, jwxjwt.InvalidAudienceError()):
+		return "audience mismatch"
+	case errors.Is(err, jwxjwt.MissingRequiredClaimError()):
+		return "expiry missing"
+	default:
+		return "token invalid"
+	}
 }
 
 // Middleware requires a valid token in HeaderName ("Bearer <token>"): the identity goes into the request
-// context, a missing or invalid token is answered 401 JSON, a failed JWKS fetch 500. It reports one
-// ActionAuthenticate outcome per request to the Observer.
+// context, a missing or invalid token is answered 401 JSON with WWW-Authenticate: Bearer (RFC 6750), a
+// failed JWKS fetch 500. It reports one ActionAuthenticate outcome per request to the Observer.
 func (v *Verifier) Middleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -265,6 +336,9 @@ func (v *Verifier) Middleware() func(http.Handler) http.Handler {
 			identity, refreshError, err := v.authenticate(ctx, request.Header.Get(v.options.HeaderName))
 			v.report(ctx, outcomeOf(identity, refreshError, err))
 			if err != nil {
+				if status, _ := auth.ResponseFor(err); status == http.StatusUnauthorized {
+					writer.Header().Set("WWW-Authenticate", "Bearer")
+				}
 				auth.WriteError(writer, err)
 				return
 			}
@@ -289,10 +363,15 @@ func bearerToken(headerValue string) (string, bool) {
 	return token, true
 }
 
+// outcomeOf is the outcome of one authentication. A failed refresh is the Err of a success (degraded) and
+// joins the refusal or failure otherwise, so it is reported either way.
 func outcomeOf(identity *auth.Identity, refreshError, err error) auth.Outcome {
 	outcome := auth.Outcome{Provider: providerName, Action: auth.ActionAuthenticate, Result: auth.ResultSuccess, Err: refreshError, Identity: identity}
 	if err != nil {
 		outcome.Result, outcome.Err = failure.Result(err), err
+		if refreshError != nil {
+			outcome.Err = errors.Join(err, refreshError)
+		}
 	}
 	return outcome
 }

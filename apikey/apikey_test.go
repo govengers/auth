@@ -90,34 +90,34 @@ func TestNew(t *testing.T) {
 	resolver := func(context.Context, string) (*auth.Identity, error) { return nil, nil }
 	build := apikey.Key{Name: "build", Secret: buildSecret}
 	testCases := []struct {
-		name    string
-		options *apikey.Options
-		wantErr string
+		name      string
+		options   *apikey.Options
+		wantError string
 	}{
-		{name: "nil options", options: nil, wantErr: "options are required"},
-		{name: "neither keys nor resolver", options: &apikey.Options{}, wantErr: "at least one of Keys and Resolver"},
+		{name: "nil options", options: nil, wantError: "options are required"},
+		{name: "neither keys nor resolver", options: &apikey.Options{}, wantError: "at least one of Keys and Resolver"},
 		{name: "keys only", options: &apikey.Options{Keys: []apikey.Key{build}}},
 		{name: "resolver only", options: &apikey.Options{Resolver: resolver}},
 		{name: "keys and resolver", options: &apikey.Options{Keys: []apikey.Key{build}, Resolver: resolver}},
 		{name: "custom header", options: &apikey.Options{Keys: []apikey.Key{build}, HeaderName: "X-Token"}},
-		{name: "authorization header", options: &apikey.Options{Keys: []apikey.Key{build}, HeaderName: "authorization"}, wantErr: "HeaderName must not be Authorization"},
-		{name: "empty name", options: &apikey.Options{Keys: []apikey.Key{{Secret: buildSecret}}}, wantErr: "key 0: key name is required"},
-		{name: "blank name", options: &apikey.Options{Keys: []apikey.Key{{Name: "  ", Secret: buildSecret}}}, wantErr: "key 0: key name is required"},
-		{name: "secret one byte short", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: "0123456789abcde"}}}, wantErr: "shorter than 16 bytes"},
+		{name: "authorization header", options: &apikey.Options{Keys: []apikey.Key{build}, HeaderName: "authorization"}, wantError: "HeaderName must not be Authorization"},
+		{name: "empty name", options: &apikey.Options{Keys: []apikey.Key{{Secret: buildSecret}}}, wantError: "key 0: key name is required"},
+		{name: "blank name", options: &apikey.Options{Keys: []apikey.Key{{Name: "  ", Secret: buildSecret}}}, wantError: "key 0: key name is required"},
+		{name: "secret one byte short", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: "0123456789abcde"}}}, wantError: "shorter than 16 bytes"},
 		{name: "secret of minimum size", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: "0123456789abcdef"}}}},
-		{name: "secret with trailing space", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret + " "}}}, wantErr: "leading or trailing whitespace"},
-		{name: "duplicate name", options: &apikey.Options{Keys: []apikey.Key{build, {Name: "build", Secret: adminSecret}}}, wantErr: "key 1: name or secret is used by another key"},
-		{name: "duplicate secret", options: &apikey.Options{Keys: []apikey.Key{build, {Name: "other", Secret: buildSecret}}}, wantErr: "key 1: name or secret is used by another key"},
+		{name: "secret with trailing space", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret + " "}}}, wantError: "leading or trailing whitespace"},
+		{name: "duplicate name", options: &apikey.Options{Keys: []apikey.Key{build, {Name: "build", Secret: adminSecret}}}, wantError: "key 1: name or secret is used by another key"},
+		{name: "duplicate secret", options: &apikey.Options{Keys: []apikey.Key{build, {Name: "other", Secret: buildSecret}}}, wantError: "key 1: name or secret is used by another key"},
 		{name: "valid permissions", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret, Permissions: buildPermissions}}}},
-		{name: "invalid permission access", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret, Permissions: []auth.Permission{{Resource: "builds", Access: "admin"}}}}}, wantErr: "key 0: permission"},
-		{name: "invalid permission resource", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret, Permissions: []auth.Permission{{Access: auth.AccessRead}}}}}, wantErr: "key 0: permission"},
+		{name: "invalid permission access", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret, Permissions: []auth.Permission{{Resource: "builds", Access: "admin"}}}}}, wantError: "key 0: permission"},
+		{name: "invalid permission resource", options: &apikey.Options{Keys: []apikey.Key{{Name: "build", Secret: buildSecret, Permissions: []auth.Permission{{Access: auth.AccessRead}}}}}, wantError: "key 0: permission"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			authenticator, err := apikey.New(testCase.options)
 
-			if testCase.wantErr != "" {
-				require.ErrorContains(t, err, testCase.wantErr)
+			if testCase.wantError != "" {
+				require.ErrorContains(t, err, testCase.wantError)
 				require.Nil(t, authenticator)
 				return
 			}
@@ -168,6 +168,8 @@ func TestMiddlewareAuthenticatesStaticKeys(t *testing.T) {
 		{name: "extra whitespace after bearer", headers: headerValues{"Authorization": "Bearer   " + buildSecret + " "}, wantSubject: "build", wantPermissions: buildPermissions},
 		{name: "header wins over bearer", headers: headerValues{"X-API-Key": buildSecret, "Authorization": "Bearer " + adminSecret}, wantSubject: "build", wantPermissions: buildPermissions},
 		{name: "blank header falls back to bearer", headers: headerValues{"X-API-Key": "  ", "Authorization": "Bearer " + adminSecret}, wantSubject: "admin", wantRoles: []string{auth.RoleAdmin}},
+		{name: "lower case scheme", headers: headerValues{"Authorization": "bearer " + buildSecret}, wantSubject: "build", wantPermissions: buildPermissions},
+		{name: "upper case scheme", headers: headerValues{"Authorization": "BEARER " + adminSecret}, wantSubject: "admin", wantRoles: []string{auth.RoleAdmin}},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -213,6 +215,7 @@ func TestMiddlewareRefusesInvalidKeys(t *testing.T) {
 	}{
 		{name: "unknown key", headers: headerValues{"X-API-Key": "wrong-key-0123456789"}},
 		{name: "unknown bearer", headers: headerValues{"Authorization": "Bearer wrong-key-0123456789"}},
+		{name: "unknown bearer with a lower case scheme", headers: headerValues{"Authorization": "bearer wrong-key-0123456789"}},
 		{name: "prefix of a key", headers: headerValues{"X-API-Key": buildSecret[:16]}},
 		{name: "key with extra suffix", headers: headerValues{"X-API-Key": buildSecret + "x"}},
 		{name: "key differing in case", headers: headerValues{"X-API-Key": "BUILD-secret-0123456789"}},
@@ -238,7 +241,6 @@ func TestMiddlewarePassesRequestsWithoutKey(t *testing.T) {
 		{name: "empty bearer", headers: headerValues{"Authorization": "Bearer "}},
 		{name: "blank bearer", headers: headerValues{"Authorization": "Bearer    "}},
 		{name: "bearer without space", headers: headerValues{"Authorization": "Bearer" + buildSecret}},
-		{name: "lower case scheme", headers: headerValues{"Authorization": "bearer " + buildSecret}},
 		{name: "other scheme", headers: headerValues{"Authorization": "Basic dXNlcjpwYXNz"}},
 	}
 	for _, testCase := range testCases {
@@ -373,6 +375,28 @@ func TestResolver(t *testing.T) {
 			require.NotContains(t, recorder.Body.String(), "hunter2")
 		})
 	}
+}
+
+func TestResolverFailureKeepsAContextErrorDetectable(t *testing.T) {
+	var outcomes []auth.Outcome
+	authenticator, err := apikey.New(&apikey.Options{
+		Resolver: func(ctx context.Context, _ string) (*auth.Identity, error) {
+			return nil, fmt.Errorf("query keys: %w", ctx.Err())
+		},
+		Observer: func(_ context.Context, outcome auth.Outcome) { outcomes = append(outcomes, outcome) },
+	})
+	require.NoError(t, err)
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	request := httptest.NewRequestWithContext(cancelled, http.MethodGet, "/", nil)
+	request.Header.Set("X-API-Key", "issued-key-0123456789")
+
+	recorder, _ := serve(authenticator, request)
+
+	require.Equal(t, http.StatusInternalServerError, recorder.Code)
+	require.Len(t, outcomes, 1)
+	require.ErrorIs(t, outcomes[0].Err, context.Canceled, "a client that went away stays distinguishable from a failing resolver")
+	require.Equal(t, auth.ResultError, outcomes[0].Result)
 }
 
 func TestResolverReceivesTrimmedKeyAndRequestContext(t *testing.T) {

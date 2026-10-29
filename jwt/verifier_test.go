@@ -3,9 +3,11 @@ package jwt
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +16,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lestrrat-go/jwx/v3/jwa"
+	"github.com/lestrrat-go/jwx/v3/jwk"
+	"github.com/lestrrat-go/jwx/v3/jws"
 	jwxjwt "github.com/lestrrat-go/jwx/v3/jwt"
 	"github.com/stretchr/testify/require"
 
@@ -99,12 +103,13 @@ func validClaims(instant time.Time) map[string]any {
 	return map[string]any{"iss": testIssuer, "aud": []string{"backend"}, "sub": "42", "iat": instant.Unix(), "exp": instant.Add(time.Minute).Unix()}
 }
 
-func requireInvalidToken(t *testing.T, err error) {
+func requireInvalidToken(t *testing.T, err error, wantReason string) {
 	t.Helper()
 	var refusal *auth.Error
 	require.ErrorAs(t, err, &refusal)
 	require.ErrorIs(t, err, auth.ErrUnauthenticated)
 	require.Equal(t, "invalid_token", refusal.Code)
+	require.Equal(t, wantReason, refusal.Reason)
 	require.NoError(t, refusal.Err)
 }
 
@@ -118,7 +123,7 @@ func TestNewVerifierRejectsInvalidOptions(t *testing.T) {
 		{name: "missing URL", options: &VerifierOptions{Issuer: testIssuer}, wantError: "absolute http or https URL"},
 		{name: "relative URL", options: &VerifierOptions{JWKSURL: "/auth/jwks", Issuer: testIssuer}, wantError: "absolute http or https URL"},
 		{name: "other scheme", options: &VerifierOptions{JWKSURL: "ftp://auth.example.com/jwks", Issuer: testIssuer}, wantError: "absolute http or https URL"},
-		{name: "unparsable URL", options: &VerifierOptions{JWKSURL: "http://auth example.com/%zz", Issuer: testIssuer}, wantError: "JWKSURL"},
+		{name: "unparsable URL", options: &VerifierOptions{JWKSURL: "http://auth example.com/%zz", Issuer: testIssuer}, wantError: "JWKSURL is no URL"},
 		{name: "missing issuer", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks"}, wantError: "Issuer is required"},
 		{name: "refresh interval in nanoseconds", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks", Issuer: testIssuer, RefreshInterval: 300}, wantError: "RefreshInterval 300ns is below 1m0s"},
 		{name: "negative refresh interval", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks", Issuer: testIssuer, RefreshInterval: -time.Hour}, wantError: "is below 1m0s"},
@@ -171,6 +176,116 @@ func TestNewVerifierFailsWhenTheJWKSCannotBeFetched(t *testing.T) {
 	}
 }
 
+// keySetHandler serves {"keys": keys}.
+func keySetHandler(t *testing.T, keys ...map[string]any) http.Handler {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"keys": keys})
+	require.NoError(t, err)
+	return http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write(body) // the client reads what arrives; a lost write fails the parse
+	})
+}
+
+// publishedKey returns the signer's JWKS entry as JSON members.
+func publishedKey(t *testing.T, signer *Signer) map[string]any {
+	t.Helper()
+	var keySet struct {
+		Keys []map[string]any `json:"keys"`
+	}
+	require.NoError(t, json.Unmarshal(signer.keySetJSON, &keySet))
+	return keySet.Keys[0]
+}
+
+// hmacKey returns a symmetric JWK with key ID "oct-1" and alg HS256, as JSON members and as a signing key.
+func hmacKey(t *testing.T) (map[string]any, jwk.Key) {
+	t.Helper()
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	key, err := jwk.Import(secret)
+	require.NoError(t, err)
+	require.NoError(t, key.Set(jwk.KeyIDKey, "oct-1"))
+	return map[string]any{"kty": "oct", "kid": "oct-1", "alg": "HS256", "k": base64.RawURLEncoding.EncodeToString(secret)}, key
+}
+
+func TestNewVerifierFailsWithoutAnRSASigningKey(t *testing.T) {
+	signerKey := publishedKey(t, newTestSigner(t, fixedClock(signedAt)))
+	symmetricKey, _ := hmacKey(t)
+	encryptionKey := maps.Clone(signerKey)
+	encryptionKey["use"] = "enc"
+	keyWithoutAlgorithm := maps.Clone(signerKey)
+	delete(keyWithoutAlgorithm, "alg")
+	testCases := []struct {
+		name string
+		key  map[string]any
+	}{
+		{name: "symmetric key", key: symmetricKey},
+		{name: "encryption key", key: encryptionKey},
+		{name: "key without alg", key: keyWithoutAlgorithm},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			keySets := newKeySetServer(t, keySetHandler(t, testCase.key))
+
+			verifier, err := NewVerifier(t.Context(), testVerifierOptions(keySets.server.URL))
+
+			require.ErrorContains(t, err, "JWKS has no RSA signing key with alg")
+			require.Nil(t, verifier)
+		})
+	}
+}
+
+func TestVerifyIgnoresSymmetricKeysOfTheJWKS(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	signer := newTestSigner(t, clock.now)
+	symmetricKey, signingKey := hmacKey(t)
+	verifier := newTestVerifier(t, testVerifierOptions(newKeySetServer(t, keySetHandler(t, publishedKey(t, signer), symmetricKey)).server.URL), clock)
+	token := jwxjwt.New()
+	for name, value := range validClaims(signedAt) {
+		require.NoError(t, token.Set(name, value))
+	}
+	forged, err := jwxjwt.Sign(token, jwxjwt.WithKey(jwa.HS256(), signingKey))
+	require.NoError(t, err)
+	valid, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
+	require.NoError(t, err)
+
+	_, err = verifier.Verify(t.Context(), string(forged))
+	requireInvalidToken(t, err, "unknown key ID")
+
+	identity, err := verifier.Verify(t.Context(), valid)
+	require.NoError(t, err)
+	require.Equal(t, "42", identity.Subject)
+}
+
+func TestVerifierErrorsOmitCredentialsOfTheJWKSURL(t *testing.T) {
+	withCredentials := func(serverURL string) string {
+		location, err := url.Parse(serverURL)
+		require.NoError(t, err)
+		location.User = url.UserPassword("user", "secret-password")
+		location.RawQuery = "token=secret-query"
+		return location.String()
+	}
+	closed := httptest.NewServer(failingHandler)
+	closed.Close()
+	testCases := []struct {
+		name      string
+		jwksURL   string
+		wantError string
+	}{
+		{name: "unparsable", jwksURL: "http://user:secret-password@auth example.com/%zz?token=secret-query", wantError: "JWKSURL is no URL"},
+		{name: "other scheme", jwksURL: "ftp://user:secret-password@auth.example.com/jwks?token=secret-query", wantError: "JWKSURL ftp://auth.example.com/jwks must be"},
+		{name: "unreachable", jwksURL: withCredentials(closed.URL), wantError: "fetch JWKS: Get \"" + closed.URL + "\""},
+		{name: "server error", jwksURL: withCredentials(newKeySetServer(t, failingHandler).server.URL), wantError: "status 500"},
+		{name: "not a key set", jwksURL: withCredentials(newKeySetServer(t, keySetHandler(t, map[string]any{"kty": "RSA"})).server.URL), wantError: "parse JWKS http://127.0.0.1"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := NewVerifier(t.Context(), testVerifierOptions(testCase.jwksURL))
+
+			require.ErrorContains(t, err, testCase.wantError)
+			require.NotContains(t, err.Error(), "secret")
+		})
+	}
+}
+
 func TestVerifyReturnsEveryIdentityField(t *testing.T) {
 	clock := &testClock{instant: signedAt}
 	signer := newTestSigner(t, clock.now)
@@ -184,6 +299,7 @@ func TestVerifyReturnsEveryIdentityField(t *testing.T) {
 		Name:            "Ada Lovelace",
 		Email:           "ada@example.com",
 		Picture:         "https://example.com/ada.png",
+		Active:          true,
 		Roles:           []string{auth.RoleAdmin},
 		OIDCRoles:       []string{"realm-role"},
 		OIDCClientRoles: []string{"client-role"},
@@ -233,7 +349,7 @@ func TestVerifyDoesNotTakePermissionsFromForgedClaims(t *testing.T) {
 	clock := &testClock{instant: signedAt}
 	signer := newTestSigner(t, clock.now)
 	verifier := newTestVerifier(t, testVerifierOptions(newKeySetServer(t, signer.JWKSHandler()).server.URL), clock)
-	token, err := signer.Sign(&auth.Identity{Subject: "42", Claims: map[string]any{"permissions": []any{"*:write"}, "roles": []any{auth.RoleAdmin}}})
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true, Claims: map[string]any{"permissions": []any{"*:write"}, "roles": []any{auth.RoleAdmin}}})
 	require.NoError(t, err)
 
 	identity, err := verifier.Verify(t.Context(), token)
@@ -262,37 +378,77 @@ func TestVerifyRejectsInvalidTokens(t *testing.T) {
 	signer := newTestSigner(t, clock.now)
 	keySets := newKeySetServer(t, signer.JWKSHandler())
 	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
-	valid, err := signer.Sign(&auth.Identity{Subject: "42"})
+	valid, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 	otherSigner := newTestSigner(t, clock.now)
-	forged, err := otherSigner.Sign(&auth.Identity{Subject: "42"})
+	forged, err := otherSigner.Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 	keyID, _ := signer.signingKey.KeyID()
 	withoutKeyID, err := jwxjwt.Sign(jwxjwt.New(), jwxjwt.WithKey(jwa.RS512(), generateKey(t, 2048)))
 	require.NoError(t, err)
 	parts := strings.Split(valid, ".")
 	testCases := []struct {
-		name  string
-		token string
+		name       string
+		token      string
+		wantReason string
 	}{
-		{name: "garbage", token: "not-a-token"},
-		{name: "JSON serialization", token: `{"payload":"e30","signatures":[]}`},
-		{name: "no key ID", token: string(withoutKeyID)},
-		{name: "wrong issuer", token: signWith(t, signer, jwa.RS512(), withClaim(validClaims(signedAt), "iss", "https://evil.example.com"))},
-		{name: "wrong audience", token: signWith(t, signer, jwa.RS512(), withClaim(validClaims(signedAt), "aud", []string{"other"}))},
-		{name: "no audience", token: signWith(t, signer, jwa.RS512(), withoutClaim(validClaims(signedAt), "aud"))},
-		{name: "not yet valid beyond skew", token: signWith(t, signer, jwa.RS512(), withClaim(validClaims(signedAt), "nbf", signedAt.Add(31*time.Second).Unix()))},
-		{name: "no expiry", token: signWith(t, signer, jwa.RS512(), withoutClaim(validClaims(signedAt), "exp"))},
-		{name: "tampered payload", token: parts[0] + "." + base64.RawURLEncoding.EncodeToString([]byte(`{"iss":"`+testIssuer+`","aud":["backend"],"sub":"admin","exp":9999999999}`)) + "." + parts[2]},
-		{name: "signature of another key", token: parts[0] + "." + parts[1] + "." + strings.Split(forged, ".")[2]},
-		{name: "algorithm differs from the key's", token: signWith(t, signer, jwa.RS256(), validClaims(signedAt))},
-		{name: "unsigned", token: base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","kid":"`+keyID+`"}`)) + "." + parts[1] + "."},
+		{name: "garbage", token: "not-a-token", wantReason: "malformed token"},
+		{name: "JSON serialization", token: `{"payload":"e30","signatures":[]}`, wantReason: "malformed token"},
+		{name: "no key ID", token: string(withoutKeyID), wantReason: "token header has no kid"},
+		{name: "unknown key ID", token: forged, wantReason: "unknown key ID"},
+		{name: "wrong issuer", token: signWith(t, signer, jwa.RS512(), withClaim(validClaims(signedAt), "iss", "https://evil.example.com")), wantReason: "issuer mismatch"},
+		{name: "wrong audience", token: signWith(t, signer, jwa.RS512(), withClaim(validClaims(signedAt), "aud", []string{"other"})), wantReason: "audience mismatch"},
+		{name: "no audience", token: signWith(t, signer, jwa.RS512(), withoutClaim(validClaims(signedAt), "aud")), wantReason: "audience mismatch"},
+		{name: "not yet valid beyond skew", token: signWith(t, signer, jwa.RS512(), withClaim(validClaims(signedAt), "nbf", signedAt.Add(31*time.Second).Unix())), wantReason: "token not yet valid"},
+		{name: "no expiry", token: signWith(t, signer, jwa.RS512(), withoutClaim(validClaims(signedAt), "exp")), wantReason: "expiry missing"},
+		{name: "expiry of the wrong type", token: signPayload(t, signer, `{"iss":"`+testIssuer+`","aud":["backend"],"exp":"MARKER"}`), wantReason: "token invalid"},
+		{name: "tampered payload", token: parts[0] + "." + base64.RawURLEncoding.EncodeToString([]byte(`{"iss":"`+testIssuer+`","aud":["backend"],"sub":"admin","exp":9999999999}`)) + "." + parts[2], wantReason: "signature invalid"},
+		{name: "signature of another key", token: parts[0] + "." + parts[1] + "." + strings.Split(forged, ".")[2], wantReason: "signature invalid"},
+		{name: "algorithm differs from the key's", token: signWith(t, signer, jwa.RS256(), validClaims(signedAt)), wantReason: "signature invalid"},
+		{name: "unsigned", token: base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","kid":"`+keyID+`"}`)) + "." + parts[1] + ".", wantReason: "signature invalid"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			identity, err := verifier.Verify(t.Context(), testCase.token)
-			requireInvalidToken(t, err)
+			requireInvalidToken(t, err, testCase.wantReason)
 			require.Nil(t, identity)
+		})
+	}
+}
+
+// signPayload signs payload as it is with the signer's key and key ID, so claims may have any type.
+func signPayload(t *testing.T, signer *Signer, payload string) string {
+	t.Helper()
+	keyID, _ := signer.signingKey.KeyID()
+	headers := jws.NewHeaders()
+	require.NoError(t, headers.Set(jws.KeyIDKey, keyID))
+	signed, err := jws.Sign([]byte(payload), jws.WithKey(jwa.RS512(), signer.signingKey, jws.WithProtectedHeaders(headers)))
+	require.NoError(t, err)
+	return string(signed)
+}
+
+func TestVerifyKeepsTokenMaterialOutOfTheReason(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	signer := newTestSigner(t, clock.now)
+	verifier := newTestVerifier(t, testVerifierOptions(newKeySetServer(t, signer.JWKSHandler()).server.URL), clock)
+	longKeyID := strings.Repeat("K", 10<<10)
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS512","kid":"` + longKeyID + `"}`))
+	testCases := []struct {
+		name   string
+		token  string
+		marker string
+	}{
+		{name: "long unknown key ID", token: header + "." + strings.Split(signWith(t, signer, jwa.RS512(), validClaims(signedAt)), ".")[1] + ".c2ln", marker: "KKKK"},
+		{name: "claim value", token: signPayload(t, signer, `{"iss":"`+testIssuer+`","aud":["backend"],"exp":"MARKER-EXPIRY"}`), marker: "MARKER"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := verifier.Verify(t.Context(), testCase.token)
+
+			var refusal *auth.Error
+			require.ErrorAs(t, err, &refusal)
+			require.Less(t, len(err.Error()), 100)
+			require.NotContains(t, err.Error(), testCase.marker)
 		})
 	}
 }
@@ -313,16 +469,17 @@ func TestVerifyChecksTimesWithThirtySecondsSkew(t *testing.T) {
 	clock := &testClock{instant: signedAt}
 	signer := newTestSigner(t, fixedClock(signedAt))
 	verifier := newTestVerifier(t, testVerifierOptions(newKeySetServer(t, signer.JWKSHandler()).server.URL), clock)
-	token, err := signer.Sign(&auth.Identity{Subject: "42"})
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 	testCases := []struct {
-		name      string
-		offset    time.Duration // verifier clock relative to signing
-		wantValid bool
+		name       string
+		offset     time.Duration // verifier clock relative to signing
+		wantValid  bool
+		wantReason string
 	}{
-		{name: "expired beyond skew", offset: 5*time.Minute + 31*time.Second},
+		{name: "expired beyond skew", offset: 5*time.Minute + 31*time.Second, wantReason: "token expired"},
 		{name: "expired within skew", offset: 5*time.Minute + 29*time.Second, wantValid: true},
-		{name: "issued in the future beyond skew", offset: -31 * time.Second},
+		{name: "issued in the future beyond skew", offset: -31 * time.Second, wantReason: "token issued in the future"},
 		{name: "issued in the future within skew", offset: -29 * time.Second, wantValid: true},
 	}
 	for _, testCase := range testCases {
@@ -336,7 +493,7 @@ func TestVerifyChecksTimesWithThirtySecondsSkew(t *testing.T) {
 				require.Equal(t, "42", identity.Subject)
 				return
 			}
-			requireInvalidToken(t, err)
+			requireInvalidToken(t, err, testCase.wantReason)
 		})
 	}
 }
@@ -349,7 +506,7 @@ func TestVerifyRefetchesForAnUnknownKeyIDAtMostOncePerMinute(t *testing.T) {
 	keySets.serve(second.JWKSHandler())
 	clock.advance(time.Minute)
 	sign := func(signer *Signer) string {
-		token, err := signer.Sign(&auth.Identity{Subject: "42"})
+		token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
 		require.NoError(t, err)
 		return token
 	}
@@ -359,18 +516,18 @@ func TestVerifyRefetchesForAnUnknownKeyIDAtMostOncePerMinute(t *testing.T) {
 	require.Equal(t, int32(2), keySets.fetches.Load())
 
 	_, err = verifier.Verify(t.Context(), sign(third))
-	requireInvalidToken(t, err)
+	requireInvalidToken(t, err, "unknown key ID")
 	require.Equal(t, int32(2), keySets.fetches.Load(), "no refetch within a minute")
 
 	clock.advance(time.Minute)
 	_, err = verifier.Verify(t.Context(), sign(third))
-	requireInvalidToken(t, err)
+	requireInvalidToken(t, err, "unknown key ID")
 	require.Equal(t, int32(3), keySets.fetches.Load(), "refetch after a minute, key still unknown")
 
 	keySets.serve(third.JWKSHandler())
 	clock.advance(59 * time.Second)
 	_, err = verifier.Verify(t.Context(), sign(third))
-	requireInvalidToken(t, err)
+	requireInvalidToken(t, err, "unknown key ID")
 	require.Equal(t, int32(3), keySets.fetches.Load())
 
 	clock.advance(time.Second)
@@ -379,7 +536,27 @@ func TestVerifyRefetchesForAnUnknownKeyIDAtMostOncePerMinute(t *testing.T) {
 	require.Equal(t, int32(4), keySets.fetches.Load())
 
 	_, err = verifier.Verify(t.Context(), sign(first))
-	requireInvalidToken(t, err)
+	requireInvalidToken(t, err, "unknown key ID")
+}
+
+func TestVerifyFetchesARotatedKeyForACancelledRequest(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	rotated := newTestSigner(t, clock.now)
+	keySets := newKeySetServer(t, newTestSigner(t, clock.now).JWKSHandler())
+	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
+	keySets.serve(rotated.JWKSHandler())
+	clock.advance(time.Minute)
+	token, err := rotated.Sign(&auth.Identity{Subject: "42", Active: true})
+	require.NoError(t, err)
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err = verifier.Verify(cancelled, token)
+	require.NoError(t, err, "the client's disconnect does not end the shared fetch")
+
+	_, err = verifier.Verify(t.Context(), token)
+	require.NoError(t, err)
+	require.Equal(t, int32(2), keySets.fetches.Load())
 }
 
 func TestVerifyRefreshesKeysAfterTheRefreshInterval(t *testing.T) {
@@ -400,7 +577,7 @@ func TestVerifyRefreshesKeysAfterTheRefreshInterval(t *testing.T) {
 		{advance: time.Hour, wantFetches: 2},
 	} {
 		clock.advance(step.advance)
-		token, err := signer.Sign(&auth.Identity{Subject: "42"})
+		token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
 		require.NoError(t, err)
 
 		_, err = verifier.Verify(t.Context(), token)
@@ -417,7 +594,7 @@ func TestVerifyKeepsTheKeysWhenARefreshFails(t *testing.T) {
 	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
 	keySets.serve(failingHandler)
 	clock.advance(time.Hour)
-	token, err := signer.Sign(&auth.Identity{Subject: "42"})
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 
 	identity, refreshError, err := verifier.verify(t.Context(), token)
@@ -444,7 +621,7 @@ func TestVerifyFailsWhenTheRefetchForAnUnknownKeyIDFails(t *testing.T) {
 	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
 	keySets.serve(failingHandler)
 	clock.advance(time.Minute)
-	token, err := newTestSigner(t, clock.now).Sign(&auth.Identity{Subject: "42"})
+	token, err := newTestSigner(t, clock.now).Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 
 	identity, err := verifier.Verify(t.Context(), token)
@@ -460,7 +637,7 @@ func TestVerifyIsSafeForConcurrentUse(t *testing.T) {
 	keySets := newKeySetServer(t, signer.JWKSHandler())
 	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
 	clock.advance(time.Hour)
-	token, err := signer.Sign(&auth.Identity{Subject: "42"})
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 
 	var waitGroup sync.WaitGroup
@@ -483,7 +660,7 @@ func TestVerifyIsSafeForConcurrentUse(t *testing.T) {
 func TestMiddleware(t *testing.T) {
 	clock := &testClock{instant: signedAt}
 	signer := newTestSigner(t, clock.now)
-	token, err := signer.Sign(&auth.Identity{Provider: "github", Subject: "42"})
+	token, err := signer.Sign(&auth.Identity{Provider: "github", Subject: "42", Active: true})
 	require.NoError(t, err)
 	testCases := []struct {
 		name       string
@@ -516,6 +693,11 @@ func TestMiddleware(t *testing.T) {
 
 			require.Equal(t, testCase.wantStatus, recorder.Code)
 			require.Equal(t, testCase.wantBody, strings.TrimSpace(recorder.Body.String()))
+			if testCase.wantStatus == http.StatusUnauthorized {
+				require.Equal(t, "Bearer", recorder.Header().Get("WWW-Authenticate"))
+			} else {
+				require.Empty(t, recorder.Header().Get("WWW-Authenticate"))
+			}
 			require.Len(t, outcomes, 1)
 			require.Equal(t, providerName, outcomes[0].Provider)
 			require.Equal(t, auth.ActionAuthenticate, outcomes[0].Action)
@@ -547,7 +729,7 @@ func TestMiddlewareAnswersAFailedKeyFetchWithInternalError(t *testing.T) {
 	verifier := newTestVerifier(t, options, clock)
 	keySets.serve(failingHandler)
 	clock.advance(time.Minute)
-	token, err := newTestSigner(t, clock.now).Sign(&auth.Identity{Subject: "42"})
+	token, err := newTestSigner(t, clock.now).Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/items", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
@@ -557,6 +739,7 @@ func TestMiddlewareAnswersAFailedKeyFetchWithInternalError(t *testing.T) {
 
 	require.Equal(t, http.StatusInternalServerError, recorder.Code)
 	require.JSONEq(t, `{"code":"internal","message":"internal error"}`, recorder.Body.String())
+	require.Empty(t, recorder.Header().Get("WWW-Authenticate"))
 	require.Len(t, outcomes, 1)
 	require.Equal(t, auth.ResultError, outcomes[0].Result)
 	require.ErrorContains(t, outcomes[0].Err, "status 500")
@@ -572,7 +755,7 @@ func TestMiddlewareReportsAFailedRefreshAsDegradedSuccess(t *testing.T) {
 	verifier := newTestVerifier(t, options, clock)
 	keySets.serve(failingHandler)
 	clock.advance(time.Hour)
-	token, err := signer.Sign(&auth.Identity{Subject: "42"})
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
 	require.NoError(t, err)
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/items", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
@@ -583,5 +766,29 @@ func TestMiddlewareReportsAFailedRefreshAsDegradedSuccess(t *testing.T) {
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.Len(t, outcomes, 1)
 	require.Equal(t, auth.ResultSuccess, outcomes[0].Result)
+	require.ErrorContains(t, outcomes[0].Err, "status 500")
+}
+
+func TestMiddlewareReportsAFailedRefreshWithARefusal(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	var outcomes []auth.Outcome
+	signer := newTestSigner(t, clock.now)
+	keySets := newKeySetServer(t, signer.JWKSHandler())
+	options := testVerifierOptions(keySets.server.URL)
+	options.Observer = func(_ context.Context, outcome auth.Outcome) { outcomes = append(outcomes, outcome) }
+	verifier := newTestVerifier(t, options, clock)
+	keySets.serve(failingHandler)
+	clock.advance(time.Hour)
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/items", nil)
+	request.Header.Set("Authorization", "Bearer "+signWith(t, signer, jwa.RS512(), withClaim(validClaims(clock.now()), "iss", "https://evil.example.com")))
+	recorder := httptest.NewRecorder()
+
+	verifier.Middleware()(subjectHandler()).ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusUnauthorized, recorder.Code)
+	require.JSONEq(t, `{"code":"invalid_token","message":"authentication required"}`, recorder.Body.String())
+	require.Len(t, outcomes, 1)
+	require.Equal(t, auth.ResultDenied, outcomes[0].Result)
+	require.ErrorIs(t, outcomes[0].Err, auth.ErrUnauthenticated)
 	require.ErrorContains(t, outcomes[0].Err, "status 500")
 }

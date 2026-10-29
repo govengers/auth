@@ -6,15 +6,19 @@
 // Refusals are *auth.Error: ErrUnauthenticated when there is no identity, ErrForbidden otherwise,
 // with a Reason for the wide event that never reaches the client. Not and every primitive except
 // IsAuthenticated require an active identity, so a deactivated admin is not an admin.
-// A nil Check given to a combinator refuses with ErrForbidden, so a wiring mistake fails closed.
+// A wiring mistake (a nil Check, All or Any without checks, HasPermission with an invalid permission)
+// fails with a plain error, answered 500, so it fails closed and Not cannot invert it into a pass.
 //
 // Entity checks (may this identity see this object) stay in the applications. Checks are pure and
 // safe for concurrent use.
 package authorization
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -27,13 +31,19 @@ import (
 // Refusals are *auth.Error with Kind ErrUnauthenticated (no identity) or ErrForbidden (Reason says why).
 type Check func(ctx context.Context) error
 
-// All passes when every check passes and returns the first refusal otherwise. Without checks it refuses
-// with ErrForbidden.
+// The wiring mistakes: plain errors (500), never refusals.
+var (
+	errNilCheck = errors.New("authorization: nil check")
+	errNoChecks = errors.New("authorization: combinator without checks")
+)
+
+// All passes when every check passes and returns the first refusal or failure otherwise. Without checks
+// it fails (a wiring mistake).
 func All(checks ...Check) Check {
 	checks = failClosed(checks)
 	return func(ctx context.Context) error {
 		if len(checks) == 0 {
-			return forbidden("no checks")
+			return errNoChecks
 		}
 		for _, check := range checks {
 			if err := check(ctx); err != nil {
@@ -44,25 +54,28 @@ func All(checks ...Check) Check {
 	}
 }
 
-// Any passes when one check passes. When all refuse it returns the first check's refusal; without
-// checks it refuses with ErrForbidden.
+// Any passes when one check passes. When none does it returns the first failure (an error answered
+// 500: that check decided nothing, so Not must not invert the result), else the first refusal. Without
+// checks it fails (a wiring mistake).
 func Any(checks ...Check) Check {
 	checks = failClosed(checks)
 	return func(ctx context.Context) error {
 		if len(checks) == 0 {
-			return forbidden("no checks")
+			return errNoChecks
 		}
-		var firstRefusal error
+		var firstRefusal, firstFailure error
 		for _, check := range checks {
 			err := check(ctx)
-			if err == nil {
+			switch {
+			case err == nil:
 				return nil
-			}
-			if firstRefusal == nil {
-				firstRefusal = err
+			case failed(err):
+				firstFailure = cmp.Or(firstFailure, err)
+			default:
+				firstRefusal = cmp.Or(firstRefusal, err)
 			}
 		}
-		return firstRefusal
+		return cmp.Or(firstFailure, firstRefusal)
 	}
 }
 
@@ -166,11 +179,15 @@ func HasGitHubTeam(team string) Check {
 
 // HasPermission passes an active identity that Permits access on resource (auth.Permission.Grants: "*"
 // covers every resource, write includes read). An empty or invalid resource, or an access other than read
-// and write, refuses everything. The effective identity counts; wrap the check in Real to check the
-// impersonator. Interactive users have no permissions unless an OnLogin hook grants them: compose
-// Any(HasRole(role), HasPermission(resource, access)) or grant them at login.
+// and write, is a wiring mistake: every request fails. The effective identity counts; wrap the check in
+// Real to check the impersonator. Interactive users have no permissions unless an OnLogin hook grants
+// them: compose Any(HasRole(role), HasPermission(resource, access)) or grant them at login.
 func HasPermission(resource string, access auth.Access) Check {
-	reason := "missing permission " + auth.Permission{Resource: resource, Access: access}.String()
+	permission := auth.Permission{Resource: resource, Access: access}
+	if err := permission.Validate(); err != nil {
+		return func(context.Context) error { return fmt.Errorf("authorization: HasPermission: %w", err) }
+	}
+	reason := "missing permission " + permission.String()
 	return activeIdentityWith(reason, func(identity *auth.Identity) bool {
 		return identity.Permits(resource, access)
 	})
@@ -193,9 +210,15 @@ func failClosedCheck(check Check) Check {
 	return check
 }
 
-// nilCheck is what a nil Check becomes: a refusal, never a panic.
+// nilCheck is what a nil Check becomes: a failure, never a panic.
 func nilCheck(context.Context) error {
-	return forbidden("nil check")
+	return errNilCheck
+}
+
+// failed reports whether err is a failure (answered 500) rather than a refusal.
+func failed(err error) bool {
+	status, _ := auth.ResponseFor(err)
+	return status == http.StatusInternalServerError
 }
 
 // activeIdentityWith passes an active identity for which allowed holds and refuses others with reason.

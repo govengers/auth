@@ -135,15 +135,15 @@ func TestCombinators(t *testing.T) {
 		check authorization.Check
 		want  error // nil: allowed; otherwise errors.Is target
 	}{
-		{name: "All without checks refuses", check: authorization.All(), want: auth.ErrForbidden},
 		{name: "All allows when every check allows", check: authorization.All(allow(), allow())},
 		{name: "All returns the first refusal", check: authorization.All(allow(), refuse(unauthenticated), refuse(forbidden)), want: unauthenticated},
 		{name: "All passes internal errors through", check: authorization.All(refuse(internal), refuse(forbidden)), want: internal},
 
-		{name: "Any without checks refuses", check: authorization.Any(), want: auth.ErrForbidden},
 		{name: "Any allows when one check allows", check: authorization.Any(refuse(forbidden), allow())},
+		{name: "Any allows despite an internal error", check: authorization.Any(refuse(internal), allow())},
 		{name: "Any returns the first refusal when all refuse", check: authorization.Any(refuse(unauthenticated), refuse(forbidden)), want: unauthenticated},
 		{name: "Any returns a first internal error", check: authorization.Any(refuse(internal), refuse(forbidden)), want: internal},
+		{name: "Any returns a later internal error over a refusal", check: authorization.Any(refuse(forbidden), refuse(internal)), want: internal},
 
 		{name: "nested All in Any allows", check: authorization.Any(refuse(forbidden), authorization.All(allow(), allow()))},
 		{name: "nested Any in All refuses", check: authorization.All(allow(), authorization.Any(refuse(forbidden))), want: forbidden},
@@ -179,6 +179,8 @@ func TestNot(t *testing.T) {
 		{name: "passes unauthenticated through", check: authorization.Not(refuse(unauthenticated)), identity: activeIdentity(), want: unauthenticated},
 		{name: "passes internal errors through", check: authorization.Not(refuse(internal)), identity: activeIdentity(), want: internal},
 		{name: "Not of Not allows", check: authorization.Not(authorization.Not(allow())), identity: activeIdentity()},
+		{name: "does not invert Any with a failed check after a refusal", check: authorization.Not(authorization.Any(authorization.HasRole("blocked"), refuse(internal))), identity: activeIdentity(), want: internal},
+		{name: "does not invert Any with a failed check before a refusal", check: authorization.Not(authorization.Any(refuse(internal), authorization.HasRole("blocked"))), identity: activeIdentity(), want: internal},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -193,27 +195,34 @@ func TestNot(t *testing.T) {
 	}
 }
 
-func TestNilChecksFailClosed(t *testing.T) {
+func TestWiringMistakesFailEvenUnderNot(t *testing.T) {
 	testCases := []struct {
-		name  string
-		check authorization.Check
+		name      string
+		check     authorization.Check
+		wantError string
 	}{
-		{name: "All", check: authorization.All(allow(), nil)},
-		{name: "Any", check: authorization.Any(nil)},
-		{name: "Not", check: authorization.Not(nil)},
-		{name: "Real", check: authorization.Real(nil)},
+		{name: "nil check in All", check: authorization.All(allow(), nil), wantError: "nil check"},
+		{name: "nil check in Any", check: authorization.Any(nil), wantError: "nil check"},
+		{name: "Not of a nil check", check: authorization.Not(nil), wantError: "nil check"},
+		{name: "Real of a nil check", check: authorization.Real(nil), wantError: "nil check"},
+		{name: "All without checks", check: authorization.All(), wantError: "without checks"},
+		{name: "Any without checks", check: authorization.Any(), wantError: "without checks"},
+		{name: "HasPermission with an empty resource", check: authorization.HasPermission("", auth.AccessRead), wantError: `permission ":read"`},
+		{name: "HasPermission with an invalid resource", check: authorization.HasPermission("Builds", auth.AccessRead), wantError: `permission "Builds:read"`},
+		{name: "HasPermission with an invalid access", check: authorization.HasPermission("builds", auth.Access("admin")), wantError: `permission "builds:admin"`},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			err := testCase.check(withIdentity(t, activeIdentity()))
+			for _, check := range []authorization.Check{testCase.check, authorization.Not(testCase.check), authorization.Not(authorization.Not(testCase.check))} {
+				err := check(withIdentity(t, activeIdentity()))
 
-			var refusal *auth.Error
-			require.ErrorAs(t, err, &refusal)
-			require.ErrorIs(t, err, auth.ErrForbidden)
-			require.Equal(t, "nil check", refusal.Reason)
+				require.ErrorContains(t, err, testCase.wantError)
+				status, _ := auth.ResponseFor(err)
+				require.Equal(t, http.StatusInternalServerError, status)
+			}
 		})
 	}
-	require.NoError(t, authorization.Any(nil, allow())(t.Context()), "a nil check is one refusal, not a veto")
+	require.NoError(t, authorization.Any(nil, allow())(t.Context()), "a nil check is one failure, not a veto")
 }
 
 func TestCombinatorsKeepTheirChecks(t *testing.T) {
@@ -305,9 +314,6 @@ func TestHasPermission(t *testing.T) {
 		{name: "no permissions refuse", resource: "builds", access: auth.AccessRead, identity: withPermissions(), want: auth.ErrForbidden, wantReason: "missing permission builds:read"},
 		{name: "inactive identity refuses", resource: "builds", access: auth.AccessRead, identity: inactiveWriter, want: auth.ErrForbidden, wantReason: "inactive"},
 		{name: "no identity is unauthenticated", resource: "builds", access: auth.AccessRead, want: auth.ErrUnauthenticated, wantReason: "no identity"},
-		{name: "empty resource refuses", resource: "", access: auth.AccessRead, identity: withPermissions("*:write"), want: auth.ErrForbidden, wantReason: "missing permission :read"},
-		{name: "invalid resource refuses", resource: "Builds", access: auth.AccessRead, identity: withPermissions("*:write"), want: auth.ErrForbidden, wantReason: "missing permission Builds:read"},
-		{name: "invalid access refuses", resource: "builds", access: auth.Access("admin"), identity: withPermissions("*:write"), want: auth.ErrForbidden, wantReason: "missing permission builds:admin"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
