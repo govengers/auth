@@ -95,13 +95,18 @@ func (p *Provider) resumeVerification(writer http.ResponseWriter, request *http.
 		return nil, err
 	}
 	user, err := p.options.Storage.GetUserByID(ctx, pending.UserID)
-	if errors.Is(err, ErrUserNotFound) || err == nil && (!user.TOTPEnabled || user.TOTPSecret == nil) {
+	if errors.Is(err, ErrUserNotFound) || (err == nil && !hasTOTP(user)) {
 		return nil, p.endPendingLogin(writer, request, codeNoPendingLogin, "user gone or without TOTP")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read password user %s: %w", pending.UserID, err)
 	}
 	return user, nil
+}
+
+// hasTOTP reports whether the user has TOTP enabled with a secret to check codes against.
+func hasTOTP(user *User) bool {
+	return user.TOTPEnabled && user.TOTPSecret != nil
 }
 
 // endPendingLogin ends the request's session and returns the refusal to answer with; a failed revocation is
