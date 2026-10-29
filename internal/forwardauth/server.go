@@ -163,7 +163,7 @@ func validPort(port int) bool {
 }
 
 // newEngine builds the gin engine: wide event outermost so it records the final status, then the HTTP
-// metrics, then the panic recovery, then the routes.
+// metrics, then the sums of the outbound calls, then the panic recovery, then the routes.
 func (s *Server) newEngine(metrics *httpMetrics) *gin.Engine {
 	engine := gin.New()
 	engine.Use(
@@ -174,6 +174,7 @@ func (s *Server) newEngine(metrics *httpMetrics) *gin.Engine {
 			wideevent.WithSkipPaths(s.path("/health"), s.path("/ready")),
 		),
 		metrics.middleware,
+		recordDependencies,
 		recovery,
 	)
 	engine.NoRoute(routeNotFound)

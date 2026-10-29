@@ -30,7 +30,7 @@ import (
 var errRedisDown = errors.New("redis down")
 
 func TestNewServerValidatesOptions(t *testing.T) {
-	guard, err := session.NewGuard(&session.GuardOptions{Store: newTestStore(t)})
+	guard, err := session.NewGuard(&session.GuardOptions{Store: newTestStore(t, nil)})
 	require.NoError(t, err)
 	valid := func() *ServerOptions {
 		return &ServerOptions{

@@ -134,8 +134,8 @@ func main() {
 	}
 }
 
-// run boots in a fixed order [LAY-002]: configuration, metrics registry, session store, provider, Guard,
-// API keys, signer, server; then it serves until SIGINT or SIGTERM.
+// run boots in a fixed order [LAY-002]: configuration, metrics registry and dependency metrics, session
+// store, provider, Guard, API keys, signer, server; then it serves until SIGINT or SIGTERM.
 func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -150,12 +150,17 @@ func run(logger *slog.Logger) error {
 	config.Print()
 	gin.SetMode(ginMode(configuration.DevMode)) // process-wide; release mode keeps gin's debug lines off stdout
 
-	sessions, err := newSessions(ctx, configuration)
+	metricsRegistry := newMetricsRegistry()
+	dependencies, err := forwardauth.NewDependencies(&forwardauth.DependenciesOptions{Registerer: metricsRegistry})
+	if err != nil {
+		return err
+	}
+	sessions, err := newSessions(ctx, configuration, dependencies)
 	if err != nil {
 		return err
 	}
 	defer sessions.close(logger)
-	server, err := newServer(ctx, configuration, sessions, logger)
+	server, err := newServer(ctx, configuration, sessions, &telemetry{registry: metricsRegistry, dependencies: dependencies, logger: logger})
 	if err != nil {
 		return err
 	}
@@ -173,15 +178,22 @@ func ginMode(devMode bool) string {
 	return gin.ReleaseMode
 }
 
+// telemetry is what the components report to: the registry /metrics serves, the recorder of outbound
+// calls and the logger of the lines outside a request.
+type telemetry struct {
+	registry     *prometheus.Registry
+	dependencies *forwardauth.Dependencies
+	logger       *slog.Logger
+}
+
 // newServer builds every component after the session store and the server that serves them.
-func newServer(ctx context.Context, configuration *Configuration, sessions *sessions, logger *slog.Logger) (*forwardauth.Server, error) {
-	metricsRegistry := newMetricsRegistry()
-	outcomeCounter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: metricsRegistry, Namespace: "forwardauth"})
+func newServer(ctx context.Context, configuration *Configuration, sessions *sessions, telemetry *telemetry) (*forwardauth.Server, error) {
+	outcomeCounter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: telemetry.registry, Namespace: "forwardauth"})
 	if err != nil {
 		return nil, err
 	}
 	observer := forwardauth.NewObserver(outcomeCounter)
-	selected, err := newProvider(ctx, configuration, sessions.store, observer)
+	selected, err := newProvider(ctx, configuration, sessions.store, observer, telemetry.dependencies)
 	if err != nil {
 		return nil, err
 	}
@@ -216,9 +228,9 @@ func newServer(ctx context.Context, configuration *Configuration, sessions *sess
 		JWTHeader:        configuration.JWTHeader,
 		IdentityEndpoint: configuration.IdentityEndpointEnabled,
 		Emitter:          newEmitter(configuration.DevMode),
-		Logger:           logger,
+		Logger:           telemetry.logger,
 		SampleRate:       configuration.WideEventSampleRate,
-		MetricsRegistry:  metricsRegistry,
+		MetricsRegistry:  telemetry.registry,
 		ReadinessCheck:   sessions.readinessCheck(),
 		ShutdownDelay:    seconds(configuration.ShutdownDelaySeconds),
 	})
@@ -249,7 +261,7 @@ type sessions struct {
 	redis *redis.Client // nil for the in-memory backend
 }
 
-func newSessions(ctx context.Context, configuration *Configuration) (*sessions, error) {
+func newSessions(ctx context.Context, configuration *Configuration, dependencies *forwardauth.Dependencies) (*sessions, error) {
 	encryptionKey, err := session.ParseKey(configuration.SessionEncryptionKey)
 	if err != nil {
 		return nil, err
@@ -259,7 +271,7 @@ func newSessions(ctx context.Context, configuration *Configuration) (*sessions, 
 		return nil, err
 	}
 	created := &sessions{}
-	backend, err := created.newBackend(ctx, configuration)
+	backend, err := created.newBackend(ctx, configuration, dependencies)
 	if err != nil {
 		return nil, err
 	}
@@ -278,9 +290,9 @@ func newSessions(ctx context.Context, configuration *Configuration) (*sessions, 
 	return created, nil
 }
 
-// newBackend opens the Redis client when SESSION_REDIS_ENABLED and fails when Redis does not answer
-// [RES-007]; otherwise it returns the in-memory backend (exactly one replica).
-func (s *sessions) newBackend(ctx context.Context, configuration *Configuration) (session.Backend, error) {
+// newBackend opens the Redis client when SESSION_REDIS_ENABLED, fails when Redis does not answer
+// [RES-007] and records its calls; otherwise it returns the in-memory backend (exactly one replica).
+func (s *sessions) newBackend(ctx context.Context, configuration *Configuration, dependencies *forwardauth.Dependencies) (session.Backend, error) {
 	if !configuration.SessionRedisEnabled {
 		return session.NewMemoryBackend(nil)
 	}
@@ -294,7 +306,7 @@ func (s *sessions) newBackend(ctx context.Context, configuration *Configuration)
 	if err != nil {
 		return nil, errors.Join(err, s.closeRedis())
 	}
-	return backend, nil
+	return dependencies.Backend(backend), nil
 }
 
 // newRedisClient never retries, so a session Pop whose answer was lost is not run twice [RES-004], and
@@ -341,18 +353,19 @@ type selectedProvider struct {
 	refreshers []session.Refresher
 }
 
-// newProvider builds the provider PROVIDER names; its routes live under PATH_PREFIX.
-func newProvider(ctx context.Context, configuration *Configuration, store *session.Store, observer auth.Observer) (selectedProvider, error) {
+// newProvider builds the provider PROVIDER names; its routes live under PATH_PREFIX, its HTTP calls are
+// recorded under its name.
+func newProvider(ctx context.Context, configuration *Configuration, store *session.Store, observer auth.Observer, dependencies *forwardauth.Dependencies) (selectedProvider, error) {
 	if configuration.Provider == providerGitHub {
-		return newGitHubProvider(configuration, store, observer)
+		return newGitHubProvider(configuration, store, observer, dependencies)
 	}
-	return newOIDCProvider(ctx, configuration, store, observer)
+	return newOIDCProvider(ctx, configuration, store, observer, dependencies)
 }
 
 // newOIDCProvider runs the issuer's discovery, so an unreachable issuer fails the boot. With
 // KEYCLOAK_ENABLED, the Keycloak Admin API enriches (and may refuse) every login.
-func newOIDCProvider(ctx context.Context, configuration *Configuration, store *session.Store, observer auth.Observer) (selectedProvider, error) {
-	onLogin, err := newKeycloakHook(configuration)
+func newOIDCProvider(ctx context.Context, configuration *Configuration, store *session.Store, observer auth.Observer, dependencies *forwardauth.Dependencies) (selectedProvider, error) {
+	onLogin, err := newKeycloakHook(configuration, dependencies)
 	if err != nil {
 		return selectedProvider{}, err
 	}
@@ -369,6 +382,7 @@ func newOIDCProvider(ctx context.Context, configuration *Configuration, store *s
 		AllowedEmailDomains:          configuration.OIDCAllowedEmailDomains,
 		DisableIframeLogoutDetection: configuration.OIDCDisableIframeLogoutDetection,
 		Sessions:                     store,
+		HTTPClient:                   dependencies.HTTPClient(providerOIDC),
 		OnLogin:                      onLogin,
 		Observer:                     observer,
 	})
@@ -386,7 +400,7 @@ func claimMapper(name string) oidc.ClaimMapper {
 }
 
 // newKeycloakHook returns nil when KEYCLOAK_ENABLED is false: logins then keep the token's roles and groups.
-func newKeycloakHook(configuration *Configuration) (auth.Hook, error) {
+func newKeycloakHook(configuration *Configuration, dependencies *forwardauth.Dependencies) (auth.Hook, error) {
 	if !configuration.KeycloakEnabled {
 		return nil, nil // Keycloak disabled is not an error
 	}
@@ -403,6 +417,7 @@ func newKeycloakHook(configuration *Configuration) (auth.Hook, error) {
 		RequiredRealmRoles:  configuration.KeycloakRequiredRealmRoles,
 		RequiredClientRoles: configuration.KeycloakRequiredClientRoles,
 		RequiredGroups:      configuration.KeycloakRequiredGroups,
+		HTTPClient:          dependencies.HTTPClient("keycloak"),
 	})
 	if err != nil {
 		return nil, err
@@ -412,7 +427,7 @@ func newKeycloakHook(configuration *Configuration) (auth.Hook, error) {
 
 // newGitHubProvider builds the GitHub provider; it also refreshes the teams of a session every
 // SESSION_REFRESH_INTERVAL_SECONDS through the Guard.
-func newGitHubProvider(configuration *Configuration, store *session.Store, observer auth.Observer) (selectedProvider, error) {
+func newGitHubProvider(configuration *Configuration, store *session.Store, observer auth.Observer, dependencies *forwardauth.Dependencies) (selectedProvider, error) {
 	provider, err := github.New(&github.Options{
 		ClientID:      configuration.GitHubClientID,
 		ClientSecret:  configuration.GitHubClientSecret,
@@ -426,6 +441,7 @@ func newGitHubProvider(configuration *Configuration, store *session.Store, obser
 		AdminTeams:    configuration.GitHubAdminTeams,
 		RelevantTeams: configuration.GitHubRelevantTeams,
 		Sessions:      store,
+		HTTPClient:    dependencies.HTTPClient(providerGitHub),
 		Observer:      observer,
 	})
 	if err != nil {

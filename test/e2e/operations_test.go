@@ -84,6 +84,8 @@ func TestTheWideEventsAreJSONLinesWithoutSecrets(t *testing.T) {
 	require.Contains(t, output, `"query":"code=redacted&state=redacted"`)
 	require.NotContains(t, output, fake.ClientSecret())
 	require.NotContains(t, output, "octocat@example.com", "no emails in the events")
+	require.Contains(t, output, `"http":{"github":{"calls":`, "the callback's event sums its GitHub calls")
+	require.Contains(t, person.get(running.metricsURL+"/metrics", nil).body, `forwardauth_dependency_request_duration_seconds_count{dependency="github",operation="POST",outcome="success"}`)
 }
 
 func TestTheDevEmitterPrintsNoQueryValues(t *testing.T) {

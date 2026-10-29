@@ -11,7 +11,10 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
+
+	"github.com/govengers/auth/internal/forwardauth"
 )
 
 // fakeRedis accepts connections on a loopback port, counts them and hands each to handle. It stops
@@ -37,6 +40,13 @@ func fakeRedis(t *testing.T, handle func(connection net.Conn)) (string, *atomic.
 		connections.Wait()
 	})
 	return listener.Addr().String(), accepted
+}
+
+func testDependencies(t *testing.T) *forwardauth.Dependencies {
+	t.Helper()
+	dependencies, err := forwardauth.NewDependencies(&forwardauth.DependenciesOptions{Registerer: prometheus.NewRegistry()})
+	require.NoError(t, err)
+	return dependencies
 }
 
 func redisConfiguration(address string) *Configuration {
@@ -75,7 +85,7 @@ func TestTheRedisClientHonoursTheContextDeadline(t *testing.T) {
 func TestNewSessionsFailsWhenRedisDoesNotAnswer(t *testing.T) {
 	address, _ := fakeRedis(t, func(connection net.Conn) { _ = connection.Close() })
 
-	created, err := newSessions(t.Context(), redisConfiguration(address))
+	created, err := newSessions(t.Context(), redisConfiguration(address), testDependencies(t))
 
 	require.ErrorContains(t, err, "SESSION_REDIS_ADDRESS: ping Redis at "+address)
 	require.Nil(t, created)
@@ -84,7 +94,7 @@ func TestNewSessionsFailsWhenRedisDoesNotAnswer(t *testing.T) {
 func TestNewSessionsUsesRedisAndPingsItForReadiness(t *testing.T) {
 	redisServer := miniredis.RunT(t)
 
-	created, err := newSessions(t.Context(), redisConfiguration(redisServer.Addr()))
+	created, err := newSessions(t.Context(), redisConfiguration(redisServer.Addr()), testDependencies(t))
 
 	require.NoError(t, err)
 	require.NoError(t, created.readinessCheck()(t.Context()))

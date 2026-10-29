@@ -4,7 +4,9 @@ package e2e
 
 import (
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/require"
@@ -15,12 +17,15 @@ import (
 func TestTwoReplicasShareSessionsThroughRedis(t *testing.T) {
 	redisServer := miniredis.RunT(t)
 	fake := fakeprovider.StartGitHub(t, fakeprovider.GitHubOptions{Teams: []fakeprovider.GitHubTeam{maintainers}})
-	shared := merged(gitHubEnvironment(t, fake), map[string]string{"SESSION_REDIS_ENABLED": "true", "SESSION_REDIS_ADDRESS": redisServer.Addr()})
+	shared := merged(gitHubEnvironment(t, fake), map[string]string{"SESSION_REDIS_ENABLED": "true", "SESSION_REDIS_ADDRESS": redisServer.Addr(), "WIDE_EVENT_SAMPLE_RATE": "1"})
 	replicaA, replicaB := start(t, shared), start(t, shared)
 	person := newBrowser(t)
 
 	person.signIn(replicaA, "/")
 	require.Equal(t, http.StatusOK, person.get(replicaB.baseURL+"/auth/ui", nil).status, "B knows A's session")
+	require.Eventually(t, func() bool {
+		return strings.Contains(replicaB.output.String(), `"cache":{"backend":"redis","calls":`)
+	}, 5*time.Second, 20*time.Millisecond, "the check's event sums its Redis calls")
 
 	require.Equal(t, http.StatusFound, person.get(replicaB.baseURL+"/auth/github/logout", nil).status)
 	require.Equal(t, http.StatusUnauthorized, person.get(replicaA.baseURL+"/auth/api", nil).status, "A knows B's logout")

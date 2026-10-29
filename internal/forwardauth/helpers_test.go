@@ -78,6 +78,7 @@ type harnessOptions struct {
 	routes           []auth.Route
 	readinessCheck   func(ctx context.Context) error
 	emitter          wideevent.Emitter // replaces the event recorder
+	dependencies     *Dependencies     // records the session store's calls
 }
 
 func newHarness(t *testing.T, options harnessOptions) *harness {
@@ -86,7 +87,7 @@ func newHarness(t *testing.T, options harnessOptions) *harness {
 	counter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: registry, Namespace: metricsNamespace})
 	require.NoError(t, err)
 	observer := NewObserver(counter)
-	store := newTestStore(t)
+	store := newTestStore(t, options.dependencies)
 	guard, err := session.NewGuard(&session.GuardOptions{Store: store, LoginURL: testLoginURL, ReturnPathHeader: "X-Forwarded-Uri", Observer: observer})
 	require.NoError(t, err)
 	events := &eventRecorder{}
@@ -119,10 +120,15 @@ func newHarness(t *testing.T, options harnessOptions) *harness {
 	return &harness{server: server, store: store, registry: registry, events: events, logs: logs}
 }
 
-func newTestStore(t *testing.T) *session.Store {
+// newTestStore returns a store on a memory backend; with dependencies, its calls are recorded as Redis.
+func newTestStore(t *testing.T, dependencies *Dependencies) *session.Store {
 	t.Helper()
+	var backend session.Backend
 	backend, err := session.NewMemoryBackend(nil)
 	require.NoError(t, err)
+	if dependencies != nil {
+		backend = dependencies.Backend(backend)
+	}
 	store, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: []byte("0123456789abcdef0123456789abcdef")})
 	require.NoError(t, err)
 	return store
