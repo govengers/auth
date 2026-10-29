@@ -160,9 +160,10 @@ func insecureEndpoint(endpoint oauth2.Endpoint, metadata providerMetadata) strin
 }
 
 // withoutFreeText returns a copy of client for go-oidc's discovery and JWKS requests that rebuilds every
-// answer's status line from its code and keeps the body only of a 200 answer holding JSON: go-oidc copies
-// the status line and body of a failed request into its errors, and both are the server's free text
-// (LOG-009). The token exchange keeps the plain client: oauth2 needs the body's error code.
+// answer's status line from its code and keeps the body only of a 200 answer holding JSON, and otherwise
+// also its Content-Type: go-oidc copies the status line, body and Content-Type of a failed request into
+// its errors, and all are the server's free text (LOG-009). The token exchange keeps the plain client:
+// oauth2 needs the body's error code.
 func withoutFreeText(client *http.Client) *http.Client {
 	next := client.Transport
 	if next == nil {
@@ -184,6 +185,9 @@ func (f freeTextFilter) RoundTrip(request *http.Request) (*http.Response, error)
 	if err != nil {
 		return nil, err // as it is: http.Client wraps it in a *url.Error naming the request
 	}
+	if response.Body == nil {
+		response.Body = http.NoBody // http.Client accepts a RoundTripper's answer without one
+	}
 	body, err := io.ReadAll(response.Body)
 	_ = response.Body.Close() // fully read: a close error loses nothing
 	if err != nil {
@@ -193,6 +197,7 @@ func (f freeTextFilter) RoundTrip(request *http.Request) (*http.Response, error)
 	// here if an IdP ever answers like that.
 	if response.StatusCode != http.StatusOK || !json.Valid(body) {
 		body = nil
+		response.Header.Del("Content-Type")
 	}
 	response.Status = strconv.Itoa(response.StatusCode) + " " + http.StatusText(response.StatusCode)
 	response.Body = io.NopCloser(bytes.NewReader(body))

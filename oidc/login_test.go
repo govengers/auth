@@ -220,7 +220,7 @@ func TestCallbackKeepsTheJWKSAnswerOutOfTheOutcome(t *testing.T) {
 		wantText string
 	}{
 		{name: "outage as a page", status: http.StatusServiceUnavailable, reason: marker, wantText: "503 Service Unavailable"},
-		{name: "a page instead of the key set", status: http.StatusOK, wantText: `got "text/html"`},
+		{name: "a page instead of the key set", status: http.StatusOK, wantText: `got ""`},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -443,21 +443,26 @@ func (f *failingTransport) requests() int {
 }
 
 // answeringTransport answers requests to path itself and passes the others on. The reason phrase of its
-// status line defaults to the standard one.
+// status line defaults to the standard one; withoutBody answers with a nil Body.
 type answeringTransport struct {
 	path        string
 	status      int
 	reason      string
 	contentType string
 	body        string
+	withoutBody bool
 }
 
 func (a *answeringTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if !strings.HasSuffix(request.URL.Path, a.path) {
 		return http.DefaultTransport.RoundTrip(request)
 	}
-	return &http.Response{
+	response := &http.Response{
 		Status: strconv.Itoa(a.status) + " " + cmp.Or(a.reason, http.StatusText(a.status)), StatusCode: a.status,
 		Header: http.Header{"Content-Type": {a.contentType}}, Body: io.NopCloser(strings.NewReader(a.body)), Request: request,
-	}, nil
+	}
+	if a.withoutBody {
+		response.Body = nil
+	}
+	return response, nil
 }

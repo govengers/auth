@@ -104,15 +104,39 @@ func TestNewFailsWhenDiscoveryFails(t *testing.T) {
 
 func TestDiscoveryErrorsCarryNoAnswerText(t *testing.T) {
 	const marker = "alice@example.com"
-	options := discoveryOptions(t, startIssuer(t, nil).IssuerURL())
-	options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: &answeringTransport{
-		path: "/.well-known/openid-configuration", status: http.StatusServiceUnavailable, reason: marker, contentType: "text/html", body: "<p>" + marker + "</p>",
-	}}
+	testCases := []struct {
+		name      string
+		transport *answeringTransport
+		wantText  string
+	}{
+		{
+			name:      "outage as a page",
+			transport: &answeringTransport{status: http.StatusServiceUnavailable, reason: marker, contentType: "text/html", body: "<p>" + marker + "</p>"},
+			wantText:  "discover issuer: 503 Service Unavailable",
+		},
+		{
+			name:      "a page instead of the document",
+			transport: &answeringTransport{status: http.StatusOK, contentType: "text/html; charset=" + marker, body: "<p>" + marker + "</p>"},
+			wantText:  `discover issuer: oidc: failed to decode provider discovery object: expected Content-Type = application/json, got ""`,
+		},
+		{
+			name:      "an answer without a body",
+			transport: &answeringTransport{status: http.StatusServiceUnavailable, withoutBody: true},
+			wantText:  "discover issuer: 503 Service Unavailable",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			options := discoveryOptions(t, startIssuer(t, nil).IssuerURL())
+			testCase.transport.path = "/.well-known/openid-configuration"
+			options.HTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: testCase.transport}
 
-	_, err := oidc.New(t.Context(), options)
+			_, err := oidc.New(t.Context(), options)
 
-	require.ErrorContains(t, err, "discover issuer: 503 Service Unavailable")
-	require.NotContains(t, err.Error(), marker, "the answer's free text stays out of the error")
+			require.ErrorContains(t, err, testCase.wantText)
+			require.NotContains(t, err.Error(), marker, "the answer's free text stays out of the error")
+		})
+	}
 }
 
 func discoveryOptions(t *testing.T, issuer string) *oidc.Options {
