@@ -477,9 +477,11 @@ func TestTOTPManagement(t *testing.T) {
 
 	requireRefusal(t, browser.post(enablePath, map[string]any{"code": fixture.code(t, response.Secret, 0), "password": "wrong password"}), http.StatusUnauthorized, "invalid_credentials")
 	requireRefusal(t, browser.post(enablePath, map[string]any{"code": "000000", "password": testPassword}), http.StatusUnauthorized, "invalid_totp_code")
-	requireRefusal(t, browser.post(enablePath, map[string]any{"code": fixture.code(t, response.Secret, 0), "password": testPassword}), http.StatusBadRequest, "totp_setup_missing")
 
-	secret, backupCodes := enroll(t, fixture, browser)
+	enable := browser.post(enablePath, map[string]any{"code": fixture.code(t, response.Secret, 0), "password": testPassword})
+	require.Equal(t, http.StatusOK, enable.Code, "a mistyped code keeps the scanned secret: %s", enable.Body.String())
+	secret, backupCodes := response.Secret, decodeBody[enableResponse](t, enable).BackupCodes
+	require.Equal(t, secret, *fixture.storedUser(t, user.ID).TOTPSecret)
 	require.Len(t, backupCodes, 10)
 	for _, code := range backupCodes {
 		require.Len(t, code, 10)

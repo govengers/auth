@@ -170,7 +170,7 @@ func (p *Provider) enableTOTP(writer http.ResponseWriter, request *http.Request)
 	if err := p.confirmPassword(account.user, body.Password); err != nil {
 		return refused(err)
 	}
-	secret, err := popSetupSecret(ctx, account.session)
+	secret, err := setupSecret(ctx, account.session)
 	if err != nil {
 		return refused(err)
 	}
@@ -192,9 +192,11 @@ func (p *Provider) enableTOTP(writer http.ResponseWriter, request *http.Request)
 	return succeeded(http.StatusOK, enableResponse{BackupCodes: codes}, identity)
 }
 
-// popSetupSecret takes the secret of the session's pending TOTP setup; none is totp_setup_missing.
-func popSetupSecret(ctx context.Context, current session.Session) (string, error) {
-	encoded, found, err := current.Pop(ctx, totpSetupKey)
+// setupSecret returns the secret of the session's pending TOTP setup; none is totp_setup_missing. It stays for a
+// retry after a mistyped code (the client holds the secret anyway): the session that enabling a pending enrollment
+// starts drops it, in a full session it expires.
+func setupSecret(ctx context.Context, current session.Session) (string, error) {
+	encoded, found, err := current.Get(ctx, totpSetupKey)
 	if err != nil {
 		return "", err
 	}
