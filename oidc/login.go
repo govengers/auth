@@ -180,5 +180,5 @@ func (p *Provider) saveSession(ctx context.Context, writer http.ResponseWriter, 
 }
 
 func loginFailed(reason string, cause error) error {
-	return &auth.Error{Kind: auth.ErrUnauthenticated, Code: "login_failed", Reason: reason, Err: cause}
+	return &auth.Error{Kind: auth.ErrUnauthenticated, Code: oauthlogin.CodeLoginFailed, Reason: reason, Err: cause}
 }

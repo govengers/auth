@@ -16,6 +16,7 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/dependency"
+	"github.com/govengers/auth/internal/oauthlogin"
 	"github.com/govengers/auth/internal/tokenendpoint"
 	"github.com/govengers/auth/session"
 )
@@ -96,7 +97,7 @@ func (p *Provider) exchange(ctx context.Context, code, verifier string) (*oauth2
 	token, err := p.oauth.Exchange(context.WithValue(ctx, oauth2.HTTPClient, p.options.HTTPClient), code, oauth2.VerifierOption(verifier))
 	switch {
 	case tokenendpoint.Refused(err):
-		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Code: "login_failed", Reason: "token exchange", Err: tokenendpoint.Error("github: exchange code", err)}
+		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Code: oauthlogin.CodeLoginFailed, Reason: "token exchange", Err: tokenendpoint.Error("github: exchange code", err)}
 	case err != nil:
 		return nil, tokenendpoint.Error("github: exchange code", err)
 	}
