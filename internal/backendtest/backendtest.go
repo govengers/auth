@@ -127,12 +127,12 @@ func testRevoke(t *testing.T, backend session.Backend, _ func(time.Duration)) {
 	_, found, err := backend.Pop(ctx, "s1", "b")
 	require.NoError(t, err)
 	require.False(t, found)
-	require.ErrorIs(t, backend.Put(ctx, "s1", "a", []byte("1"), time.Hour), session.ErrSessionRevoked)
+	require.ErrorIs(t, backend.Put(ctx, "s1", "a", []byte("1"), time.Hour), session.ErrRevoked)
 	requireAbsent(t, backend, "s1", "a")
 	requireValue(t, backend, "s2", "a", "other")
 
 	require.NoError(t, backend.Revoke(ctx, "s1", time.Hour), "revoking twice")
-	require.ErrorIs(t, backend.Put(ctx, "s1", "a", []byte("1"), time.Hour), session.ErrSessionRevoked, "revoking twice keeps the marker")
+	require.ErrorIs(t, backend.Put(ctx, "s1", "a", []byte("1"), time.Hour), session.ErrRevoked, "revoking twice keeps the marker")
 
 	require.NoError(t, backend.Revoke(ctx, "never-used", time.Hour))
 	require.NoError(t, backend.Put(ctx, "never-used", "a", []byte("1"), time.Hour), "an ID without values gets no marker")
@@ -172,7 +172,7 @@ func testMarkerExpiry(t *testing.T, backend session.Backend, advance func(time.D
 	require.NoError(t, backend.Revoke(ctx, "s", time.Minute))
 
 	advance(time.Minute - time.Second)
-	require.ErrorIs(t, backend.Put(ctx, "s", "key", []byte("value"), time.Hour), session.ErrSessionRevoked)
+	require.ErrorIs(t, backend.Put(ctx, "s", "key", []byte("value"), time.Hour), session.ErrRevoked)
 
 	advance(2 * time.Second)
 	require.NoError(t, backend.Put(ctx, "s", "key", []byte("value"), time.Hour))
@@ -188,7 +188,7 @@ func testMarkerLifetimeFollowsTheValues(t *testing.T, backend session.Backend, a
 	require.NoError(t, backend.Revoke(ctx, "s", time.Hour))
 
 	advance(10*time.Minute - time.Second)
-	require.ErrorIs(t, backend.Put(ctx, "s", "key", []byte("value"), time.Hour), session.ErrSessionRevoked)
+	require.ErrorIs(t, backend.Put(ctx, "s", "key", []byte("value"), time.Hour), session.ErrRevoked)
 
 	advance(2 * time.Second)
 	require.NoError(t, backend.Put(ctx, "s", "key", []byte("value"), time.Hour))
@@ -211,7 +211,7 @@ func testMarkerLifetimeFollowsTheLiveValues(t *testing.T, backend session.Backen
 
 	require.NoError(t, backend.Put(ctx, "replaced", "key", []byte("value"), time.Hour), "its value had expired: no marker")
 	advance(8*time.Minute - time.Second)
-	require.ErrorIs(t, backend.Put(ctx, "popped", "key", []byte("value"), time.Hour), session.ErrSessionRevoked)
+	require.ErrorIs(t, backend.Put(ctx, "popped", "key", []byte("value"), time.Hour), session.ErrRevoked)
 	advance(2 * time.Second)
 	require.NoError(t, backend.Put(ctx, "popped", "key", []byte("value"), time.Hour), "the marker lived as long as the value left")
 }
@@ -290,11 +290,11 @@ func testRevokeRacingPut(t *testing.T, backend session.Backend, _ func(time.Dura
 
 		require.NoError(t, revokeError, "round %d", round)
 		if putError != nil {
-			require.ErrorIs(t, putError, session.ErrSessionRevoked, "round %d", round)
+			require.ErrorIs(t, putError, session.ErrRevoked, "round %d", round)
 		}
 		requireAbsent(t, backend, sessionID, "a")
 		requireAbsent(t, backend, sessionID, "b")
-		require.ErrorIs(t, backend.Put(ctx, sessionID, "c", []byte("3"), time.Hour), session.ErrSessionRevoked, "round %d", round)
+		require.ErrorIs(t, backend.Put(ctx, sessionID, "c", []byte("3"), time.Hour), session.ErrRevoked, "round %d", round)
 	}
 }
 

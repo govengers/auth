@@ -59,7 +59,7 @@ func (d *Dependencies) HTTPClient(name string) *http.Client {
 }
 
 // Backend wraps backend so its operations are recorded as dependency "redis" (operation: put, get, pop,
-// compare_and_swap, revoke), under cache on the wide event. ErrSessionRevoked is an answer, not a failure.
+// compare_and_swap, revoke), under cache on the wide event. ErrRevoked is an answer, not a failure.
 func (d *Dependencies) Backend(backend session.Backend) session.Backend {
 	return &recordingBackend{dependencies: d, backend: backend}
 }
@@ -170,7 +170,7 @@ func (b *recordingBackend) Revoke(ctx context.Context, sessionID string, ttl tim
 }
 
 func (b *recordingBackend) record(ctx context.Context, operation string, start time.Time, err error) {
-	if errors.Is(err, session.ErrSessionRevoked) {
+	if errors.Is(err, session.ErrRevoked) {
 		err = nil
 	}
 	b.dependencies.record(ctx, dependencyCall{

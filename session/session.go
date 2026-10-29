@@ -43,7 +43,7 @@ func (s Session) Put(ctx context.Context, key string, value []byte, ttl time.Dur
 		return fmt.Errorf("put session value %q: %w", key, err)
 	}
 	err = s.store.options.Backend.Put(ctx, s.id, key, sealed, ttl)
-	if errors.Is(err, ErrSessionRevoked) {
+	if errors.Is(err, ErrRevoked) {
 		return &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "session revoked", Err: err}
 	}
 	if err != nil {

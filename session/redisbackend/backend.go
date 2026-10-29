@@ -110,7 +110,7 @@ func New(options *Options) (*Backend, error) {
 	return &Backend{client: options.Client, prefix: prefix}, nil
 }
 
-// Put stores value under (sessionID, key) for ttl; session.ErrSessionRevoked when sessionID carries a marker.
+// Put stores value under (sessionID, key) for ttl; session.ErrRevoked when sessionID carries a marker.
 // Every method refuses an empty sessionID and one containing '{' or '}' with an error.
 func (b *Backend) Put(ctx context.Context, sessionID, key string, value []byte, ttl time.Duration) error {
 	if err := validateSessionID(sessionID); err != nil {
@@ -122,7 +122,7 @@ func (b *Backend) Put(ctx context.Context, sessionID, key string, value []byte, 
 		return dependency.Error("redis session backend: store session value", err)
 	}
 	if stored == 0 {
-		return session.ErrSessionRevoked
+		return session.ErrRevoked
 	}
 	return nil
 }

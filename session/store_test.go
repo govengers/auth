@@ -142,7 +142,7 @@ func TestStartRevokesThePreviousSession(t *testing.T) {
 	require.False(t, found)
 	err = previous.Put(t.Context(), "app.key", []byte("value"), time.Hour)
 	require.ErrorIs(t, err, auth.ErrUnauthenticated)
-	require.ErrorIs(t, err, ErrSessionRevoked)
+	require.ErrorIs(t, err, ErrRevoked)
 	require.NoError(t, current.Put(t.Context(), "app.key", []byte("value"), time.Hour))
 }
 

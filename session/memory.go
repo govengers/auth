@@ -59,14 +59,14 @@ func NewMemoryBackend(options *MemoryBackendOptions) (*MemoryBackend, error) {
 	return &MemoryBackend{options: resolved, sessions: map[string]*memorySession{}, now: time.Now}, nil
 }
 
-// Put stores a copy of value under (sessionID, key) for ttl; ErrSessionRevoked when sessionID is revoked.
+// Put stores a copy of value under (sessionID, key) for ttl; ErrRevoked when sessionID is revoked.
 func (b *MemoryBackend) Put(_ context.Context, sessionID, key string, value []byte, ttl time.Duration) error {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 	now := b.now()
 	entry, found := b.sessions[sessionID]
 	if found && entry.revoked(now) {
-		return ErrSessionRevoked
+		return ErrRevoked
 	}
 	if !found {
 		b.makeRoom(now)
