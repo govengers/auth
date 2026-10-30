@@ -405,6 +405,105 @@ func TestGuardRefreshRefusalEndsTheSession(t *testing.T) {
 	}
 }
 
+// revokingRefresher is a fakeRefresher that is also a Revoker: it records, per RevokeSession call, the
+// session's identity as RevokeSession saw it and whether its context was cancelled, and answers revoke.
+type revokingRefresher struct {
+	*fakeRefresher
+	revoke    error
+	mutex     sync.Mutex
+	revoked   []*auth.Identity // nil entries: the session had no identity any more
+	cancelled []bool
+}
+
+func (r *revokingRefresher) RevokeSession(ctx context.Context, current Session) error {
+	identity, _ := current.Identity(ctx) // the test reads nil as "already ended"
+	_, hasDeadline := ctx.Deadline()
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.revoked = append(r.revoked, identity)
+	r.cancelled = append(r.cancelled, ctx.Err() != nil || !hasDeadline)
+	return r.revoke
+}
+
+func (r *revokingRefresher) revokedIdentities() []*auth.Identity {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return r.revoked
+}
+
+// A provider holding state for a session at the identity provider (GitHub's token) must release it when
+// the Guard ends the session, and a failure to release it must never keep the session alive.
+func TestGuardRevokesARefusedSessionAtItsProvider(t *testing.T) {
+	errRevocation := errors.New("revocation endpoint down")
+	refusal := &auth.Error{Kind: auth.ErrForbidden, Reason: "not in an allowed team"}
+	testCases := []struct {
+		name        string
+		refresh     error
+		after       time.Duration
+		revoke      error
+		wantRevoked bool
+		wantStatus  int
+	}{
+		{name: "refusal", refresh: refusal, after: 2 * time.Minute, wantRevoked: true, wantStatus: http.StatusForbidden},
+		{name: "refusal with a failing revocation", refresh: refusal, after: 2 * time.Minute, revoke: errRevocation, wantRevoked: true, wantStatus: http.StatusForbidden},
+		{name: "failure beyond the maximum unverified age", refresh: errBackendDown, after: 61 * time.Minute, wantRevoked: true, wantStatus: http.StatusUnauthorized},
+		{name: "failure within the maximum unverified age", refresh: errBackendDown, after: 2 * time.Minute, wantStatus: http.StatusNoContent},
+		{name: "success", after: 2 * time.Minute, wantStatus: http.StatusNoContent},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			refresher := &revokingRefresher{revoke: testCase.revoke, fakeRefresher: &fakeRefresher{name: "password", refresh: func(identity *auth.Identity) (*auth.Identity, error) {
+				if testCase.refresh != nil {
+					return nil, testCase.refresh
+				}
+				return identity, nil
+			}}}
+			fixture := newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
+			request := login(t, fixture.store, testIdentity())
+			cancelled, cancel := context.WithCancel(request.Context())
+			cancel()
+			fixture.clock.advance(testCase.after)
+
+			result := serveGuarded(fixture.guard.RequireAPI(), request.WithContext(cancelled))
+
+			require.Equal(t, testCase.wantStatus, result.recorder.Code)
+			outcome := fixture.observer.take()[0]
+			if !testCase.wantRevoked {
+				require.Empty(t, refresher.revokedIdentities())
+				return
+			}
+			require.Equal(t, []*auth.Identity{testIdentity()}, refresher.revokedIdentities(), "called once, before the session ended")
+			require.Equal(t, []bool{false}, refresher.cancelled, "detached from the request and bounded")
+			requireExpiredCookie(t, result.recorder)
+			current, err := fixture.store.Open(request)
+			require.NoError(t, err)
+			_, err = current.Identity(t.Context())
+			require.ErrorIs(t, err, auth.ErrUnauthenticated, "session ended")
+			require.Equal(t, auth.ResultDenied, outcome.Result)
+			if testCase.revoke != nil {
+				require.ErrorIs(t, outcome.Err, testCase.revoke, "the failed revocation degrades the outcome")
+				require.ErrorContains(t, outcome.Err, `revoke session at provider "password"`)
+			}
+		})
+	}
+}
+
+// A session that cannot be ended is still revoked at its provider: its next refresh is refused there.
+func TestGuardRevokesARefusedSessionThatCannotBeEnded(t *testing.T) {
+	refresher := &revokingRefresher{fakeRefresher: &fakeRefresher{name: "password", refresh: func(*auth.Identity) (*auth.Identity, error) {
+		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "user deleted"}
+	}}}
+	fixture := newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
+	request := login(t, fixture.store, testIdentity())
+	fixture.store.options.Backend = revokeFailingBackend{Backend: fixture.store.options.Backend}
+	fixture.clock.advance(2 * time.Minute)
+
+	result := serveGuarded(fixture.guard.RequireAPI(), request)
+
+	require.Equal(t, http.StatusInternalServerError, result.recorder.Code)
+	require.Len(t, refresher.revokedIdentities(), 1)
+}
+
 // revokeFailingBackend fails every Revoke and passes everything else on.
 type revokeFailingBackend struct {
 	Backend

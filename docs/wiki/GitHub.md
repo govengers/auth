@@ -39,7 +39,7 @@ Prefix `PathPrefix`, default `/auth/github`.
 | Method and path | Purpose |
 |---|---|
 | `GET /login` | starts the login, 302 to GitHub; `?return_to=<path>` as for OIDC |
-| `GET /callback` | checks teams, rotates the session, stores identity and token, 302 to the return path |
+| `GET /callback` | checks teams, rotates the session, stores identity and token, revokes the token of the session it replaced (a re-login; a failure only shows in the outcome), 302 to the return path |
 | `GET /logout` | ends the session, revokes the token at GitHub (a failure only shows in the outcome), 302 to `PostLogoutURL` |
 | `POST /refresh-teams` | re-checks teams now; 200 identity, 401/403 ends the session (500 when it cannot end it), 409 `conflict` (see Refresh) |
 
@@ -63,6 +63,8 @@ Every refresh (the Guard's every minute, `POST /refresh-teams`) re-derives `auth
 ## Refresh
 
 The provider as `Refresher` refetches teams once per `GuardOptions.RefreshInterval` (default 1 min). Removed from every allowed team or token revoked: the session ends. GitHub down or rate-limiting: the session keeps its teams for at most `GuardOptions.MaximumUnverifiedAge` (default 1 h) since the last successful check, then ends. See [Sessions](Sessions.md#refresh).
+
+The provider is also a `session.Revoker`: whenever the Guard ends a session it refused (team removal, token rejected, `MaximumUnverifiedAge`), `/refresh-teams` ends one, or a re-login replaces one, the token is revoked at GitHub first (`DELETE /applications/{client_id}/token`, detached from the request, 10 s). A failed revocation only degrades the outcome; the session ends anyway. Not covered, so the token stays valid at GitHub until the user revokes the app: a session that simply expires (`MaximumAge`; nothing runs at expiry), a GitHub session ended by another provider's logout or replaced by another provider's login on the same `Store`.
 
 `POST /refresh-teams` never overwrites a change another request saved while it called GitHub: it applies the teams to that save once more, and answers 409 `conflict` when that save changed the membership, the admin role or the user (it may be a newer refresh) or the session changed again. Like logout it refuses a cross-site request (`Sec-Fetch-Site: cross-site`) with 403 before GitHub is called.
 
