@@ -9,7 +9,7 @@
 | Option | Default | Note |
 |---|---|---|
 | `Backend` | required | `session.NewMemoryBackend(nil)` or `redisbackend.New` |
-| `EncryptionKey` | required | exactly 32 bytes: `session.ParseKey(os.Getenv(...))`, generated with `openssl rand -base64 32`; same on every replica; changing it logs everyone out (no rotation list) |
+| `EncryptionKey` | required | exactly 32 bytes, not one byte repeated (an all-zero placeholder is refused): `session.ParseKey(os.Getenv(...))`, generated with `openssl rand -base64 32`; same on every replica; changing it logs everyone out (no rotation list) |
 | `CookieName` | `auth_session` | sent as `__Host-auth_session` while the cookie is Secure, host-only and on `/` (the default) |
 | `CookieDomain`, `CookiePath` | host-only, `/` | either one drops the `__Host-` prefix |
 | `SameSite` | `http.SameSiteLaxMode` | `None` for OIDC front-channel logout (https only); `Strict` only without OIDC and GitHub providers; `SameSiteDefaultMode` is refused |

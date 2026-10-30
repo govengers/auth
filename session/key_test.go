@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -25,6 +26,8 @@ func TestParseKey(t *testing.T) {
 		{name: "33 bytes", encoded: base64.StdEncoding.EncodeToString(append(key, 'x')), wantError: "has 33 bytes"},
 		{name: "not base64", encoded: strings.Repeat("!", 44), wantError: "not base64"},
 		{name: "hex", encoded: strings.Repeat("ab", 32), wantError: "has 48 bytes"},
+		{name: "all zero", encoded: base64.StdEncoding.EncodeToString(make([]byte, 32)), wantError: "repeats a single byte"},
+		{name: "one byte repeated", encoded: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xa7}, 32)), wantError: "repeats a single byte"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

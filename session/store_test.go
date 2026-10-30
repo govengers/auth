@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -35,6 +36,8 @@ func TestNewStoreValidation(t *testing.T) {
 		{name: "no key", options: valid(func(options *StoreOptions) { options.EncryptionKey = nil }), wantError: "EncryptionKey has 0 bytes"},
 		{name: "short key", options: valid(func(options *StoreOptions) { options.EncryptionKey = options.EncryptionKey[:31] }), wantError: "EncryptionKey has 31 bytes"},
 		{name: "long key", options: valid(func(options *StoreOptions) { options.EncryptionKey = append(options.EncryptionKey, 'x') }), wantError: "EncryptionKey has 33 bytes"},
+		{name: "all-zero key", options: valid(func(options *StoreOptions) { options.EncryptionKey = make([]byte, 32) }), wantError: "EncryptionKey repeats a single byte"},
+		{name: "one byte repeated", options: valid(func(options *StoreOptions) { options.EncryptionKey = bytes.Repeat([]byte{0xa7}, 32) }), wantError: "EncryptionKey repeats a single byte"},
 		{name: "maximum age below a second", options: valid(func(options *StoreOptions) { options.MaximumAge = 500 * time.Millisecond }), wantError: "below one second"},
 		{name: "negative maximum age", options: valid(func(options *StoreOptions) { options.MaximumAge = -time.Hour }), wantError: "below one second"},
 		{name: "same site default mode", options: valid(func(options *StoreOptions) { options.SameSite = http.SameSiteDefaultMode }), wantError: "SameSite must be Lax, Strict or None"},

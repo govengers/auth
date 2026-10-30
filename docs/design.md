@@ -353,8 +353,8 @@ func RegisterRoutes(serveMux *http.ServeMux, routes []Route)
 Files: `doc.go`, `key.go`, `backend.go`, `memory.go`, `store.go`, `session.go`, `crypto.go` (unexported), `guard.go`.
 
 ```go
-// ParseKey decodes a base64 (standard or URL alphabet, padding optional) encryption key and requires exactly 32 bytes.
-// Generate one with `openssl rand -base64 32`.
+// ParseKey decodes a base64 (standard or URL alphabet, padding optional) encryption key and requires exactly 32 bytes,
+// not one byte repeated (all zero included). Generate one with `openssl rand -base64 32`.
 func ParseKey(encoded string) ([]byte, error)
 
 // ErrRevoked is returned by Backend.Put for a session that carries a revocation marker.
@@ -398,7 +398,7 @@ type MemoryBackend struct{ /* unexported */ }
 
 type StoreOptions struct {
 	Backend        Backend       // required
-	EncryptionKey  []byte        // required, exactly 32 bytes (AES-256-GCM); see ParseKey
+	EncryptionKey  []byte        // required, exactly 32 bytes (AES-256-GCM), not one byte repeated; see ParseKey
 	CookieName     string        // default "auth_session"; Secure, host-only and on "/": sent as "__Host-" + CookieName (an own "__Host-"/"__Secure-" prefix is kept and validated)
 	CookieDomain   string        // default "" (host-only cookie)
 	CookiePath     string        // default "/"
@@ -1515,7 +1515,7 @@ Decisions taken during implementation (29.10.2026, settled by the lead):
 | D41 | After the agent-docs pass (30.10.2026): `session.Store.SameSite()`; `oidc.New` and `github.New` refuse a store whose cookie is SameSite Strict. Password-only stores may keep Strict. | A Strict cookie is withheld on the redirect back from the IdP or GitHub, so every callback failed with `login_expired` at runtime instead of at startup (the binary already refused `SESSION_SAME_SITE=strict`, D32). |
 | D42 | After security audit run 2: `MemoryBackend` keeps its sessions in a min-heap by expiry (`container/heap`), so a write into a full backend drops expired entries and evicts the soonest expiring in O(log n) each; eviction order is unchanged (exact soonest first, not sampled). The docs say the memory backend is not built for anonymous login floods. | Each eviction scanned every session twice under the one mutex every `Get` takes: about 100000 anonymous login starts filled the default backend, then every further start held the lock for about 60 ms and stalled all users. A heap keeps the documented eviction order and its tests truthful; sampled eviction would have changed both. |
 | D43 | After security audit run 2: the Redis backend's `Get`, `Pop` and `CompareAndSwap` count a value only while the session's index set lists it, checked atomically in Lua (`getScript` replaces the plain `GET`). The index TTL is never shorter than a value's (`putScript` only extends it, `swapScript` keeps the value's TTL, `popScript` removes the entry). The wiki names `noeviction` (or `volatile-ttl`) as the session Redis's `maxmemory-policy`. | `revokeScript` finds the values only through the index: under an evicting policy an idle index could go first, then a logout deleted nothing and wrote no marker while `GET` still found the identity, so the logged-out cookie kept authenticating. Failing closed turns that eviction into a logout. Existing sessions are unaffected: every v1.0.0 `Put` indexed its value. |
-| D44 | After security audit run 2, session hardening: `SaveIdentity` and `SwapIdentity` keep `refreshedAt` (only the first save and the Guard's refresh set it), rather than the Guard also keying on `verifiedAt`. A refresh claim the backend failed is read back, and the Refresher runs only when the stored value is the claim (committed, reply lost); otherwise the request fails without a provider call. | They set `refreshedAt` without asking a provider, and the Guard's refresh is due by `refreshedAt` alone, so application saves more frequent than `RefreshInterval` suppressed the Refresher and with it the `MaximumUnverifiedAge` cutoff for good. Also checking `verifiedAt` would still have let such saves postpone a refusal (a removed team member) up to `MaximumUnverifiedAge`; keeping `refreshedAt` the Guard's own clock refreshes every interval. A failed claim used to run the Refresher anyway in case it had committed: with a backend failing writes every request called the provider (30 calls for 30 requests). |
+| D44 | After security audit run 2, session hardening: `SaveIdentity` and `SwapIdentity` keep `refreshedAt` (only the first save and the Guard's refresh set it), rather than the Guard also keying on `verifiedAt`. A refresh claim the backend failed is read back, and the Refresher runs only when the stored value is the claim (committed, reply lost); otherwise the request fails without a provider call. `ParseKey` and `NewStore` refuse a 32-byte key that repeats one byte (all zero included), naming no key byte. | They set `refreshedAt` without asking a provider, and the Guard's refresh is due by `refreshedAt` alone, so application saves more frequent than `RefreshInterval` suppressed the Refresher and with it the `MaximumUnverifiedAge` cutoff for good. Also checking `verifiedAt` would still have let such saves postpone a refusal (a removed team member) up to `MaximumUnverifiedAge`; keeping `refreshedAt` the Guard's own clock refreshes every interval. A failed claim used to run the Refresher anyway in case it had committed: with a backend failing writes every request called the provider (30 calls for 30 requests). A repeated-byte key is a placeholder (`make([]byte, 32)`, a zeroed secret) that anyone can guess, so every sealed value would be readable and forgeable; refusing it newly refuses such a configuration on purpose. |
 
 ---
 
