@@ -8,7 +8,7 @@ An `authorization.Check` is `func(ctx context.Context) error` over the `auth.Ide
 |---|---|
 | `Provider`, `Subject` | every provider (`password`, an OIDC `Name`, `github`, `apikey`; a verified JWT keeps the provider it was signed for) |
 | `UserID` | password provider (the `Storage` ID); otherwise `uuid.Nil` until your `OnLogin` hook sets it |
-| `Active` | providers set `true`; hooks and `apikey.Resolver` decide; every check except `IsAuthenticated` refuses an inactive identity (403, Reason `inactive`) |
+| `Active` | providers set `true`; hooks and `apikey.Resolver` decide; every check except `IsAuthenticated` refuses an inactive identity, and an identity whose impersonator is inactive (403, Reason `inactive`) |
 | `Roles` | application roles: `github` `AdminTeams` (`auth.RoleAdmin`), API keys, JWT, your `OnLogin` hook |
 | `OIDCRoles`, `OIDCClientRoles`, `Groups` | OIDC tokens or `keycloak.Client.Enrich` |
 | `Teams` | `github` |
