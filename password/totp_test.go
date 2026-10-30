@@ -742,6 +742,8 @@ func TestTOTPRoutesRefuseForeignSessions(t *testing.T) {
 	user := fixture.createUser(t, "ada", "")
 	impersonated := identityOf(user)
 	impersonated.Impersonator = &auth.Identity{Provider: "password", Subject: uuid.NewString(), Active: true}
+	inactive := identityOf(user)
+	inactive.Active = false
 
 	testCases := []struct {
 		name       string
@@ -750,6 +752,7 @@ func TestTOTPRoutesRefuseForeignSessions(t *testing.T) {
 		wantCode   string
 	}{
 		{name: "impersonating", identity: impersonated, wantStatus: http.StatusForbidden, wantCode: "forbidden"},
+		{name: "inactive", identity: inactive, wantStatus: http.StatusForbidden, wantCode: "forbidden"},
 		{name: "another provider", identity: &auth.Identity{Provider: "github", Subject: "42", UserID: user.ID, Active: true}, wantStatus: http.StatusUnauthorized, wantCode: "unauthenticated"},
 		{name: "deleted user", identity: identityOf(&User{ID: uuid.New()}), wantStatus: http.StatusUnauthorized, wantCode: "unauthenticated"},
 		{name: "no session", wantStatus: http.StatusUnauthorized, wantCode: "unauthenticated"},

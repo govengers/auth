@@ -84,7 +84,7 @@ The provider has no password-change or reset route; your application does it: co
 
 ## Refusal codes
 
-`invalid_credentials` (401: login, TOTP enable and disable), `no_pending_login` and `invalid_totp_code` (401: verify, enable), `totp_setup_missing` (400), `totp_already_enabled`, `totp_not_enabled` (409), `user_exists` (409), `weak_password`, `invalid_username`, `invalid_email` (400: register), `forbidden` (403: cross-site logout). Shape and mapping: [Errors-and-Observability](Errors-and-Observability.md).
+`invalid_credentials` (401: login, TOTP enable and disable), `no_pending_login` and `invalid_totp_code` (401: verify, enable), `totp_setup_missing` (400), `totp_already_enabled`, `totp_not_enabled` (409), `user_exists` (409), `weak_password`, `invalid_username`, `invalid_email` (400: register), `forbidden` (403: cross-site logout; the TOTP routes for an impersonating or inactive identity). Shape and mapping: [Errors-and-Observability](Errors-and-Observability.md).
 
 ## Gotchas
 
