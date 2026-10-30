@@ -58,13 +58,15 @@ func (p *Provider) register(writer http.ResponseWriter, request *http.Request) r
 	return p.continueLogin(writer, request, user, http.StatusCreated)
 }
 
-// logout ends the request's session, whatever it holds, and tells OnLogout about the identity it had. A
-// cross-site request (logout CSRF) is refused before the session is touched.
+// logout ends the request's session, whatever it holds, and tells OnLogout about the identity it had, within
+// logoutTimeout. A cross-site request (logout CSRF) is refused before the session is touched.
 func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) reply {
 	if err := fetchmetadata.RefuseCrossSite(request); err != nil {
 		return refused(err)
 	}
-	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip OnLogout
+	// A disconnecting client must not skip OnLogout, a hanging dependency not hold the handler.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), p.logoutTimeout)
+	defer cancel()
 	identity, readError := p.sessionIdentity(ctx, request)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
 		return refused(fmt.Errorf("end session: %w", err)).degradedBy(readError)

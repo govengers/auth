@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -256,6 +257,22 @@ func TestLogoutWithADisconnectedClient(t *testing.T) {
 	require.Equal(t, auth.ResultSuccess, outcome.Result)
 	require.NoError(t, outcome.Err)
 	require.Equal(t, loggedOut[0], outcome.Identity)
+}
+
+func TestLogoutBoundsAHangingHook(t *testing.T) {
+	var hookContextError error
+	fixture := newFixture(t, Options{OnLogout: func(ctx context.Context, _ *auth.Identity) {
+		<-ctx.Done() // an OnLogout stuck on a dependency that honours its context
+		hookContextError = ctx.Err()
+	}})
+	fixture.createUser(t, "ada", "")
+	browser := loggedInClient(t, fixture)
+	fixture.provider.logoutTimeout = time.Millisecond
+
+	recorder := browser.post("/auth/password/logout", map[string]any{})
+
+	require.Equal(t, http.StatusNoContent, recorder.Code)
+	require.ErrorIs(t, hookContextError, context.DeadlineExceeded)
 }
 
 func TestLogoutReportsAFailedSessionRead(t *testing.T) {

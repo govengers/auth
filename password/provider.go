@@ -17,6 +17,9 @@ import (
 	"github.com/govengers/auth/session"
 )
 
+// logoutTimeout bounds logout's session reads and OnLogout, as session.Store.End bounds the revocation.
+const logoutTimeout = 10 * time.Second
+
 // Client codes of the refusals (stable API for frontends).
 const (
 	codeInvalidCredentials = "invalid_credentials" //nolint:gosec // G101: a client code, not a credential
@@ -40,6 +43,7 @@ type Provider struct {
 	dummyHash          string // verified for unknown users, so a lookup costs the same either way
 	now                func() time.Time
 	verifyHash         func(password, encodedHash string) (bool, Parameters, error) // verifyHash; tests observe the calls
+	logoutTimeout      time.Duration                                                // bounds logout, which a disconnecting client cannot cancel
 	reporter           *failure.Reporter
 }
 
@@ -76,6 +80,7 @@ func newProvider(options Options) (*Provider, error) {
 		dummyHash:          dummyHash,
 		now:                time.Now,
 		verifyHash:         verifyHash,
+		logoutTimeout:      logoutTimeout,
 		reporter:           reporter,
 	}, nil
 }
