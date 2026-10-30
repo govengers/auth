@@ -46,6 +46,18 @@ func TestNewStoreValidation(t *testing.T) {
 		{name: "cookie path with semicolon", options: valid(func(options *StoreOptions) { options.CookiePath = "/a;b" }), wantError: "in Cookie.Path"},
 		{name: "cookie name with space", options: valid(func(options *StoreOptions) { options.CookieName = "bad name" }), wantError: "invalid Cookie.Name"},
 		{name: "invalid cookie domain", options: valid(func(options *StoreOptions) { options.CookieDomain = "bad domain!" }), wantError: "invalid Cookie.Domain"},
+		{name: "__Host- name on an insecure cookie", options: valid(func(options *StoreOptions) {
+			options.CookieName, options.InsecureCookie = "__Host-app", true
+		}), wantError: `a "__Host-" CookieName needs`},
+		{name: "__Host- name with a domain", options: valid(func(options *StoreOptions) {
+			options.CookieName, options.CookieDomain = "__host-app", "example.com"
+		}), wantError: `a "__Host-" CookieName needs`},
+		{name: "__Host- name on another path", options: valid(func(options *StoreOptions) {
+			options.CookieName, options.CookiePath = "__Host-app", "/app"
+		}), wantError: `a "__Host-" CookieName needs`},
+		{name: "__Secure- name on an insecure cookie", options: valid(func(options *StoreOptions) {
+			options.CookieName, options.InsecureCookie = "__Secure-app", true
+		}), wantError: `a "__Secure-" CookieName needs a Secure cookie`},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -66,7 +78,7 @@ func TestNewStoreDefaultsOnACopy(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, original, *options, "caller's options untouched")
-	require.Equal(t, "auth_session", store.options.CookieName)
+	require.Equal(t, "__Host-auth_session", store.options.CookieName)
 	require.Equal(t, "/", store.options.CookiePath)
 	require.Equal(t, http.SameSiteLaxMode, store.options.SameSite)
 	require.Equal(t, 24*time.Hour, store.MaximumAge())
@@ -82,6 +94,49 @@ func TestNewStoreDefaultsOnACopy(t *testing.T) {
 	require.Equal(t, "value", string(value))
 }
 
+func TestNewStoreNamesASecureHostOnlyCookieWithTheHostPrefix(t *testing.T) {
+	testCases := []struct {
+		name    string
+		options StoreOptions
+		want    string
+	}{
+		{name: "defaults", want: "__Host-auth_session"},
+		{name: "own name", options: StoreOptions{CookieName: "app"}, want: "__Host-app"},
+		{name: "insecure cookie", options: StoreOptions{InsecureCookie: true}, want: "auth_session"},
+		{name: "domain cookie", options: StoreOptions{CookieDomain: "example.com"}, want: "auth_session"},
+		{name: "path below the root", options: StoreOptions{CookiePath: "/app"}, want: "auth_session"},
+		{name: "own __Host- prefix", options: StoreOptions{CookieName: "__Host-app"}, want: "__Host-app"},
+		{name: "own __Host- prefix in another case", options: StoreOptions{CookieName: "__host-app"}, want: "__host-app"},
+		{name: "own __Secure- prefix", options: StoreOptions{CookieName: "__Secure-app", CookieDomain: "example.com"}, want: "__Secure-app"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			options := testCase.options
+			options.Backend = newTestMemoryBackend(t, newTestClock())
+			options.EncryptionKey = testEncryptionKey()
+
+			store, err := NewStore(&options)
+
+			require.NoError(t, err)
+			require.Equal(t, testCase.want, store.options.CookieName)
+		})
+	}
+}
+
+// A sibling subdomain can set a cookie of the bare name for the parent domain; the store must not read it.
+func TestOpenIgnoresATossedCookieWithoutTheHostPrefix(t *testing.T) {
+	store := newTestStore(t, newTestClock())
+	_, request := startSession(t, store)
+	cookie, err := request.Cookie("__Host-auth_session")
+	require.NoError(t, err)
+	tossed := newRequest(t)
+	tossed.Header.Set("Cookie", "auth_session="+cookie.Value)
+
+	_, err = store.Open(tossed)
+
+	require.ErrorIs(t, err, auth.ErrUnauthenticated)
+}
+
 func TestStartSetsTheCookie(t *testing.T) {
 	testCases := []struct {
 		name    string
@@ -90,7 +145,7 @@ func TestStartSetsTheCookie(t *testing.T) {
 	}{
 		{
 			name: "defaults",
-			want: "auth_session=<value>; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax",
+			want: "__Host-auth_session=<value>; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax",
 		},
 		{
 			name:    "configured",
@@ -98,9 +153,14 @@ func TestStartSetsTheCookie(t *testing.T) {
 			want:    "app=<value>; Path=/app; Domain=example.com; Max-Age=3600; HttpOnly; SameSite=Strict",
 		},
 		{
+			name:    "secure domain cookie keeps its name",
+			options: StoreOptions{CookieDomain: "example.com"},
+			want:    "auth_session=<value>; Path=/; Domain=example.com; Max-Age=86400; HttpOnly; Secure; SameSite=Lax",
+		},
+		{
 			name:    "same site none for front-channel logout",
 			options: StoreOptions{SameSite: http.SameSiteNoneMode},
-			want:    "auth_session=<value>; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=None",
+			want:    "__Host-auth_session=<value>; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=None",
 		},
 	}
 	for _, testCase := range testCases {
@@ -160,7 +220,7 @@ func TestStartWithAnUnknownCookieWritesNothing(t *testing.T) {
 		value, err := random.Token(cookieValueBytes)
 		require.NoError(t, err)
 		request := newRequest(t)
-		request.Header.Set("Cookie", defaultCookieName+"="+value)
+		request.Header.Set("Cookie", hostPrefix+defaultCookieName+"="+value)
 		_, err = store.Start(t.Context(), httptest.NewRecorder(), request)
 		require.NoError(t, err)
 	}
@@ -222,14 +282,14 @@ func TestOpen(t *testing.T) {
 		cookie    string // Cookie request header
 		wantError bool
 	}{
-		{name: "valid cookie", cookie: "auth_session=" + validValue},
+		{name: "valid cookie", cookie: "__Host-auth_session=" + validValue},
 		{name: "no cookie", wantError: true},
 		{name: "other cookie name", cookie: "other=" + validValue, wantError: true},
-		{name: "empty value", cookie: "auth_session=", wantError: true},
-		{name: "not base64url", cookie: "auth_session=" + strings.Repeat("*", 43), wantError: true},
-		{name: "padded", cookie: "auth_session=" + validValue + "=", wantError: true},
-		{name: "too short", cookie: "auth_session=" + validValue[:42], wantError: true},
-		{name: "too long", cookie: "auth_session=" + validValue + "AAAA", wantError: true},
+		{name: "empty value", cookie: "__Host-auth_session=", wantError: true},
+		{name: "not base64url", cookie: "__Host-auth_session=" + strings.Repeat("*", 43), wantError: true},
+		{name: "padded", cookie: "__Host-auth_session=" + validValue + "=", wantError: true},
+		{name: "too short", cookie: "__Host-auth_session=" + validValue[:42], wantError: true},
+		{name: "too long", cookie: "__Host-auth_session=" + validValue + "AAAA", wantError: true},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -305,7 +365,7 @@ func TestBackendSeesOnlyHashedIDsAndCiphertext(t *testing.T) {
 
 	require.NoError(t, current.Put(t.Context(), "app.secret", []byte(plaintext), time.Hour))
 
-	cookie, err := request.Cookie("auth_session")
+	cookie, err := request.Cookie("__Host-auth_session")
 	require.NoError(t, err)
 	sum := sha256.Sum256([]byte(cookie.Value))
 	require.Len(t, recording.puts, 1)
@@ -322,7 +382,7 @@ func requireExpiredCookie(t *testing.T, recorder *httptest.ResponseRecorder) {
 	t.Helper()
 	cookies := responseCookies(t, recorder)
 	require.Len(t, cookies, 1)
-	require.Equal(t, "auth_session", cookies[0].Name)
+	require.Equal(t, "__Host-auth_session", cookies[0].Name)
 	require.Empty(t, cookies[0].Value)
 	require.Negative(t, cookies[0].MaxAge)
 	require.True(t, cookies[0].HttpOnly)

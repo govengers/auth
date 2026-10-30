@@ -18,6 +18,8 @@ import (
 
 const (
 	defaultCookieName = "auth_session"
+	hostPrefix        = "__Host-"
+	securePrefix      = "__Secure-"
 	defaultMaximumAge = 24 * time.Hour
 	cookieValueBytes  = 32
 	// revokeTimeout bounds End's revocation, which a disconnecting client cannot cancel.
@@ -28,7 +30,7 @@ const (
 type StoreOptions struct {
 	Backend        Backend       // required
 	EncryptionKey  []byte        // required, exactly 32 bytes (AES-256-GCM); see ParseKey
-	CookieName     string        // default "auth_session"
+	CookieName     string        // default "auth_session"; "__Host-" is prepended when Secure, host-only and on "/" (see NewStore)
 	CookieDomain   string        // default "" (host-only cookie)
 	CookiePath     string        // default "/"
 	SameSite       http.SameSite // default http.SameSiteLaxMode; SameSiteNoneMode requires InsecureCookie false (front-channel logout needs None)
@@ -43,7 +45,11 @@ type Store struct {
 	now     func() time.Time
 }
 
-// NewStore validates options and returns a Store working on a copy of them.
+// NewStore validates options and returns a Store working on a copy of them. A Secure, host-only cookie on
+// path "/" is named "__Host-" + CookieName, unless CookieName has its own "__Host-" or "__Secure-" prefix:
+// browsers accept such a cookie only from this host over https, so a sibling subdomain cannot toss a cookie
+// of the same name that the store would read first. A "__Host-" CookieName needs exactly those attributes,
+// a "__Secure-" one a Secure cookie.
 func NewStore(options *StoreOptions) (*Store, error) {
 	if options == nil || options.Backend == nil {
 		return nil, errors.New("session store: Backend is required")
@@ -56,6 +62,7 @@ func NewStore(options *StoreOptions) (*Store, error) {
 		return nil, err
 	}
 	resolved.EncryptionKey = slices.Clone(options.EncryptionKey)
+	resolved.CookieName = effectiveCookieName(resolved)
 	return &Store{options: resolved, now: time.Now}, nil
 }
 
@@ -91,7 +98,36 @@ func validateStoreOptions(options StoreOptions) error {
 	if err := sessionCookie(options, "value", 0).Valid(); err != nil {
 		return fmt.Errorf("session store: %w", err)
 	}
+	return validateCookiePrefix(options)
+}
+
+// validateCookiePrefix refuses a prefixed CookieName whose attributes a browser would reject the cookie for.
+func validateCookiePrefix(options StoreOptions) error {
+	switch {
+	case hasCookiePrefix(options.CookieName, hostPrefix) && !hostOnlyOnRoot(options):
+		return errors.New(`session store: a "__Host-" CookieName needs a Secure cookie (InsecureCookie false) without CookieDomain on CookiePath "/"`)
+	case hasCookiePrefix(options.CookieName, securePrefix) && options.InsecureCookie:
+		return errors.New(`session store: a "__Secure-" CookieName needs a Secure cookie, so InsecureCookie must be false`)
+	}
 	return nil
+}
+
+// effectiveCookieName is CookieName with "__Host-" prepended when the cookie qualifies for it and has no prefix.
+func effectiveCookieName(options StoreOptions) string {
+	if !hostOnlyOnRoot(options) || hasCookiePrefix(options.CookieName, hostPrefix) || hasCookiePrefix(options.CookieName, securePrefix) {
+		return options.CookieName
+	}
+	return hostPrefix + options.CookieName
+}
+
+// hostOnlyOnRoot reports whether the cookie has the attributes "__Host-" requires: Secure, no Domain, Path "/".
+func hostOnlyOnRoot(options StoreOptions) bool {
+	return !options.InsecureCookie && options.CookieDomain == "" && options.CookiePath == "/"
+}
+
+// hasCookiePrefix matches prefix case-insensitively, as browsers do.
+func hasCookiePrefix(name, prefix string) bool {
+	return len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix)
 }
 
 // Start issues a new session: revokes the request's current session (if any), sets a fresh cookie, returns the handle.

@@ -51,13 +51,13 @@ func TestCallbackStartsARotatedSessionAndRedirectsToTheReturnPath(t *testing.T) 
 	application := newApplication(t, startIssuer(t, nil), nil)
 	person := newBrowser(t)
 	callback := person.toCallback(application, prefix+"/login?return_to=%2Fdashboard%3Ftab%3D2")
-	loginCookie := person.cookies["auth_session"].Value
+	loginCookie := person.cookies["__Host-auth_session"].Value
 
 	response := person.get(application.handler, callback, nil)
 
 	require.Equal(t, http.StatusFound, response.Code, response.Body.String())
 	require.Equal(t, externalURL+"/dashboard?tab=2", response.Header().Get("Location"))
-	require.NotEqual(t, loginCookie, person.cookies["auth_session"].Value, "the session ID rotates at login")
+	require.NotEqual(t, loginCookie, person.cookies["__Host-auth_session"].Value, "the session ID rotates at login")
 	require.Contains(t, person.sessionValue(application.store, providerName+".id_token"), ".")
 	current := person.get(application.handler, "/me", nil)
 	require.Equal(t, http.StatusOK, current.Code)

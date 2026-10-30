@@ -117,7 +117,7 @@ func TestLoginRotatesTheSession(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, browser.login("ada").Code)
 
-	require.NotEqual(t, before.cookies["auth_session"].Value, browser.cookies["auth_session"].Value)
+	require.NotEqual(t, before.cookies["__Host-auth_session"].Value, browser.cookies["__Host-auth_session"].Value)
 	_, err := fixture.sessionIdentity(t, before)
 	require.ErrorIs(t, err, auth.ErrUnauthenticated)
 	_, err = fixture.sessionIdentity(t, browser)

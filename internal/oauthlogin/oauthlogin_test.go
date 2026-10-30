@@ -146,7 +146,7 @@ func TestBeginFailsWhenTheStateCannotBeStored(t *testing.T) {
 
 	require.ErrorIs(t, err, errBackendDown)
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/login", nil)
-	request.Header.Set("Cookie", "auth_session=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	request.Header.Set("Cookie", "__Host-auth_session=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 	_, err = Begin(t.Context(), store, httptest.NewRecorder(), request, loginKey)
 	require.ErrorIs(t, err, errBackendDown, "the previous session cannot be read")
 

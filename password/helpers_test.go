@@ -269,7 +269,7 @@ func (c *client) login(identifier string) *httptest.ResponseRecorder {
 }
 
 func (c *client) hasSession() bool {
-	_, found := c.cookies["auth_session"]
+	_, found := c.cookies["__Host-auth_session"]
 	return found
 }
 

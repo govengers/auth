@@ -23,7 +23,7 @@ import (
 
 const (
 	testExternalURL = "https://app.example.com"
-	testCookieName  = "auth_session"
+	testCookieName  = "__Host-auth_session" // the store prefixes a Secure host-only cookie
 )
 
 var errBackendDown = errors.New("backend down")
