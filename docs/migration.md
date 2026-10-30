@@ -368,3 +368,4 @@ The old modules and images keep working with their own keys and configuration. S
 Changes after the v1.0.0 release that can break an existing setup.
 
 - **forwardauth `request.client_ip`**: the wide event's client IP is the peer address (Traefik's) unless `TRUSTED_PROXIES` lists the peer; it no longer believes a client's `X-Forwarded-For` or `X-Real-IP`. Set `TRUSTED_PROXIES` to Traefik's addresses or network to record the client again. An entry that is neither an IP nor a CIDR fails the boot.
+- **forwardauth Redis validation**: with `SESSION_REDIS_ENABLED=true`, a `SESSION_REDIS_ADDRESS` that is not `host:port` fails the boot during validation (before, the ping failed). New optional values: `SESSION_REDIS_USERNAME`, `SESSION_REDIS_SENTINEL_*` and `SESSION_REDIS_TLS_*` (see the configuration reference); nothing changes for a setup that sets none of them.
