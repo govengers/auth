@@ -25,7 +25,7 @@ Mount it before the Guard: `authenticator.Middleware()(guard.RequireAPI()(handle
 - No key: passes through untouched. A wrong key: 401 `invalid_api_key`, never a fall-through, also when a valid session cookie is present.
 - Static key identity: `Provider` `apikey`, `Subject` and `Username` the key name, the key's `Roles` and `Permissions`, `Active` true.
 - Secrets: at least 16 bytes, no surrounding whitespace, names and secrets unique; compared as SHA-256 in constant time.
-- `Resolver func(ctx, key) (*auth.Identity, error)` for keys you issue: return an error matching `auth.ErrUnauthenticated` for unknown or revoked keys (any other error is 500); set `Active: true` yourself; put the key's access level into `Permissions` (e.g. `*:read`); never repeat the key in an error text.
+- `Resolver func(ctx, key) (*auth.Identity, error)` for keys you issue: return an error matching `auth.ErrUnauthenticated` for unknown or revoked keys (any other error is 500, its chain dropped; only `context.Canceled` and `context.DeadlineExceeded` stay detectable); set `Active: true` yourself; put the key's access level into `Permissions` (e.g. a stored `read_only` level becomes `*:read`); never repeat the key in an error text: it is reported in `Outcome.Err` and recorded on the wide event.
 
 ## Gotchas
 

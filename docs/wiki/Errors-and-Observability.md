@@ -22,7 +22,27 @@ Every refusal is an `*auth.Error` and every response the library writes is `{"co
 	status, response := auth.ResponseFor(fmt.Errorf("open report: %w", refusal))
 ```
 
-The output is `403 forbidden access denied`: the Reason is gone. Use the same type for your own refusals with your own `Code` (e.g. `plan_limit`). Provider-specific codes are listed on each provider page; the full code table is in the [README](../../README.md#errors).
+The output is `403 forbidden access denied`: the Reason is gone. Your own code returns the same type with its own `Code`, e.g. `&auth.Error{Kind: auth.ErrForbidden, Code: "plan_limit", Reason: "..."}`: `Code` replaces the default code, `Reason` and the wrapped cause never reach the client.
+
+## Client codes
+
+Stable codes for frontends; the kind decides the status.
+
+| Code | Kind | Raised by |
+|---|---|---|
+| `invalid_credentials` | unauthenticated | password login, TOTP enable and disable |
+| `no_pending_login`, `invalid_totp_code` | unauthenticated | password TOTP verify (`invalid_totp_code` also on enable) |
+| `totp_setup_missing` | invalid request | password TOTP enable |
+| `totp_already_enabled`, `totp_not_enabled` | conflict | password TOTP setup, enable, disable |
+| `user_exists` | conflict | password register |
+| `weak_password`, `invalid_username`, `invalid_email` | invalid request | password register |
+| `login_expired`, `state_mismatch` | invalid request | OIDC and GitHub callback |
+| `login_denied`, `login_failed` | unauthenticated | OIDC and GitHub callback |
+| `invalid_api_key` | unauthenticated | `apikey` |
+| `invalid_token` | unauthenticated | `jwt` verifier |
+| `not_found`, `unavailable` | (404, 503) | forward-auth binary only: unknown route, readiness while shutting down or Redis down |
+
+With `ErrorURL` set, OIDC and GitHub callbacks send the same codes as `?code=<code>`, `internal` included.
 
 ## Observer and Outcome
 

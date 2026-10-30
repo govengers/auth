@@ -12,15 +12,15 @@ The image `ghcr.io/govengers/forwardauth` (binary `cmd/forwardauth`) runs one pr
 
 ## Routes
 
-`{prefix}/ui`, `{prefix}/api` (checks), `{prefix}/jwks`, `{prefix}/me` (optional), `{prefix}/health`, `{prefix}/ready`, the provider routes (`{prefix}/oidc/<OIDC_NAME>/...` or `{prefix}/github/...`) and `GET /metrics` on `METRICS_PORT`. Table with answers: [README, Routes](../../README.md#routes).
+`{prefix}/ui`, `{prefix}/api` (checks), `{prefix}/jwks`, `{prefix}/me` (optional), `{prefix}/health`, `{prefix}/ready`, the provider routes (`{prefix}/oidc/<OIDC_NAME>/...` or `{prefix}/github/...`) and `GET /metrics` on `METRICS_PORT`. Table with answers: [Forward-Auth-Configuration](Forward-Auth-Configuration.md#routes).
 
 ## Configuration
 
-Environment variables only; the process lists every problem and exits before serving. Full table with defaults: [README, Environment variables](../../README.md#environment-variables). The minimum: `PROVIDER`, `EXTERNAL_URL` (origin without path), `SESSION_ENCRYPTION_KEY`, plus `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` or `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_ALLOWED_TEAMS`. Callback URL to register: `<EXTERNAL_URL><PATH_PREFIX>/oidc/<OIDC_NAME>/callback` or `<EXTERNAL_URL><PATH_PREFIX>/github/callback`.
+Environment variables only; the process lists every problem and exits before serving. Full table with defaults: [Forward-Auth-Configuration](Forward-Auth-Configuration.md#environment-variables). The minimum: `PROVIDER`, `EXTERNAL_URL` (origin without path), `SESSION_ENCRYPTION_KEY`, plus `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` or `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_ALLOWED_TEAMS`. Callback URL to register: `<EXTERNAL_URL><PATH_PREFIX>/oidc/<OIDC_NAME>/callback` or `<EXTERNAL_URL><PATH_PREFIX>/github/callback`.
 
 ## Traefik wiring
 
-Copy from the [README quick start](../../README.md#quick-start-docker-compose) (docker labels and Kubernetes CRDs); the tested stack is [test/e2e/compose](../../test/e2e/compose/compose.yml). The rules that matter:
+Copy from [Forward-Auth-Configuration](Forward-Auth-Configuration.md#quick-start-docker-compose) (docker labels, production with TLS, Kubernetes CRDs); the tested stack is [test/e2e/compose](../../test/e2e/compose/compose.yml). The rules that matter:
 
 - A router for `PathPrefix(/auth)` to forwardauth without the forwardAuth middleware, excluding `/auth/ui`, `/auth/api`, `/auth/health` and `/auth/ready` (one `!Path` each); the checks and probes stay internal.
 - forwardAuth middleware: `authResponseHeaders` `Authorization` and `X-API-Key` (Traefik strips the client's copies; a forged token never reaches the app), `trustForwardHeader: false`, `maxResponseBodySize`.

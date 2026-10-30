@@ -20,7 +20,9 @@
 - [API-Keys](docs/wiki/API-Keys.md): static keys, `Resolver`, ordering with the Guard.
 - [Gin](docs/wiki/Gin.md): `ginadapter`, wide events, `prometheusadapter`.
 - [Errors-and-Observability](docs/wiki/Errors-and-Observability.md): `auth.Error`, `ResponseFor`, `Observer`, `Outcome`.
-- [Forward-Auth](docs/wiki/Forward-Auth.md): the image, routes, configuration, Traefik wiring.
+- [Forward-Auth](docs/wiki/Forward-Auth.md): the image in short: what it does, minimum configuration, the Traefik rules that matter.
+- [Forward-Auth-Configuration](docs/wiki/Forward-Auth-Configuration.md): docker compose, TLS and Kubernetes wiring, routes, every environment variable, the JWT claims, operations.
+- [Security](docs/wiki/Security.md): cookie, session, OAuth, redirect, credential and JWT guarantees, known limits.
 - [Gotchas](docs/wiki/Gotchas.md): the non-obvious rules, one line each.
 
 ## Examples

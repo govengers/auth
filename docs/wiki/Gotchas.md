@@ -23,7 +23,7 @@ The rules agents and humans get wrong most often, one line each with the page th
 ## Redirects and cookies
 
 - Logout (all providers) and GitHub refresh-teams refuse `Sec-Fetch-Site: cross-site` with 403: put logout links on the app's own site. [OIDC](OIDC.md#gotchas)
-- `return_to` is accepted only as a same-origin path (`/...`, not `//` or `/\`, at most 2048 bytes); anything else becomes `/`. [README, Security notes](../../README.md#security-notes)
+- `return_to` is accepted only as a same-origin path (`/...`, not `//` or `/\`, at most 2048 bytes); anything else becomes `/`. [Security](Security.md#guarantees)
 - `LoginURL`, `ErrorURL` and `PostLogoutURL` are validated at startup and refuse fragments. [OIDC](OIDC.md#options-that-matter)
 - The cookie is named `__Host-<CookieName>` while it is Secure, host-only and on `/`; look for `__Host-auth_session`, not `auth_session`. [Sessions](Sessions.md#store)
 - Plain `http` off loopback loops every login unless `InsecureCookie` (`SESSION_INSECURE_COOKIE`) is set; local development only. [Sessions](Sessions.md#gotchas)
@@ -38,4 +38,4 @@ The rules agents and humans get wrong most often, one line each with the page th
 - `MemoryBackend` is for one replica at non-production scale; use `redisbackend` in production. [Sessions](Sessions.md#backends)
 - A stale `SaveIdentity` from your code can race a Guard refresh; use `Session.SwapIdentity`. [Sessions](Sessions.md#store)
 - Google login via `AllowedEmailDomains` does not check the `hd` claim. [OIDC](OIDC.md#gotchas)
-- Full list: [README, Security notes](../../README.md#security-notes).
+- Full list: [Security](Security.md).

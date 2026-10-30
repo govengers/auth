@@ -1354,7 +1354,7 @@ Values without a default are required: `LoadConfig` fails and the process exits 
 | any other route | 404 `{"code":"not_found","message":"not found"}`, recorded as the failure `no route` (always kept by the sampler); a known route with a trailing "/" is one of them (gin's `RedirectTrailingSlash` is off, so no 301 bypasses event, metric and absolute redirects) |
 | `GET /metrics` on METRICS_PORT | `promhttp.HandlerFor(registry, ...)` [MET-001]; the only route of that listener (`/` is 404, `POST /metrics` 405) |
 
-Traefik wiring (README and the compose test use this; the auth router must not carry the forwardAuth middleware, and its longer rule wins by Traefik's default priority):
+Traefik wiring ([docs/wiki/Forward-Auth-Configuration.md](wiki/Forward-Auth-Configuration.md) and the compose test use this; the auth router must not carry the forwardAuth middleware, and its longer rule wins by Traefik's default priority):
 ```yaml
 - traefik.http.routers.app.rule=Host(`app.example.com`)
 - traefik.http.routers.app.middlewares=forwardauth-ui
@@ -1435,7 +1435,7 @@ func (d *Dependencies) RedisPing(ping func(ctx context.Context) error) func(ctx 
 
 ### 6.5 Docker and release (contract only; specifics in `docs/infrastructure-notes.md`)
 - `docker/forwardauth.Dockerfile`: multi-stage, builder `golang:1.26` on `$BUILDPLATFORM` cross-compiling (no QEMU), `CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" ./cmd/forwardauth`, runtime `gcr.io/distroless/static-debian13:nonroot` (about 22 MB), `USER nonroot:nonroot`, ports 8080 and 9090, entrypoint the binary [DEP-002, DEP-003, DEP-004, DEP-005, DEP-006].
-- Image `ghcr.io/govengers/forwardauth` (the binary's name; "auth" alone says nothing, and the old images were per provider), `linux/amd64` and `linux/arm64`, published by `.github/workflows/release.yml`: `:main` on every push to `main`, `:<major>.<minor>.<patch>`, `:<major>.<minor>`, `:<major>` and `:latest` on a `v*` tag, plus `:sha-<commit>`. The GHCR package must be made public once by hand after the first push (no API for it). DEP-008 (`GOMEMLIMIT`) belongs to the deployment manifests, documented in README.
+- Image `ghcr.io/govengers/forwardauth` (the binary's name; "auth" alone says nothing, and the old images were per provider), `linux/amd64` and `linux/arm64`, published by `.github/workflows/release.yml`: `:main` on every push to `main`, `:<major>.<minor>.<patch>`, `:<major>.<minor>`, `:<major>` and `:latest` on a `v*` tag, plus `:sha-<commit>`. The GHCR package must be made public once by hand after the first push (no API for it). DEP-008 (`GOMEMLIMIT`) belongs to the deployment manifests, documented in [docs/wiki/Forward-Auth-Configuration.md](wiki/Forward-Auth-Configuration.md#kubernetes).
 
 ---
 
@@ -1460,7 +1460,7 @@ func (d *Dependencies) RedisPing(ping func(ctx context.Context) error) func(ctx 
 | 13 | jwx v3 only, one `jwt` package; the binary is `cmd/forwardauth` in this module (D2). | TCH-007, LIB-007. |
 | 14 | Four sentinels + `*auth.Error{Kind, Code, Reason, Err}` + one `{code, message}` shape. | ERR-005, API-001, API-002. |
 | 15 | No logger option: `auth.Observer` callback; `ginadapter.Observe` records on the existing wide event. | LIB-003, LOG-002, decision 3. |
-| 16 | No shims; README migration sections per old library and the tables in section 10. v1.0.0 release notes list every break. | LIB-009, decision 1. |
+| 16 | No shims; migration sections per old library ([docs/migration.md](migration.md)) and the tables in section 10. The v1.0.0 release notes ([GitHub Releases](https://github.com/govengers/auth/releases)) list every break. | LIB-009, decision 1. |
 | 17 | `go 1.26.0`. | TCH-001 (1.26 and 1.27 supported); DES-007 `new(expr)`; config v2 is on 1.26. |
 
 ### 7.2 Design decisions (refinements and deviations, numbered for reference)
@@ -1471,7 +1471,7 @@ func (d *Dependencies) RedisPing(ping func(ctx context.Context) error) func(ctx 
 | D2 | `cmd/forwardauth` lives in the root module. Binary-only requirement: config v2 (+ go-pretty, godotenv, pflag); gin, wideevent, client_golang, go-redis are needed by adapter subpackages anyway. Consumers compile none of it (graph pruning); go.sum carries go.mod hashes and MVS may raise their config/v2 version. | A nested module needs a `replace` or lockstep tags [TCH-007] and the reusable CI only tests the root module. |
 | D3 | One `ginadapter` package (authentication and authorization), not `authorization/ginadapter` + a second `ginadapter`. **Deviation from decision 4's path.** | Two packages named `ginadapter` imported by the same app force an alias on every import; the merged one adds no dependency (authorization is stdlib + uuid). |
 | D4 | Cookie value is 32 random bytes; backend key = SHA-256 of it; no signing key. One `EncryptionKey` (AES-256-GCM, AAD = sessionID + key). gorilla/sessions and securecookie dropped. | A Redis dump no longer reveals live cookies; signing a 256-bit random ID adds nothing. |
-| D5 | **Deviation from decision 15:** no per-request hook. `UserTransformer`'s job (load the app user, refuse inactive users, put the app's own user into the context) is an app middleware after the Guard; README shows the pattern. | A hook returning `*Identity` cannot add the app's user object to the context, so apps would load users twice. |
+| D5 | **Deviation from decision 15:** no per-request hook. `UserTransformer`'s job (load the app user, refuse inactive users, put the app's own user into the context) is an app middleware after the Guard; [docs/wiki/Authorization.md](wiki/Authorization.md#your-application-user) shows the pattern. | A hook returning `*Identity` cannot add the app's user object to the context, so apps would load users twice. |
 | D6 | gocloak replaced by `oidc/keycloak` (net/http + oauth2, ~200 lines) whose `Enrich` is an `auth.Hook`; default grant flips to client credentials; `AuthenticationRealm` added. | Drops gocloak, resty, golang-jwt; the password grant broke the FSUS intranet on 09.10.2026 (DeepThought). |
 | D7 | Freshness via `session.Refresher` (password: user still exists; GitHub: teams), every RefreshInterval (1 min, the old GitHub cache TTL). OIDC has none (as before). | Keeps "removed from team / deleted user loses access within a minute" without per-request upstream calls. |
 | D8 | Absolute session expiry (authenticatedAt + MaximumAge), never extended by refreshes. | A stolen cookie cannot be kept alive. |
@@ -1664,7 +1664,7 @@ Follow-ups outside this repo (need MaPa's sign-off, not part of any WP): depreca
 | `RequireAuth()` | `guard.RequireAPI()` |
 | `PathRules`, `PublicPaths` | mount the Guard only on protected groups |
 | `GetUserFromContext(c)`, gin key `"user"` | `auth.IdentityFrom(ctx)` |
-| `UserKey`, `UserTransformer` | app middleware after the Guard (README pattern); provisioning in `OnLogin` |
+| `UserKey`, `UserTransformer` | app middleware after the Guard ([wiki pattern](wiki/Authorization.md#your-application-user)); provisioning in `OnLogin` |
 | `BasicAuthSettings.EnableUsernameLogin` / `EnableEmailLogin` | `DisableUsernameLogin` / `DisableEmailLogin` |
 | `EnableTFA`, `TFA` | `TOTP.Enabled` (the TOTP routes exist only with it; enrolled users cannot log in while it is off), `TOTP` (`MaxVerifyAttempts` -> `MaximumAttempts`, where 0 means the default 5, not unlimited, and wrong codes count across logins until a verified code or `ResetTOTPAttempts`; `SkewWindows` -> `Skew` (at most 10), `PendingSessionTTL` -> `PendingTTL`; `AccountLabel` removed; `Digits` 6 or 8; `Period` at most 3600; `BackupCodeCount` at most 20, codes at most 128 bytes and at least 1,000,000 distinct) |
 | verify body `{"code","isBackupCode"}` (a wrong TOTP code fell through to the backup codes) | `{"code","backupCode"}`: `true` checks backup codes only, `false` TOTP codes only; every TOTP code is accepted once |

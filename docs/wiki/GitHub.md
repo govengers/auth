@@ -30,7 +30,7 @@ From [examples/github/main.go](../../examples/github/main.go) (gin; tested again
 	})
 ```
 
-Register `ExternalURL + "/auth/github/callback"` as the OAuth app's callback URL. Empty `AuthorizeURL`, `TokenURL` and `APIURL` mean github.com; set all three for GitHub Enterprise.
+Register `ExternalURL + "/auth/github/callback"` as the OAuth app's callback URL. Empty `AuthorizeURL`, `TokenURL` and `APIURL` mean github.com; set all three for GitHub Enterprise (`https`, `http` only on loopback hosts; `APIURL` without query or fragment, e.g. `https://ghe.example.com/api/v3`).
 
 ## Routes
 
@@ -40,8 +40,8 @@ Prefix `PathPrefix`, default `/auth/github`.
 |---|---|
 | `GET /login` | starts the login, 302 to GitHub; `?return_to=<path>` as for OIDC |
 | `GET /callback` | checks teams, rotates the session, stores identity and token, 302 to the return path |
-| `GET /logout` | ends the session, revokes the token at GitHub (best effort), 302 to `PostLogoutURL` |
-| `POST /refresh-teams` | re-checks teams now; 200 identity, 401/403 ends the session, 409 `conflict` when another request changed the session meanwhile |
+| `GET /logout` | ends the session, revokes the token at GitHub (a failure only shows in the outcome), 302 to `PostLogoutURL` |
+| `POST /refresh-teams` | re-checks teams now; 200 identity, 401/403 ends the session (500 when it cannot end it), 409 `conflict` (see Refresh) |
 
 ## Identity
 
@@ -62,14 +62,16 @@ Prefix `PathPrefix`, default `/auth/github`.
 
 The provider as `Refresher` refetches teams once per `GuardOptions.RefreshInterval` (default 1 min). Removed from every allowed team or token revoked: the session ends. GitHub down or rate-limiting: the session keeps its teams for at most `GuardOptions.MaximumUnverifiedAge` (default 1 h) since the last successful check, then ends. See [Sessions](Sessions.md#refresh).
 
+`POST /refresh-teams` never overwrites a change another request saved while it called GitHub: it applies the teams to that save once more, and answers 409 `conflict` when that save changed the membership, the admin role or the user (it may be a newer refresh) or the session changed again. Like logout it refuses a cross-site request (`Sec-Fetch-Site: cross-site`) with 403 before GitHub is called.
+
 ## Refusal codes
 
-`login_expired`, `state_mismatch` (400), `login_denied`, `login_failed` (401) on the callback; `forbidden` (403) for users outside `AllowedTeams` and cross-site `/logout` or `/refresh-teams`; `conflict` (409) on `/refresh-teams`; `internal` (500) when GitHub is down.
+`login_expired`, `state_mismatch` (400), `login_denied`, `login_failed` (401) on the callback; `forbidden` (403) for users outside `AllowedTeams` and cross-site `/logout` or `/refresh-teams`; `conflict` (409) on `/refresh-teams`; `internal` (500) when GitHub is down. GitHub refusing the code is 401 `login_failed`.
 
 ## Gotchas
 
 - Do not forget `Refreshers: []session.Refresher{provider}`: without it team removals never reach running sessions.
-- `HTTPClient(ctx, session)` needs the session handle from `store.Open(request)`; it sends the token only to `APIURL`'s host. Example: `ExampleProvider_HTTPClient` in [github/example_test.go](../../github/example_test.go).
+- `HTTPClient(ctx, session)` needs the session handle from `store.Open(request)`; it sends the token only to `APIURL`'s host; a redirect to another host (archive downloads, `uploads.github.com`) goes without it. Example: `ExampleProvider_HTTPClient` in [github/example_test.go](../../github/example_test.go).
 - Logout and refresh-teams refuse `Sec-Fetch-Site: cross-site` with 403.
 
 Source: [github/](../../github/) ([provider.go](../../github/provider.go), [handlers.go](../../github/handlers.go), [teams.go](../../github/teams.go), [api.go](../../github/api.go)).

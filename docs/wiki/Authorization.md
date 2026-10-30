@@ -1,6 +1,6 @@
 # Authorization
 
-An `authorization.Check` is `func(ctx context.Context) error` over the `auth.Identity` in the context: `nil` allows, `*auth.Error` refuses (401 without identity, 403 otherwise), a plain error is a wiring mistake (500, fails closed). The same check guards HTTP routes, WebSocket messages and jobs.
+An `authorization.Check` is `func(ctx context.Context) error` over the `auth.Identity` in the context: `nil` allows, `*auth.Error` refuses (401 without identity, 403 otherwise), a plain error is a wiring mistake (500, fails closed): a `nil` check, `All()` or `Any()` without checks, `HasPermission` with an invalid resource or access. The same check guards HTTP routes, WebSocket messages and jobs.
 
 ## Identity fields and who fills them
 
@@ -31,7 +31,7 @@ Primitives: `IsAuthenticated`, `IsActive`, `IsUser`, `IsAdmin`, `HasRole`, `HasU
 	editor := authorization.All(authorization.HasOIDCGroup("/engineering"), authorization.Not(authorization.HasOIDCRole("read-only")))
 ```
 
-`Not` refuses a missing or inactive identity before it inverts and inverts only a 403 refusal, so `Not(HasRole("x"))` never admits anonymous users and never turns a wiring mistake into a pass.
+`Not` refuses a missing or inactive identity before it inverts and inverts only a refusal answered 403 (the kind of the outermost `*auth.Error`, as `auth.ResponseFor` decides), never a 401 that wraps a forbidden cause, so `Not(HasRole("x"))` never admits anonymous or deactivated users and never turns a wiring mistake into a pass. `All` returns the first refusal; `Any` returns a failed check (500) in preference to a refusal for the same reason.
 
 ## Mounting a check
 
@@ -57,10 +57,11 @@ func authorize(check authorization.Check) func(http.Handler) http.Handler {
 
 ## Permissions
 
-`auth.Permission{Resource, Access}`, text form `<resource>:<access>` (`builds:write`, `*:read`) in Go (`auth.ParsePermission`), JSON, the JWT claim and the image's `API_KEY_PERMISSIONS`. `write` includes `read`; resource `*` (`auth.AllResources`) covers all; a resource matches `[a-z0-9][a-z0-9._-]{0,63}`, case-sensitive. No permission means no access.
+`auth.Permission{Resource, Access}`, text form `<resource>:<access>` (`builds:write`, `*:read`) in Go (`auth.ParsePermission`, `String`), JSON, the JWT claim and the image's `API_KEY_PERMISSIONS`. `write` includes `read`; resource `*` (`auth.AllResources`) covers all; a resource matches `[a-z0-9][a-z0-9._-]{0,63}`, case-sensitive, so a typo fails at startup. No permission means no access.
 
 - `authorization.HasPermission(resource, access)`; gin: `ginadapter.RequireMethodPermission(resource)` (GET, HEAD, OPTIONS need read, the rest write).
-- In your own code: `identity.Permits(resource, access)`, `auth.AccessForMethod(method)`.
+- `HasPermission` checks the effective identity; wrap it in `Real` to check the impersonator.
+- In your own code: `identity.Permits(resource, access)` applies the same rule, `auth.AccessForMethod(method)` maps an HTTP method to the access it needs.
 - Interactive users carry permissions only when `OnLogin` grants them; otherwise combine `Any(HasRole(role), HasPermission(resource, access))`.
 
 ## Roles from your application
@@ -69,6 +70,46 @@ Grant roles and permissions in `OnLogin` (an `auth.Hook`): return `identity.Clon
 
 ## Own checks
 
-A check is any function of the `authorization.Check` type: call `authorization.IsActive()(ctx)` first, then read `auth.IdentityFrom(ctx)` and return `&auth.Error{Kind: auth.ErrForbidden, Reason: "..."}` to refuse. The `Reason` never reaches the client. Entity checks (may this user see this order) belong in your application, as such checks. Loading your own user record per request is a middleware after the Guard, see [README, Your application user](../../README.md#your-application-user-replaces-usertransformer).
+A check is any function of the `authorization.Check` type: call `authorization.IsActive()(ctx)` first, then read `auth.IdentityFrom(ctx)` and return `&auth.Error{Kind: auth.ErrForbidden, Reason: "..."}` to refuse. The `Reason` never reaches the client. Entity checks (may this user see this order) belong in your application, as such checks. Tenant roles and broadcast filters too. Loading your own user record per request is a middleware after the Guard, see [Your application user](#your-application-user).
+
+## Your application user
+
+`go-basicauth`'s `UserTransformer` swapped the stored user for your own type. Now the Guard puts an `auth.Identity` in the context and your own middleware loads your user after it; a hook cannot add your user object to the context. Tested ([example_application_user_test.go](../../example_application_user_test.go)):
+
+```go
+func WithUser(users UserRepository) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			identity := auth.IdentityFrom(request.Context())
+			if identity == nil {
+				auth.WriteError(writer, &auth.Error{Kind: auth.ErrUnauthenticated})
+				return
+			}
+			user, err := users.ByID(request.Context(), identity.UserID)
+			if err != nil {
+				auth.WriteError(writer, err) // plain errors answer 500
+				return
+			}
+			if !user.Active {
+				auth.WriteError(writer, &auth.Error{Kind: auth.ErrForbidden, Reason: "inactive user"})
+				return
+			}
+			next.ServeHTTP(writer, request.WithContext(context.WithValue(request.Context(), userKey{}, user)))
+		})
+	}
+}
+```
+
+Mount the Guard first, then `WithUser`: `guard.RequireAPI()(WithUser(users)(handler))`; on gin `ginadapter.Middleware(WithUser(users))` after `ginadapter.Middleware(guard.RequireAPI())`.
+
+The password provider sets `UserID` itself (the `Storage` user ID) and its `OnLogin` must keep it. For OIDC and GitHub, provision the user in `OnLogin` so the identity carries your user ID (call `keycloak.Client.Enrich` first when you use it; it returns a copy):
+
+```go
+	return func(_ context.Context, identity *auth.Identity) (*auth.Identity, error) {
+		provisioned := identity.Clone() // hooks must not mutate their argument
+		provisioned.UserID = uuid.NewSHA1(uuid.NameSpaceURL, []byte(identity.Provider+"/"+identity.Subject))
+```
+
+An `*auth.Error` from a hook answers with its status (403 refuses the login), anything else with 500; no session is created either way. `OnLogout` gets a context a disconnecting client cannot cancel (every provider); set your own deadline for slow work in it.
 
 Source: [authorization/authorization.go](../../authorization/authorization.go), [identity.go](../../identity.go), [permission.go](../../permission.go).

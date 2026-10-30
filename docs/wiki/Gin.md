@@ -21,8 +21,8 @@ Handlers read the identity with `auth.IdentityFrom(ginContext.Request.Context())
 
 | Function | Use |
 |---|---|
-| `ginadapter.Middleware(middleware)` | any `func(http.Handler) http.Handler` (Guard, `apikey`, `jwt` verifier, your own) in a gin chain; aborts when it does not call next |
-| `ginadapter.RegisterRoutes(engine, routes)` | provider routes; register on the engine root, route paths are absolute |
+| `ginadapter.Middleware(middleware)` | any `func(http.Handler) http.Handler` (Guard, `apikey`, `jwt` verifier, your own) in a gin chain; after it calls next, `c.Request` is the enriched request for later handlers; aborts when it does not call next; wraps once, like a net/http chain, so state the middleware keeps across requests survives |
+| `ginadapter.RegisterRoutes(engine, routes)` | provider routes; register on the engine root, route paths are absolute, so gin route templates (and metric labels) are the provider paths |
 | `ginadapter.Require(check)` | 401/403/500 JSON when the check refuses; `nil` check answers 500 |
 | `ginadapter.RequireMethodPermission(resource)` | GET/HEAD/OPTIONS need `<resource>:read`, every other method `<resource>:write` |
 | `ginadapter.Observe` | `auth.Observer` for provider, Guard, `apikey` and verifier options: `auth.*` fields on the wide event |

@@ -6,7 +6,7 @@ Authentication and authorization for Go services on `net/http` (gin through an a
 
 Every provider produces one `auth.Identity`. Password, OIDC and GitHub logins store it in a server-side session (`session.Store`; the cookie holds a random ID only). One `session.Guard` puts the stored identity into the request context or refuses the request: `RequireAPI` answers 401 JSON, `RequireUI` 302 to the login. API keys and JWTs put an identity into the context without a session. Handlers read it with `auth.IdentityFrom(ctx)`. Authorization is an `authorization.Check`, a `func(context.Context) error` over that identity.
 
-Core packages never log and never start goroutines; they report outcomes to an optional `auth.Observer`. Constructors are `New(options *Options) (*X, error)`, validate everything and fail at startup.
+Core packages never log and never start goroutines; they report outcomes to an optional `auth.Observer`. Constructors are `New(options *Options) (*X, error)`: they validate the options, copy what they keep, never write to your struct and fail at startup.
 
 ## Packages
 
@@ -26,7 +26,7 @@ Core packages never log and never start goroutines; they report outcomes to an o
 | `prometheusadapter` | `Observer` counting outcomes on your registry | [Gin](Gin.md#prometheus) |
 | `cmd/forwardauth` | the image `ghcr.io/govengers/forwardauth` for apps you do not change | [Forward-Auth](Forward-Auth.md) |
 
-Importing one provider compiles none of the others' dependencies (gin, go-oidc, Redis, jwx stay out unless imported).
+Importing one provider compiles none of the others' dependencies. Heavy dependencies per package: `session/redisbackend` go-redis, `password` x/crypto and otp, `oidc` go-oidc, `jwt` jwx v3, `ginadapter` gin and go-wide-event-logger, `prometheusadapter` client_golang.
 
 ## Which package for which need
 
@@ -60,6 +60,8 @@ Importing one provider compiles none of the others' dependencies (gin, go-oidc, 
 - [Gin](Gin.md): `ginadapter`, `prometheusadapter`.
 - [Errors-and-Observability](Errors-and-Observability.md): `auth.Error`, status mapping, `Observer`, wide events.
 - [Forward-Auth](Forward-Auth.md): the image and its Traefik wiring.
+- [Forward-Auth-Configuration](Forward-Auth-Configuration.md): compose, TLS and Kubernetes wiring, routes, environment variables, operations.
+- [Security](Security.md): guarantees and known limits.
 - [Gotchas](Gotchas.md): the rules that are easy to get wrong.
 
-Reference: [README](../../README.md) (user docs, environment variables, security notes), [design](../design.md) (binding design, flows, decisions), [migration](../migration.md) (from go-basicauth, oidc-fwd-auth, github-fwd-auth), [pkg.go.dev](https://pkg.go.dev/github.com/govengers/auth).
+Reference: [README](../../README.md) (overview), [design](../design.md) (binding design, flows, decisions), [migration](../migration.md) (from go-basicauth, oidc-fwd-auth, github-fwd-auth), [pkg.go.dev](https://pkg.go.dev/github.com/govengers/auth).
