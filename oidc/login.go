@@ -78,7 +78,7 @@ func (p *Provider) verifyLogin(ctx context.Context, code string, state oauthlogi
 	if err != nil {
 		return verifiedLogin{}, err
 	}
-	if err := checkEmailDomain(login.identityClaims, p.options.AllowedEmailDomains); err != nil {
+	if err := checkEmailDomain(login.identityClaims, p.options.AllowedEmailDomains, p.options.Issuer == GoogleIssuer); err != nil {
 		return verifiedLogin{}, err
 	}
 	login.accessClaims = p.accessTokenClaims(ctx, token.AccessToken, login.subject)

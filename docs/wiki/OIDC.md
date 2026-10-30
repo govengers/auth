@@ -59,7 +59,8 @@ Prefix `PathPrefix`, default `/auth/oidc/<Name>`. All `GET`.
 | `ExternalURL` | required | public origin; the redirect URI derives from it |
 | `Scopes` | `openid profile email` | |
 | `ClaimMapper` | `oidc.DefaultClaimMapper` | `oidc.GoogleClaimMapper` for Google |
-| `AllowedEmailDomains` | none | requires `email_verified`; ASCII domains, an internationalized one in its `xn--` form; set it for Google or any Google account gets in |
+| `AllowedEmailDomains` | none | requires `email_verified`; ASCII domains, an internationalized one in its `xn--` form; with `oidc.GoogleIssuer` a listed domain other than `gmail.com`/`googlemail.com` also requires the `hd` claim to equal it (see Google below) |
+| `AllowAnyAccount` | `false` | with `oidc.GoogleIssuer` and neither `AllowedEmailDomains` nor `OnLogin`, `oidc.New` refuses to start; set it to admit every Google account on purpose |
 | `PostLogoutURL` | `ExternalURL + "/"` | path or absolute `http(s)` URL without fragment; a path is made absolute with `ExternalURL` |
 | `ErrorURL` | none (JSON answers) | every callback failure redirects to `ErrorURL?code=<code>` (`code=internal` for a server-side failure); same URL rules as `PostLogoutURL` |
 | `OnLogin`, `OnLogout` | none | `OnLogin` is where you provision your application user and set `UserID` |
@@ -84,6 +85,7 @@ Without Keycloak, `OIDCRoles` (`realm_access.roles`), `OIDCClientRoles` (`resour
 - `/logout` refuses `Sec-Fetch-Site: cross-site` with 403 and ends nothing: logout links must live on the app's own site. Front-channel logout from the IdP's iframe still works.
 - Front-channel logout needs `StoreOptions.SameSite: http.SameSiteNoneMode` (https only), else the IdP's iframe gets no cookie.
 - No component follows a redirect of the issuer's endpoints: point `Issuer` at the final URL.
-- Google: `Issuer: "https://accounts.google.com"`, `ClaimMapper: oidc.GoogleClaimMapper`, `AllowedEmailDomains`; the `hd` claim is not checked.
+- Google: `Issuer: oidc.GoogleIssuer` (`https://accounts.google.com`), `ClaimMapper: oidc.GoogleClaimMapper`, and an admission: `AllowedEmailDomains`, an `OnLogin` that refuses strangers, or `AllowAnyAccount: true`; `oidc.New` refuses the Google issuer with none of them, because anyone can create a Google account. The rule keys on the issuer, not the claim mapper: a mapper only reads the profile.
+- Google sets `hd` only for Workspace (Cloud Identity) accounts, and a consumer Google account can carry a verified address of any domain (a former employee can create one with the company address and keep it after leaving the Workspace). So with the Google issuer every allowed domain except `gmail.com` and `googlemail.com` also requires `hd` to equal the email's domain; a consumer account with a company address is refused 403 (Reason `hosted domain mismatch`). Admit such accounts through `OnLogin` instead.
 
 Source: [oidc/](../../oidc/) ([provider.go](../../oidc/provider.go), [login.go](../../oidc/login.go), [logout.go](../../oidc/logout.go), [claims.go](../../oidc/claims.go)), [oidc/keycloak/keycloak.go](../../oidc/keycloak/keycloak.go).

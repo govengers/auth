@@ -24,6 +24,10 @@ import (
 	"github.com/govengers/auth/session"
 )
 
+// GoogleIssuer is Google's issuer. Anyone can create a Google account, so New refuses it without an
+// admission (AllowedEmailDomains, OnLogin or AllowAnyAccount), and AllowedEmailDomains also checks hd.
+const GoogleIssuer = "https://accounts.google.com"
+
 const (
 	defaultHTTPTimeout = 10 * time.Second
 	// maximumDocumentBytes bounds a discovery document or JWKS; real ones are a few KiB.
@@ -48,7 +52,8 @@ type Options struct {
 	PostLogoutURL                string          // default ExternalURL + "/"; path or absolute http(s) URL, no fragment; a path is made absolute with ExternalURL
 	ErrorURL                     string          // optional: callback failures (refusals and code=internal) redirect to ErrorURL?code=<code> instead of answering JSON; same rules as PostLogoutURL
 	ClaimMapper                  ClaimMapper     // default DefaultClaimMapper
-	AllowedEmailDomains          []string        // optional: requires email_verified=true and a matching domain (ASCII, case-insensitive, exact)
+	AllowedEmailDomains          []string        // optional: requires email_verified=true and a matching domain (ASCII, case-insensitive, exact); with GoogleIssuer, a domain other than gmail.com or googlemail.com must also be the hd claim (Workspace accounts only)
+	AllowAnyAccount              bool            // with GoogleIssuer and neither AllowedEmailDomains nor OnLogin, admit every Google account on purpose; New refuses that setup otherwise
 	DisableIframeLogoutDetection bool            // stop treating Sec-Fetch-Dest: iframe on /logout as front-channel; a cross-site iframe load of /logout is then refused (403)
 	Sessions                     *session.Store  // required; not SameSite Strict (the callback would arrive without the cookie)
 	HTTPClient                   *http.Client    // default 10 s timeout; used for discovery, token exchange, JWKS; a redirect fails the call
@@ -260,8 +265,14 @@ func validateRequired(options *Options) error {
 		return errors.New("sessions must not use SameSite Strict: the callback would arrive without the session cookie")
 	case !redirect.IsSecureURL(options.Issuer):
 		return errors.New("issuer must be an https URL, or http on a loopback host")
+	case admitsEveryGoogleAccount(options) && !options.AllowAnyAccount:
+		return errors.New("the Google issuer admits every Google account: set AllowedEmailDomains or OnLogin, or AllowAnyAccount to admit them on purpose")
 	}
 	return nil
+}
+
+func admitsEveryGoogleAccount(options *Options) bool {
+	return options.Issuer == GoogleIssuer && len(options.AllowedEmailDomains) == 0 && options.OnLogin == nil
 }
 
 // withDefaults returns options with defaults applied and every kept slice copied.

@@ -94,6 +94,7 @@ func TestCheckEmailDomain(t *testing.T) {
 		name       string
 		claims     map[string]any
 		domains    []string
+		google     bool
 		wantReason string
 	}{
 		{name: "no restriction", claims: map[string]any{}, domains: nil},
@@ -103,10 +104,18 @@ func TestCheckEmailDomain(t *testing.T) {
 		{name: "other domain", claims: map[string]any{"email": "ada@example.org", "email_verified": true}, domains: allowed, wantReason: "email domain not allowed"},
 		{name: "two @", claims: map[string]any{"email": "ada@evil.example@example.com", "email_verified": true}, domains: allowed, wantReason: "email domain not allowed"},
 		{name: "no email", claims: map[string]any{"email_verified": true}, domains: allowed, wantReason: "email domain not allowed"},
+		{name: "google: workspace account of the domain", claims: map[string]any{"email": "ada@example.com", "email_verified": true, "hd": "example.com"}, domains: allowed, google: true},
+		{name: "google: hd in upper case", claims: map[string]any{"email": "ada@example.com", "email_verified": true, "hd": "EXAMPLE.com"}, domains: allowed, google: true},
+		{name: "google: consumer account with a workspace address", claims: map[string]any{"email": "ada@example.com", "email_verified": true}, domains: allowed, google: true, wantReason: "hosted domain mismatch"},
+		{name: "google: account of another workspace", claims: map[string]any{"email": "ada@example.com", "email_verified": true, "hd": "evil.example"}, domains: allowed, google: true, wantReason: "hosted domain mismatch"},
+		{name: "google: hd of the wrong type", claims: map[string]any{"email": "ada@example.com", "email_verified": true, "hd": true}, domains: allowed, google: true, wantReason: "hosted domain mismatch"},
+		{name: "google: gmail account", claims: map[string]any{"email": "ada@gmail.com", "email_verified": true}, domains: []string{"gmail.com"}, google: true},
+		{name: "google: googlemail account", claims: map[string]any{"email": "ada@googlemail.com", "email_verified": true}, domains: []string{"googlemail.com"}, google: true},
+		{name: "other issuer: hd is not checked", claims: map[string]any{"email": "ada@example.com", "email_verified": true}, domains: allowed},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			err := checkEmailDomain(testCase.claims, testCase.domains)
+			err := checkEmailDomain(testCase.claims, testCase.domains, testCase.google)
 
 			if testCase.wantReason == "" {
 				require.NoError(t, err)

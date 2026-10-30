@@ -368,6 +368,9 @@ Breaking changes released after v1.0.0, from the audit hardening.
 - **jwt**: `VerifierOptions.JWKSURL` must be `https` (plain `http` only on a loopback host) and carry no user info; an in-cluster `http://forwardauth:8080/auth/jwks` is refused. Point backends at the external `https://<host>/auth/jwks` (D54).
 - **jwt**: new `VerifierOptions.MaximumKeyAge` (default 24 h, at least `RefreshInterval`): while the JWKS stays unreachable longer than that since the last successful fetch, `Verify` returns a plain error (the middleware 500) for every token instead of trusting the old keys forever. A `RefreshInterval` above 24 h now needs a `MaximumKeyAge` at least as long (D55).
 - **forwardauth image**: `JWT_AUDIENCE` is required with `JWT_ENABLED=true` (D54).
+- **oidc**: `oidc.New` refuses `Issuer: oidc.GoogleIssuer` with neither `AllowedEmailDomains` nor `OnLogin`; set the new `AllowAnyAccount: true` to admit every Google account on purpose (D56).
+- **oidc**: with the Google issuer, a domain in `AllowedEmailDomains` other than `gmail.com` and `googlemail.com` also requires the ID token's `hd` claim to equal it, so only Workspace accounts of that domain pass; a consumer Google account with a company address is now refused 403 (`hosted domain mismatch`). Admit such accounts through `OnLogin` (D56).
+- **forwardauth image**: `PROVIDER=oidc` with Google (`OIDC_ISSUER=https://accounts.google.com` or `OIDC_CLAIM_MAPPER=google`) refuses to boot without `OIDC_ALLOWED_EMAIL_DOMAINS` or an enforced `KEYCLOAK_REQUIRED_*` list; the new `OIDC_ALLOW_ANY_ACCOUNT=true` admits every Google account on purpose (D56).
 
 ## Rolling back
 

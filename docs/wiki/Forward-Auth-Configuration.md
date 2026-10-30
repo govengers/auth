@@ -191,7 +191,8 @@ Values without a default are required. *not empty* marks values with a default t
 | `OIDC_CLIENT_SECRET` | empty | with `oidc` | yes | |
 | `OIDC_SCOPES` | `openid,profile,email` | not empty | | |
 | `OIDC_CLAIM_MAPPER` | `default` | not empty | | `default` or `google` |
-| `OIDC_ALLOWED_EMAIL_DOMAINS` | empty | | | requires `email_verified`; strongly recommended with Google |
+| `OIDC_ALLOWED_EMAIL_DOMAINS` | empty | with Google (or below) | | requires `email_verified`; with Google's issuer a domain other than `gmail.com`/`googlemail.com` also requires the `hd` claim (Workspace accounts only). Google (`OIDC_ISSUER=https://accounts.google.com` or `OIDC_CLAIM_MAPPER=google`) refuses to boot without this, a `KEYCLOAK_REQUIRED_*` list or `OIDC_ALLOW_ANY_ACCOUNT=true` |
+| `OIDC_ALLOW_ANY_ACCOUNT` | `false` | | | admit every Google account on purpose |
 | `OIDC_POST_LOGOUT_URL` | empty | | | empty means `EXTERNAL_URL/`; a path or an absolute URL without fragment |
 | `OIDC_DISABLE_IFRAME_LOGOUT_DETECTION` | `false` | | | stop treating `Sec-Fetch-Dest: iframe` on `/logout` as front-channel logout; a cross-site iframe load of `/logout` is then refused (403) |
 

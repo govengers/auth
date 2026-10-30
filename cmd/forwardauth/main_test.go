@@ -14,6 +14,7 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/apikey"
+	"github.com/govengers/auth/oidc"
 	"github.com/govengers/auth/oidc/keycloak"
 )
 
@@ -79,6 +80,25 @@ func TestValidateConfigurationAcceptsCompleteSetups(t *testing.T) {
 			configuration.SessionSameSite = "none"
 			return configuration
 		}},
+		{name: "google with allowed email domains", configuration: func() *Configuration {
+			configuration := validOIDCConfiguration()
+			configuration.OIDCIssuer, configuration.OIDCClaimMapper = oidc.GoogleIssuer, claimMapperGoogle
+			configuration.OIDCAllowedEmailDomains = []string{"example.com"}
+			return configuration
+		}},
+		{name: "google with a keycloak requirement", configuration: func() *Configuration {
+			configuration := validOIDCConfiguration()
+			configuration.OIDCClaimMapper, configuration.KeycloakEnabled = claimMapperGoogle, true
+			configuration.KeycloakURL, configuration.KeycloakRealm = "https://keycloak.example.com", "company"
+			configuration.KeycloakClientID, configuration.KeycloakClientSecret = "forwardauth", "keycloak-secret"
+			configuration.KeycloakRequiredRealmRoles = []string{"staff"}
+			return configuration
+		}},
+		{name: "google admitting every account on purpose", configuration: func() *Configuration {
+			configuration := validOIDCConfiguration()
+			configuration.OIDCIssuer, configuration.OIDCClaimMapper, configuration.OIDCAllowAnyAccount = oidc.GoogleIssuer, claimMapperGoogle, true
+			return configuration
+		}},
 		{name: "keycloak with the password grant", configuration: func() *Configuration {
 			configuration := validOIDCConfiguration()
 			configuration.KeycloakEnabled, configuration.KeycloakGrantType = true, string(keycloak.GrantTypePassword)
@@ -95,6 +115,7 @@ func TestValidateConfigurationAcceptsCompleteSetups(t *testing.T) {
 }
 
 func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
+	const wantGoogleAdmission = "OIDC_ALLOWED_EMAIL_DOMAINS or KEYCLOAK_REQUIRED_* is required with Google"
 	testCases := []struct {
 		name          string
 		configuration func() *Configuration
@@ -132,6 +153,14 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		{name: "oidc without issuer and client", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.OIDCIssuer, configuration.OIDCClientID, configuration.OIDCClientSecret = "", "", " "
 		}, problems: []string{"OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET"}},
+		{name: "google mapper that admits every account", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.OIDCClaimMapper = claimMapperGoogle }, problems: []string{wantGoogleAdmission}},
+		{name: "google issuer that admits every account", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.OIDCIssuer = oidc.GoogleIssuer }, problems: []string{wantGoogleAdmission}},
+		{name: "google with keycloak but no requirement", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
+			configuration.OIDCClaimMapper, configuration.KeycloakEnabled = claimMapperGoogle, true
+			configuration.KeycloakURL, configuration.KeycloakRealm = "https://keycloak.example.com", "company"
+			configuration.KeycloakClientID, configuration.KeycloakClientSecret = "forwardauth", "keycloak-secret"
+			configuration.KeycloakRequiredGroups = []string{" "}
+		}, problems: []string{wantGoogleAdmission}},
 		{name: "unknown claim mapper", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.OIDCClaimMapper = "azure" }, problems: []string{"OIDC_CLAIM_MAPPER"}},
 		{name: "github without client and teams", configuration: validGitHubConfiguration, change: func(configuration *Configuration) {
 			configuration.GitHubClientID, configuration.GitHubClientSecret, configuration.GitHubAllowedTeams = "", "", nil

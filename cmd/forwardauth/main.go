@@ -91,6 +91,7 @@ type Configuration struct {
 	OIDCScopes                       []string
 	OIDCClaimMapper                  string
 	OIDCAllowedEmailDomains          []string
+	OIDCAllowAnyAccount              bool
 	OIDCPostLogoutURL                string
 	OIDCDisableIframeLogoutDetection bool
 
@@ -392,6 +393,7 @@ func newOIDCProvider(ctx context.Context, configuration *Configuration, store *s
 		PostLogoutURL:                configuration.OIDCPostLogoutURL,
 		ClaimMapper:                  claimMapper(configuration.OIDCClaimMapper),
 		AllowedEmailDomains:          configuration.OIDCAllowedEmailDomains,
+		AllowAnyAccount:              configuration.OIDCAllowAnyAccount,
 		DisableIframeLogoutDetection: configuration.OIDCDisableIframeLogoutDetection,
 		Sessions:                     store,
 		HTTPClient:                   dependencies.HTTPClient(providerOIDC),
@@ -545,6 +547,7 @@ func oidcValues(configuration *Configuration) []config.Value {
 		config.StringArray("OIDC_SCOPES").NotEmpty().Default([]string{"openid", "profile", "email"}).Into(&configuration.OIDCScopes),
 		config.String("OIDC_CLAIM_MAPPER").NotEmpty().Default(claimMapperDefault).Into(&configuration.OIDCClaimMapper),
 		config.StringArray("OIDC_ALLOWED_EMAIL_DOMAINS").Default(nil).Into(&configuration.OIDCAllowedEmailDomains),
+		config.Bool("OIDC_ALLOW_ANY_ACCOUNT").Default(false).Into(&configuration.OIDCAllowAnyAccount),
 		config.String("OIDC_POST_LOGOUT_URL").Default("").Into(&configuration.OIDCPostLogoutURL),
 		config.Bool("OIDC_DISABLE_IFRAME_LOGOUT_DETECTION").Default(false).Into(&configuration.OIDCDisableIframeLogoutDetection),
 	}
@@ -712,7 +715,26 @@ func validateOIDC(configuration *Configuration) error {
 	if configuration.OIDCClaimMapper != claimMapperDefault && configuration.OIDCClaimMapper != claimMapperGoogle {
 		problems = append(problems, fmt.Errorf("OIDC_CLAIM_MAPPER %q must be %s or %s", configuration.OIDCClaimMapper, claimMapperDefault, claimMapperGoogle))
 	}
+	if admitsEveryGoogleAccount(configuration) && !configuration.OIDCAllowAnyAccount {
+		problems = append(problems, errors.New("OIDC_ALLOWED_EMAIL_DOMAINS or KEYCLOAK_REQUIRED_* is required with Google (OIDC_ISSUER or OIDC_CLAIM_MAPPER=google), which admits every Google account; set OIDC_ALLOW_ANY_ACCOUNT=true to admit them on purpose"))
+	}
 	return errors.Join(problems...)
+}
+
+// admitsEveryGoogleAccount reports a Google login (by issuer or claim mapper) that nothing restricts:
+// anyone can create a Google account.
+func admitsEveryGoogleAccount(configuration *Configuration) bool {
+	isGoogle := configuration.OIDCIssuer == oidc.GoogleIssuer || configuration.OIDCClaimMapper == claimMapperGoogle
+	return isGoogle && !hasValue(configuration.OIDCAllowedEmailDomains) && !hasKeycloakRequirement(configuration)
+}
+
+func hasKeycloakRequirement(configuration *Configuration) bool {
+	return configuration.KeycloakEnabled && (hasValue(configuration.KeycloakRequiredRealmRoles) ||
+		hasValue(configuration.KeycloakRequiredClientRoles) || hasValue(configuration.KeycloakRequiredGroups))
+}
+
+func hasValue(values []string) bool {
+	return slices.ContainsFunc(values, func(value string) bool { return strings.TrimSpace(value) != "" })
 }
 
 func validateGitHub(configuration *Configuration) error {
@@ -768,7 +790,7 @@ func keycloakRequirementsWithoutKeycloak(configuration *Configuration) error {
 		{"KEYCLOAK_REQUIRED_CLIENT_ROLES", configuration.KeycloakRequiredClientRoles},
 		{"KEYCLOAK_REQUIRED_GROUPS", configuration.KeycloakRequiredGroups},
 	} {
-		if slices.ContainsFunc(requirement.values, func(value string) bool { return strings.TrimSpace(value) != "" }) {
+		if hasValue(requirement.values) {
 			problems = append(problems, fmt.Errorf("%s is set but KEYCLOAK_ENABLED=false: nothing would enforce it", requirement.name))
 		}
 	}
