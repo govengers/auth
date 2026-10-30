@@ -77,6 +77,7 @@ func TestValidateConfigurationAcceptsCompleteSetups(t *testing.T) {
 			configuration.APIKeysEnabled, configuration.APIKeys = true, []string{"ci:" + testSecret}
 			configuration.APIKeyPermissions = []string{"ci=builds:write+*:read"}
 			configuration.SessionSameSite = "none"
+			configuration.TrustedProxies = []string{"10.0.0.0/8", "192.0.2.1"}
 			return configuration
 		}},
 		{name: "keycloak with the password grant", configuration: func() *Configuration {
@@ -111,6 +112,9 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		{name: "path prefix with a gin parameter", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.PathPrefix = "/auth/:tenant" }, problems: []string{"PATH_PREFIX"}},
 		{name: "path prefix with an empty segment", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.PathPrefix = "/auth//x" }, problems: []string{"PATH_PREFIX"}},
 		{name: "path prefix with a dot-dot segment", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.PathPrefix = "/auth/.." }, problems: []string{"PATH_PREFIX"}},
+		{name: "trusted proxy that is no address", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
+			configuration.TrustedProxies = []string{"10.0.0.0/8", "traefik"}
+		}, problems: []string{`TRUSTED_PROXIES: "traefik" is neither an IP address nor a CIDR`}},
 		{name: "ports out of range", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.Port, configuration.MetricsPort = 0, 65536 }, problems: []string{"PORT 0", "METRICS_PORT 65536"}},
 		{name: "same port twice", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.MetricsPort = 8080 }, problems: []string{"PORT and METRICS_PORT must differ"}},
 		{name: "sample rate and delays", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {

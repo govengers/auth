@@ -362,3 +362,9 @@ Do not cache tokens beyond their `exp`; the proxy sends a fresh one with every r
 ## Rolling back
 
 The old modules and images keep working with their own keys and configuration. Sessions never carry over in either direction, so a rollback logs users out once more. Keycloak and most IdPs accept several redirect URIs, so old and new can be registered side by side; a GitHub OAuth app has one callback URL, so that switch happens at the cutover.
+
+## After v1.0.0
+
+Changes after the v1.0.0 release that can break an existing setup.
+
+- **forwardauth `request.client_ip`**: the wide event's client IP is the peer address (Traefik's) unless `TRUSTED_PROXIES` lists the peer; it no longer believes a client's `X-Forwarded-For` or `X-Real-IP`. Set `TRUSTED_PROXIES` to Traefik's addresses or network to record the client again. An entry that is neither an IP nor a CIDR fails the boot.

@@ -69,6 +69,7 @@ type Configuration struct {
 	APIKeysEnabled          bool
 	APIKeys                 []string
 	APIKeyPermissions       []string
+	TrustedProxies          []string
 
 	SessionEncryptionKey               string
 	SessionCookieName                  string
@@ -241,6 +242,7 @@ func newServer(ctx context.Context, configuration *Configuration, sessions *sess
 		MetricsRegistry:  telemetry.registry,
 		ReadinessCheck:   sessions.readinessCheck(telemetry.dependencies),
 		ShutdownDelay:    seconds(configuration.ShutdownDelaySeconds),
+		TrustedProxies:   configuration.TrustedProxies,
 	})
 }
 
@@ -515,6 +517,7 @@ func serverValues(configuration *Configuration) []config.Value {
 		config.Bool("API_KEYS_ENABLED").Default(false).Into(&configuration.APIKeysEnabled),
 		config.StringArray("API_KEYS").Default(nil).Sensitive().Into(&configuration.APIKeys),
 		config.StringArray("API_KEY_PERMISSIONS").Default(nil).Into(&configuration.APIKeyPermissions),
+		config.StringArray("TRUSTED_PROXIES").Default(nil).Into(&configuration.TrustedProxies),
 	}
 }
 
@@ -615,6 +618,9 @@ func validateServer(configuration *Configuration) error {
 	}
 	if err := forwardauth.ValidatePathPrefix(configuration.PathPrefix); err != nil {
 		problems = append(problems, fmt.Errorf("PATH_PREFIX %w", err))
+	}
+	if err := forwardauth.ValidateTrustedProxies(configuration.TrustedProxies); err != nil {
+		problems = append(problems, fmt.Errorf("TRUSTED_PROXIES: %w", err))
 	}
 	problems = append(problems,
 		rangeProblem("PORT", configuration.Port, 1, forwardauth.MaximumPort),
