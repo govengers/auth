@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,17 +21,19 @@ const loginKey = "oidc.login"
 
 var errBackendDown = errors.New("backend down")
 
-// recordingBackend records the TTLs of Puts and can fail Pops.
+// recordingBackend records the TTLs and sizes of Puts and can fail Pops.
 type recordingBackend struct {
 	session.Backend
 	mutex    sync.Mutex
 	ttls     map[string]time.Duration
+	sizes    map[string]int
 	popError error
 }
 
 func (b *recordingBackend) Put(ctx context.Context, sessionID, key string, value []byte, ttl time.Duration) error {
 	b.mutex.Lock()
 	b.ttls[key] = ttl
+	b.sizes[key] = len(value)
 	b.mutex.Unlock()
 	return b.Backend.Put(ctx, sessionID, key, value, ttl)
 }
@@ -46,7 +49,7 @@ func newRecordingStore(t *testing.T) (*session.Store, *recordingBackend) {
 	t.Helper()
 	memory, err := session.NewMemoryBackend(nil)
 	require.NoError(t, err)
-	backend := &recordingBackend{Backend: memory, ttls: map[string]time.Duration{}}
+	backend := &recordingBackend{Backend: memory, ttls: map[string]time.Duration{}, sizes: map[string]int{}}
 	store, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: []byte("0123456789abcdef0123456789abcdef")})
 	require.NoError(t, err)
 	return store, backend
@@ -97,6 +100,20 @@ func TestBegin(t *testing.T) {
 			require.Equal(t, state, completed)
 		})
 	}
+}
+
+// Every anonymous login start stores its return path, so its JSON must not multiply it.
+func TestBeginStoresTheReturnPathWithoutEscapingIt(t *testing.T) {
+	store, backend := newRecordingStore(t)
+	returnPath := "/" + strings.Repeat("<&>", 682)
+
+	state, callback := begin(t, store, "/login?return_to="+url.QueryEscape(returnPath))
+
+	require.Equal(t, returnPath, state.ReturnPath)
+	require.Less(t, backend.sizes[loginKey], len(returnPath)+256, "state, nonce, verifier, field names and the seal around the path")
+	completed, err := Complete(t.Context(), store, callback(url.Values{"state": {state.State}, "code": {"code"}}), loginKey)
+	require.NoError(t, err)
+	require.Equal(t, returnPath, completed.ReturnPath)
 }
 
 // A cross-site link to a login route must not end the visitor's session: Begin puts the state into an

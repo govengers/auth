@@ -381,9 +381,11 @@ type Backend interface {
 }
 
 type MemoryBackendOptions struct {
-	// default 100000; when full: expired entries are dropped, then the entry expiring soonest is evicted,
-	// a live revocation marker included (Put never fails on a full backend)
+	// MaximumSessions default 100000, MaximumBytes (session IDs, keys and values held) default 64 MiB; when a
+	// write would pass either: expired entries are dropped, then the entries expiring soonest are evicted, a
+	// live revocation marker included (a full backend never fails a Put; only a value larger than MaximumBytes)
 	MaximumSessions int
+	MaximumBytes    int
 }
 // NewMemoryBackend returns the in-process backend: correct for exactly one replica. nil options allowed.
 func NewMemoryBackend(options *MemoryBackendOptions) (*MemoryBackend, error)
@@ -931,7 +933,7 @@ func Token(byteCount int) (string, error)
 package redirect
 const ReturnParameter = "return_to"
 // SafeReturnPath accepts only same-origin relative paths: starts with "/", second byte not "/" or "\",
-// no control characters or "\" anywhere, url.Parse succeeds with empty Scheme, Host and Opaque, <= 2048 bytes.
+// valid UTF-8, no control characters or "\" anywhere, url.Parse succeeds with empty Scheme, Host and Opaque, <= 2048 bytes.
 // Returns the path as sent (never re-escaped) plus "?"+RawQuery when present (fragment dropped).
 func SafeReturnPath(raw string) (string, bool)
 // ReturnPath returns SafeReturnPath(request query return_to) or "/".
@@ -1499,6 +1501,7 @@ Decisions taken during implementation (29.10.2026, settled by the lead):
 | D35 | After review round 4: no component follows a redirect on its own calls (`dependency.WithoutRedirects`: OIDC discovery, JWKS and token exchange, Keycloak token and Admin API, GitHub token exchange, revocation and its own user/team reads, jwt JWKS); a redirected call is a plain error (500), not a refusal; go-oidc's discovery and JWKS bodies are read up to 1 MiB, other answers' not at all; a successful `/ready` is recorded as success; the e2e harness holds both probe listeners before releasing them. | The startup URL checks (D16) saw only the first hop: a 307 to `http` resent the client secret, code and PKCE verifier in clear text; an unbounded read of a streamed or compressed answer could exhaust memory during an IdP outage; LOG-011; two probes could hand out the same port, which the binary refuses. |
 | D36 | After the round-5 security audit: the Guard runs a due refresh (Refresher, ending the session, the save) without the request's cancellation, bounded by 30 s; a refresh failing with a non-refusal error for longer than `MaximumUnverifiedAge` (default 1 h) since the identity was last verified ends the session like a refusal (`verifiedAt` in the envelope, falling back to `authenticatedAt`). | A client aborting every due refresh, or a provider answering 403/429 for hours, kept a revoked identity, its teams and its admin role alive until MaximumAge. |
 | D37 | The store names a Secure, host-only cookie on path `/` `__Host-` + `CookieName`; an own `__Host-` name needs those attributes and an own `__Secure-` name a Secure cookie, otherwise `NewStore` fails. | `request.Cookie` returns the first cookie of a name, so a sibling subdomain could toss a `Domain=` cookie that shadows the session (fixation into the attacker's session). Browsers accept a `__Host-` cookie only from the host itself over https. Existing sessions end once (the name changes). |
+| D38 | `MemoryBackend` also bounds the bytes it holds (`MaximumBytes`, default 64 MiB; expired entries first, then soonest expiring); the login state is JSON without HTML escaping and `SafeReturnPath` refuses invalid UTF-8. | Every anonymous login start stores its state: `json.Marshal` wrote each `<`, `>`, `&` of a 2048-byte return path as six bytes (12 KB a start, 1.2 GB at the entry cap), each invalid UTF-8 byte as `\ufffd`; an entry cap alone does not bound memory. |
 
 ---
 

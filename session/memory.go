@@ -4,19 +4,23 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"maps"
 	"slices"
 	"sync"
 	"time"
 )
 
-const defaultMaximumSessions = 100000
+const (
+	defaultMaximumSessions = 100000
+	defaultMaximumBytes    = 64 << 20
+)
 
 // MemoryBackendOptions configures NewMemoryBackend.
 type MemoryBackendOptions struct {
-	// MaximumSessions defaults to 100000. When full, expired entries are dropped, then the entry expiring
-	// soonest is evicted, a live revocation marker included.
+	// MaximumSessions defaults to 100000, MaximumBytes (session IDs, keys and values held) to 64 MiB. When a
+	// write would pass either, expired entries are dropped, then the entries expiring soonest are evicted, a
+	// live revocation marker included. A single value that cannot fit is refused.
 	MaximumSessions int
+	MaximumBytes    int
 }
 
 // MemoryBackend implements Backend with a map and one mutex; expiry is lazy (no goroutine). It is
@@ -28,10 +32,11 @@ type MemoryBackendOptions struct {
 // non-production scale; use Redis in production.
 // ponytail: O(n) eviction scan when full; shard or use Redis if that ever shows in profiles.
 type MemoryBackend struct {
-	options  MemoryBackendOptions
-	mutex    sync.Mutex
-	sessions map[string]*memorySession
-	now      func() time.Time
+	options     MemoryBackendOptions
+	mutex       sync.Mutex
+	sessions    map[string]*memorySession
+	storedBytes int // of every session ID, key and value in sessions
+	now         func() time.Time
 }
 
 type memorySession struct {
@@ -56,6 +61,12 @@ func NewMemoryBackend(options *MemoryBackendOptions) (*MemoryBackend, error) {
 	if resolved.MaximumSessions == 0 {
 		resolved.MaximumSessions = defaultMaximumSessions
 	}
+	if resolved.MaximumBytes < 0 {
+		return nil, fmt.Errorf("memory session backend: MaximumBytes %d is negative", resolved.MaximumBytes)
+	}
+	if resolved.MaximumBytes == 0 {
+		resolved.MaximumBytes = defaultMaximumBytes
+	}
 	return &MemoryBackend{options: resolved, sessions: map[string]*memorySession{}, now: time.Now}, nil
 }
 
@@ -68,12 +79,16 @@ func (b *MemoryBackend) Put(_ context.Context, sessionID, key string, value []by
 	if found && entry.revoked(now) {
 		return ErrRevoked
 	}
-	if !found {
-		b.makeRoom(now)
-		entry = &memorySession{values: map[string]memoryValue{}}
-		b.sessions[sessionID] = entry
+	size := len(sessionID) + len(key) + len(value) // at most what the write adds
+	if size > b.options.MaximumBytes {
+		return fmt.Errorf("memory session backend: a value of %d bytes cannot fit in MaximumBytes %d", size, b.options.MaximumBytes)
 	}
-	entry.values[key] = memoryValue{value: slices.Clone(value), expiresAt: now.Add(ttl)}
+	b.makeRoom(now, !found, size)
+	entry, found = b.sessions[sessionID] // makeRoom may have evicted it
+	if !found {
+		entry = b.addSession(sessionID, &memorySession{values: map[string]memoryValue{}})
+	}
+	b.storeValue(entry, key, memoryValue{value: slices.Clone(value), expiresAt: now.Add(ttl)})
 	return nil
 }
 
@@ -102,12 +117,22 @@ func (b *MemoryBackend) Pop(_ context.Context, sessionID, key string) ([]byte, b
 func (b *MemoryBackend) CompareAndSwap(_ context.Context, sessionID, key string, previous, value []byte) (bool, error) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
-	current, found := b.lookup(sessionID, key, b.now())
+	now := b.now()
+	current, found := b.lookup(sessionID, key, now)
 	if !found || !bytes.Equal(current, previous) {
 		return false, nil
 	}
-	values := b.sessions[sessionID].values
-	values[key] = memoryValue{value: slices.Clone(value), expiresAt: values[key].expiresAt}
+	if growth := len(value) - len(current); growth > 0 {
+		if len(sessionID)+len(key)+len(value) > b.options.MaximumBytes {
+			return false, fmt.Errorf("memory session backend: a value of %d bytes cannot fit in MaximumBytes %d", len(value), b.options.MaximumBytes)
+		}
+		b.makeRoom(now, false, growth)
+		if _, found := b.lookup(sessionID, key, now); !found {
+			return false, nil // evicted to make room: as if it expired meanwhile
+		}
+	}
+	entry := b.sessions[sessionID]
+	b.storeValue(entry, key, memoryValue{value: slices.Clone(value), expiresAt: entry.values[key].expiresAt})
 	return true, nil
 }
 
@@ -125,11 +150,10 @@ func (b *MemoryBackend) Revoke(_ context.Context, sessionID string, ttl time.Dur
 	if limit := now.Add(ttl); limit.Before(revokedUntil) {
 		revokedUntil = limit
 	}
-	if !revokedUntil.After(now) {
-		delete(b.sessions, sessionID)
-		return nil
+	b.deleteSession(sessionID)
+	if revokedUntil.After(now) {
+		b.addSession(sessionID, &memorySession{values: map[string]memoryValue{}, revokedUntil: revokedUntil})
 	}
-	b.sessions[sessionID] = &memorySession{values: map[string]memoryValue{}, revokedUntil: revokedUntil}
 	return nil
 }
 
@@ -149,25 +173,65 @@ func (b *MemoryBackend) lookup(sessionID, key string, now time.Time) ([]byte, bo
 // remove deletes one value, and the session entry once it holds nothing. b.mutex must be held.
 func (b *MemoryBackend) remove(sessionID, key string, now time.Time) {
 	entry := b.sessions[sessionID]
+	b.storedBytes -= len(key) + len(entry.values[key].value)
 	delete(entry.values, key)
 	if len(entry.values) == 0 && !entry.revoked(now) {
-		delete(b.sessions, sessionID)
+		b.deleteSession(sessionID)
 	}
 }
 
-// makeRoom frees a slot for a new session when the backend is full: it drops expired entries and, when
-// that frees nothing, evicts the entry expiring soonest, a revocation marker included. b.mutex must be held.
-func (b *MemoryBackend) makeRoom(now time.Time) {
-	if len(b.sessions) < b.options.MaximumSessions {
+// makeRoom frees room for a write that adds a session (newSession) and up to size bytes when it would pass
+// MaximumSessions or MaximumBytes: it drops expired entries and then evicts the entries expiring soonest,
+// a revocation marker included, until the write fits. b.mutex must be held.
+func (b *MemoryBackend) makeRoom(now time.Time, newSession bool, size int) {
+	if b.fits(newSession, size) {
 		return
 	}
-	maps.DeleteFunc(b.sessions, func(_ string, entry *memorySession) bool {
-		return !entry.expiresAt().After(now)
-	})
-	if len(b.sessions) < b.options.MaximumSessions {
+	for sessionID, entry := range b.sessions {
+		if !entry.expiresAt().After(now) {
+			b.deleteSession(sessionID)
+		}
+	}
+	for len(b.sessions) > 0 && !b.fits(newSession, size) {
+		b.deleteSession(b.soonestExpiring())
+	}
+}
+
+func (b *MemoryBackend) fits(newSession bool, size int) bool {
+	sessions := len(b.sessions)
+	if newSession {
+		sessions++
+	}
+	return sessions <= b.options.MaximumSessions && b.storedBytes+size <= b.options.MaximumBytes
+}
+
+// addSession stores entry, a new or a revoked session without values, under sessionID. b.mutex must be held.
+func (b *MemoryBackend) addSession(sessionID string, entry *memorySession) *memorySession {
+	b.sessions[sessionID] = entry
+	b.storedBytes += len(sessionID)
+	return entry
+}
+
+// deleteSession drops sessionID with every value. b.mutex must be held.
+func (b *MemoryBackend) deleteSession(sessionID string) {
+	entry, found := b.sessions[sessionID]
+	if !found {
 		return
 	}
-	delete(b.sessions, b.soonestExpiring())
+	b.storedBytes -= len(sessionID)
+	for key, item := range entry.values {
+		b.storedBytes -= len(key) + len(item.value)
+	}
+	delete(b.sessions, sessionID)
+}
+
+// storeValue sets key of entry to item. b.mutex must be held.
+func (b *MemoryBackend) storeValue(entry *memorySession, key string, item memoryValue) {
+	if previous, found := entry.values[key]; found {
+		b.storedBytes -= len(key) + len(previous.value)
+	}
+	entry.values[key] = item
+	b.storedBytes += len(key) + len(item.value)
 }
 
 func (b *MemoryBackend) soonestExpiring() string {

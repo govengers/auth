@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // returnParameter is the query parameter that carries the return path to a login route.
@@ -25,7 +26,7 @@ const maximumReturnPathLength = 2048
 var pathPrefixPattern = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
 
 // SafeReturnPath accepts only same-origin relative paths: starts with "/", second byte not "/" or "\",
-// no control characters or "\" anywhere, url.Parse succeeds with empty Scheme, Host and Opaque, <= 2048 bytes.
+// valid UTF-8 (JSON would store each invalid byte as six), no control characters or "\" anywhere, url.Parse succeeds with empty Scheme, Host and Opaque, <= 2048 bytes.
 // Returns the path as sent plus "?"+RawQuery when present (fragment dropped).
 func SafeReturnPath(raw string) (string, bool) {
 	if !hasSafeShape(raw) {
@@ -143,7 +144,7 @@ func isLoopbackHost(host string) bool {
 // hasSafeShape checks the raw bytes before parsing: browsers read "//" and "/\" as another host and
 // strip tabs and newlines, so "/\t/evil" would become "//evil".
 func hasSafeShape(raw string) bool {
-	if len(raw) > maximumReturnPathLength || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") {
+	if len(raw) > maximumReturnPathLength || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") || !utf8.ValidString(raw) {
 		return false
 	}
 	return !strings.ContainsFunc(raw, isForbiddenInReturnPath)

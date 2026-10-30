@@ -32,6 +32,7 @@ func TestSafeReturnPath(t *testing.T) {
 		{name: "parent segments stay on the origin", raw: "/../../evil", want: "/../../evil", wantOK: true},
 		{name: "maximum length", raw: "/" + strings.Repeat("a", 2047), want: "/" + strings.Repeat("a", 2047), wantOK: true},
 		{name: "empty", raw: ""},
+		{name: "invalid UTF-8", raw: "/a\xffb"},
 		{name: "relative", raw: "dashboard"},
 		{name: "protocol relative", raw: "//evil.example"},
 		{name: "protocol relative with path", raw: "//evil.example/path"},

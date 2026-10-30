@@ -4,6 +4,7 @@
 package oauthlogin
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -52,14 +53,26 @@ func Begin(ctx context.Context, store *session.Store, writer http.ResponseWriter
 	if err != nil {
 		return State{}, err
 	}
-	encoded, err := json.Marshal(state)
+	encoded, err := encodeState(state)
 	if err != nil {
-		return State{}, fmt.Errorf("encode login state: %w", err)
+		return State{}, err
 	}
 	if err := current.Put(ctx, key, encoded, lifetime); err != nil {
 		return State{}, fmt.Errorf("store login state: %w", err)
 	}
 	return state, nil
+}
+
+// encodeState writes state as JSON without HTML escaping: json.Marshal writes each "<", ">" and "&" of the
+// return path as six bytes, and every anonymous login start stores it, so 2048 bytes of them took 12 KB.
+func encodeState(state State) ([]byte, error) {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(state); err != nil {
+		return nil, fmt.Errorf("encode login state: %w", err)
+	}
+	return encoded.Bytes(), nil
 }
 
 // Complete opens the session, pops key (single use) and compares the callback state in constant time.

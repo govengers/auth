@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -9,15 +10,17 @@ import (
 
 func TestNewMemoryBackend(t *testing.T) {
 	testCases := []struct {
-		name        string
-		options     *MemoryBackendOptions
-		wantMaximum int
-		wantError   string
+		name             string
+		options          *MemoryBackendOptions
+		wantMaximum      int
+		wantMaximumBytes int
+		wantError        string
 	}{
-		{name: "nil options take defaults", options: nil, wantMaximum: 100000},
-		{name: "zero takes the default", options: &MemoryBackendOptions{}, wantMaximum: 100000},
-		{name: "explicit maximum", options: &MemoryBackendOptions{MaximumSessions: 3}, wantMaximum: 3},
+		{name: "nil options take defaults", options: nil, wantMaximum: 100000, wantMaximumBytes: 64 << 20},
+		{name: "zero takes the default", options: &MemoryBackendOptions{}, wantMaximum: 100000, wantMaximumBytes: 64 << 20},
+		{name: "explicit maximums", options: &MemoryBackendOptions{MaximumSessions: 3, MaximumBytes: 1024}, wantMaximum: 3, wantMaximumBytes: 1024},
 		{name: "negative maximum", options: &MemoryBackendOptions{MaximumSessions: -1}, wantError: "MaximumSessions -1 is negative"},
+		{name: "negative maximum bytes", options: &MemoryBackendOptions{MaximumBytes: -1}, wantError: "MaximumBytes -1 is negative"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -34,6 +37,7 @@ func TestNewMemoryBackend(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.Equal(t, testCase.wantMaximum, backend.options.MaximumSessions)
+			require.Equal(t, testCase.wantMaximumBytes, backend.options.MaximumBytes)
 			if testCase.options != nil {
 				require.Equal(t, original, *testCase.options, "caller's options untouched")
 			}
@@ -115,6 +119,123 @@ func TestMemoryBackendEviction(t *testing.T) {
 			}
 		})
 	}
+}
+
+// recountedBytes is what storedBytes must be: every session ID, key and value held.
+func recountedBytes(backend *MemoryBackend) int {
+	total := 0
+	for sessionID, entry := range backend.sessions {
+		total += len(sessionID)
+		for key, item := range entry.values {
+			total += len(key) + len(item.value)
+		}
+	}
+	return total
+}
+
+func TestMemoryBackendByteBudget(t *testing.T) {
+	value := bytes.Repeat([]byte("v"), 40) // 47 bytes with a 4-byte session ID and the key "key"
+	testCases := []struct {
+		name        string
+		fill        func(t *testing.T, backend *MemoryBackend, clock *testClock)
+		write       func(t *testing.T, backend *MemoryBackend) error
+		wantError   string
+		wantEvicted []string
+		wantKept    []string
+	}{
+		{
+			name: "evicts the session expiring soonest",
+			fill: func(t *testing.T, backend *MemoryBackend, _ *testClock) {
+				require.NoError(t, backend.Put(t.Context(), "late", "key", value, 2*time.Hour))
+				require.NoError(t, backend.Put(t.Context(), "soon", "key", value, time.Hour))
+			},
+			write: func(t *testing.T, backend *MemoryBackend) error {
+				return backend.Put(t.Context(), "news", "key", value, 3*time.Hour)
+			},
+			wantEvicted: []string{"soon"}, wantKept: []string{"late", "news"},
+		},
+		{
+			name: "drops expired entries before evicting live ones",
+			fill: func(t *testing.T, backend *MemoryBackend, clock *testClock) {
+				small := value[:20] // 27 bytes per session
+				require.NoError(t, backend.Put(t.Context(), "gon1", "key", small, time.Minute))
+				require.NoError(t, backend.Put(t.Context(), "gon2", "key", small, 2*time.Minute))
+				require.NoError(t, backend.Put(t.Context(), "live", "key", small, time.Hour))
+				clock.advance(3 * time.Minute)
+			},
+			write: func(t *testing.T, backend *MemoryBackend) error {
+				return backend.Put(t.Context(), "news", "key", value[:20], 30*time.Minute)
+			},
+			wantEvicted: []string{"gon1", "gon2"}, wantKept: []string{"live", "news"},
+		},
+		{
+			name: "a growing swap makes room",
+			fill: func(t *testing.T, backend *MemoryBackend, _ *testClock) {
+				require.NoError(t, backend.Put(t.Context(), "soon", "key", value, time.Hour))
+				require.NoError(t, backend.Put(t.Context(), "late", "key", []byte("v"), 2*time.Hour))
+			},
+			write: func(t *testing.T, backend *MemoryBackend) error {
+				swapped, err := backend.CompareAndSwap(t.Context(), "late", "key", []byte("v"), bytes.Repeat([]byte("v"), 60))
+				require.True(t, swapped)
+				return err
+			},
+			wantEvicted: []string{"soon"}, wantKept: []string{"late"},
+		},
+		{
+			name: "a value that cannot fit is refused and evicts nothing",
+			fill: func(t *testing.T, backend *MemoryBackend, _ *testClock) {
+				require.NoError(t, backend.Put(t.Context(), "live", "key", value, time.Hour))
+			},
+			write: func(t *testing.T, backend *MemoryBackend) error {
+				return backend.Put(t.Context(), "news", "key", bytes.Repeat([]byte("v"), 100), time.Hour)
+			},
+			wantError: "cannot fit in MaximumBytes 100", wantKept: []string{"live"},
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			clock := newTestClock()
+			backend, err := NewMemoryBackend(&MemoryBackendOptions{MaximumBytes: 100})
+			require.NoError(t, err)
+			backend.now = clock.now
+			testCase.fill(t, backend, clock)
+
+			err = testCase.write(t, backend)
+
+			if testCase.wantError != "" {
+				require.ErrorContains(t, err, testCase.wantError)
+			} else {
+				require.NoError(t, err)
+			}
+			for _, sessionID := range testCase.wantEvicted {
+				require.NotContains(t, backend.sessions, sessionID)
+			}
+			for _, sessionID := range testCase.wantKept {
+				require.Contains(t, backend.sessions, sessionID)
+			}
+			require.Equal(t, recountedBytes(backend), backend.storedBytes)
+			require.LessOrEqual(t, backend.storedBytes, 100)
+		})
+	}
+}
+
+func TestMemoryBackendCountsBytesThroughEveryOperation(t *testing.T) {
+	clock := newTestClock()
+	backend := newTestMemoryBackend(t, clock)
+	ctx := t.Context()
+
+	require.NoError(t, backend.Put(ctx, "first", "a", []byte("value"), time.Hour))
+	require.NoError(t, backend.Put(ctx, "first", "a", []byte("longer value"), time.Hour))
+	require.NoError(t, backend.Put(ctx, "first", "b", []byte("value"), time.Hour))
+	_, err := backend.CompareAndSwap(ctx, "first", "b", []byte("value"), []byte("v"))
+	require.NoError(t, err)
+	require.NoError(t, backend.Put(ctx, "second", "a", []byte("value"), time.Hour))
+	_, _, err = backend.Pop(ctx, "second", "a")
+	require.NoError(t, err)
+	require.NoError(t, backend.Revoke(ctx, "first", time.Hour))
+
+	require.Equal(t, recountedBytes(backend), backend.storedBytes)
+	require.Equal(t, len("first"), backend.storedBytes, "only the revocation marker is left")
 }
 
 func TestMemoryBackendRevokeTakesNoSlot(t *testing.T) {
