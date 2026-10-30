@@ -52,6 +52,9 @@ func run() error {
 		config.String("GITHUB_CLIENT_SECRET").NotEmpty().Sensitive().Into(&options.ClientSecret),
 		config.StringArray("GITHUB_ALLOWED_TEAMS").NotEmpty().Into(&options.AllowedTeams),
 		config.StringArray("GITHUB_ADMIN_TEAMS").Default(nil).Into(&options.AdminTeams),
+		config.String("GITHUB_AUTHORIZE_URL").NotEmpty().Default("https://github.com/login/oauth/authorize").Into(&options.AuthorizeURL),
+		config.String("GITHUB_TOKEN_URL").NotEmpty().Default("https://github.com/login/oauth/access_token").Into(&options.TokenURL),
+		config.String("GITHUB_API_URL").NotEmpty().Default("https://api.github.com").Into(&options.APIURL),
 		config.String("ADDRESS").Default(":8080").Into(&address),
 	})
 	if err != nil {
@@ -65,7 +68,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{ // every phase of a connection is bounded, so slow or idle clients cannot hold it
+		Addr:              address,
+		Handler:           handler,
+		MaxHeaderBytes:    64 << 10,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	return server.ListenAndServe()
 }
 

@@ -25,12 +25,13 @@ import (
 
 // serverOptions is what newServer needs; main fills it from the environment.
 type serverOptions struct {
-	EncryptionKey []byte // 32 bytes, see session.ParseKey; the same on every replica
-	ExternalURL   string // public origin of this server, e.g. https://app.example.com
-	Issuer        string // e.g. https://keycloak.example.com/realms/example; https, or http on loopback
-	ClientID      string
-	ClientSecret  string
-	Keycloak      *keycloak.Options // optional: read roles, groups and attributes from the Keycloak Admin API
+	EncryptionKey       []byte // 32 bytes, see session.ParseKey; the same on every replica
+	ExternalURL         string // public origin of this server, e.g. https://app.example.com
+	Issuer              string // e.g. https://keycloak.example.com/realms/example; https, or http on loopback
+	ClientID            string
+	ClientSecret        string
+	AllowedEmailDomains []string          // optional: only verified emails of these domains log in; empty allows every account of the IdP
+	Keycloak            *keycloak.Options // optional: read roles, groups and attributes from the Keycloak Admin API
 }
 
 func main() {
@@ -50,7 +51,8 @@ func run() error {
 		config.String("OIDC_ISSUER").NotEmpty().Into(&options.Issuer),
 		config.String("OIDC_CLIENT_ID").NotEmpty().Into(&options.ClientID),
 		config.String("OIDC_CLIENT_SECRET").NotEmpty().Sensitive().Into(&options.ClientSecret),
-		config.String("KEYCLOAK_URL").Default("").Into(&keycloakOptions.URL), // empty: no enrichment
+		config.StringArray("OIDC_ALLOWED_EMAIL_DOMAINS").Default(nil).Into(&options.AllowedEmailDomains), // set it for Google, or any Google account gets in
+		config.String("KEYCLOAK_URL").Default("").Into(&keycloakOptions.URL),                             // empty: no enrichment
 		config.String("KEYCLOAK_REALM").Default("").Into(&keycloakOptions.Realm),
 		config.String("KEYCLOAK_CLIENT_ID").Default("").Into(&keycloakOptions.ClientID), // a service account client, not the login client
 		config.String("KEYCLOAK_CLIENT_SECRET").Default("").Sensitive().Into(&keycloakOptions.ClientSecret),
@@ -69,7 +71,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{ // every phase of a connection is bounded, so slow or idle clients cannot hold it
+		Addr:              address,
+		Handler:           handler,
+		MaxHeaderBytes:    64 << 10,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	return server.ListenAndServe()
 }
 
@@ -93,13 +103,14 @@ func newServer(ctx context.Context, options *serverOptions) (http.Handler, error
 		onLogin = enricher.Enrich // replaces OIDCRoles, OIDCClientRoles, Groups and Attributes; 403 for missing Required* roles
 	}
 	provider, err := oidc.New(ctx, &oidc.Options{
-		Name:         "sso", // Identity.Provider and the route prefix /auth/oidc/sso
-		Issuer:       options.Issuer,
-		ClientID:     options.ClientID,
-		ClientSecret: options.ClientSecret,
-		ExternalURL:  options.ExternalURL,
-		Sessions:     store,
-		OnLogin:      onLogin,
+		Name:                "sso", // Identity.Provider and the route prefix /auth/oidc/sso
+		Issuer:              options.Issuer,
+		ClientID:            options.ClientID,
+		ClientSecret:        options.ClientSecret,
+		ExternalURL:         options.ExternalURL,
+		AllowedEmailDomains: options.AllowedEmailDomains,
+		Sessions:            store,
+		OnLogin:             onLogin,
 	})
 	if err != nil {
 		return nil, err
