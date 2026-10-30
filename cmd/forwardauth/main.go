@@ -21,7 +21,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/govengers/config/v2"
-	wideevent "github.com/mxcd/go-wide-event-logger"
+	wideevent "github.com/govengers/wide-event-logger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/redis/go-redis/v9"
@@ -232,6 +232,10 @@ func newServer(ctx context.Context, configuration *Configuration, sessions *sess
 			return nil, err
 		}
 	}
+	emitter, err := newEmitter(configuration.DevMode)
+	if err != nil {
+		return nil, err
+	}
 	return forwardauth.NewServer(&forwardauth.ServerOptions{
 		Version:          version,
 		Port:             configuration.Port,
@@ -243,7 +247,7 @@ func newServer(ctx context.Context, configuration *Configuration, sessions *sess
 		Signer:           signer,
 		JWTHeader:        configuration.JWTHeader,
 		IdentityEndpoint: configuration.IdentityEndpointEnabled,
-		Emitter:          newEmitter(configuration.DevMode),
+		Emitter:          emitter,
 		Logger:           telemetry.logger,
 		SampleRate:       configuration.WideEventSampleRate,
 		MetricsRegistry:  telemetry.registry,
@@ -265,11 +269,15 @@ func newMetricsRegistry() *prometheus.Registry {
 }
 
 // newEmitter writes wide events as JSON lines on stdout, or readable for a developer in dev mode [LOG-013].
-func newEmitter(devMode bool) wideevent.Emitter {
-	if devMode {
-		return wideevent.DevStdoutEmitter()
+func newEmitter(devMode bool) (wideevent.Emitter, error) {
+	if !devMode {
+		return wideevent.NewJSONEmitter(nil), nil
 	}
-	return wideevent.JSONStdoutEmitter()
+	emitter, err := wideevent.NewDevEmitter(nil)
+	if err != nil {
+		return nil, err // a nil *DevEmitter in the interface would not be a nil Emitter
+	}
+	return emitter, nil
 }
 
 // sessionStore is the session store and, with SESSION_REDIS_ENABLED, the Redis client behind it.

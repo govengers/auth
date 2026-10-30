@@ -19,7 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
-	wideevent "github.com/mxcd/go-wide-event-logger"
+	wideevent "github.com/govengers/wide-event-logger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -427,15 +427,15 @@ func TestNeitherEmitterPrintsTheRawQuery(t *testing.T) {
 	})}
 	testCases := []struct {
 		name       string
-		newEmitter func(writer io.Writer) wideevent.Emitter
+		newEmitter func(t *testing.T, writer io.Writer) wideevent.Emitter
 	}{
-		{name: "dev", newEmitter: func(writer io.Writer) wideevent.Emitter { return wideevent.DevWriterEmitter(writer) }},
-		{name: "json", newEmitter: wideevent.JSONWriterEmitter},
+		{name: "dev", newEmitter: newDevEmitter},
+		{name: "json", newEmitter: newJSONEmitter},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			output := &bytes.Buffer{}
-			testHarness := newHarness(t, harnessOptions{routes: []auth.Route{callback}, emitter: testCase.newEmitter(output)})
+			testHarness := newHarness(t, harnessOptions{routes: []auth.Route{callback}, emitter: testCase.newEmitter(t, output)})
 
 			testHarness.serve(t, http.MethodGet, testRoutePath+"?code=secret-code&state=secret-state", nil)
 
@@ -648,26 +648,30 @@ func TestThePublicListenerAnswersOversizedHeadersWith431(t *testing.T) {
 	require.Equal(t, http.StatusRequestHeaderFieldsTooLarge, statusWith(80<<10), "64 KiB plus the slack net/http reads ahead")
 }
 
+// The wide-event middleware cuts the request fields; the server cuts the forward fields it adds.
 func TestClientControlledEventFieldsAreCut(t *testing.T) {
 	testHarness := newHarness(t, harnessOptions{})
-	long := strings.Repeat("a", 1000)
+	long := strings.Repeat("a", 3000)
 
 	testHarness.serve(t, strings.Repeat("M", 32<<10), "/"+long+"?"+long+"=1", http.Header{
 		"User-Agent": {strings.Repeat("€", 400)}, "X-Request-Id": {long},
-		"X-Forwarded-Method": {long}, "X-Forwarded-Host": {long}, "X-Forwarded-Uri": {"/" + long},
+		"X-Forwarded-Method": {long}, "X-Forwarded-Host": {strings.Repeat("€", 400)}, "X-Forwarded-Uri": {"/" + long},
 	})
 
 	event := testHarness.events.last(t)
 	request := event["request"].(map[string]any)
-	for _, field := range []string{"method", "path", "query", "id"} {
-		require.Len(t, request[field], 512, field)
+	require.Len(t, request["method"], 32)
+	require.Len(t, request["path"], 2048)
+	require.Len(t, request["query"], 512)
+	require.NotContains(t, request["id"], "aaa", "an overlong request ID is replaced")
+	require.Len(t, request["user_agent"], 510, "cut before the character that would cross 512 bytes")
+	forward := event["forward"].(map[string]any)
+	for _, field := range []string{"method", "path"} {
+		require.Len(t, forward[field], 512, "forward."+field)
 	}
-	userAgent := request["user_agent"].(string)
-	require.Len(t, userAgent, 510, "cut before the character that would cross 512 bytes")
-	require.True(t, utf8.ValidString(userAgent))
-	for _, field := range []string{"method", "host", "path"} {
-		require.Len(t, event["forward"].(map[string]any)[field], 512, "forward."+field)
-	}
+	forwardHost := forward["host"].(string)
+	require.Len(t, forwardHost, 510, "cut before the character that would cross 512 bytes")
+	require.True(t, utf8.ValidString(forwardHost))
 }
 
 // httptest requests come from 192.0.2.1.
@@ -707,20 +711,20 @@ func TestValidateTrustedProxiesNamesEveryBadEntry(t *testing.T) {
 func TestNeitherEmitterPrintsAnUncutMethod(t *testing.T) {
 	testCases := []struct {
 		name       string
-		newEmitter func(writer io.Writer) wideevent.Emitter
+		newEmitter func(t *testing.T, writer io.Writer) wideevent.Emitter
 	}{
-		{name: "dev", newEmitter: func(writer io.Writer) wideevent.Emitter { return wideevent.DevWriterEmitter(writer) }},
-		{name: "json", newEmitter: wideevent.JSONWriterEmitter},
+		{name: "dev", newEmitter: newDevEmitter},
+		{name: "json", newEmitter: newJSONEmitter},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			output := &bytes.Buffer{}
-			testHarness := newHarness(t, harnessOptions{emitter: testCase.newEmitter(output)})
+			testHarness := newHarness(t, harnessOptions{emitter: testCase.newEmitter(t, output)})
 
 			testHarness.serve(t, strings.Repeat("M", 32<<10), "/unknown", nil)
 
-			require.Contains(t, output.String(), strings.Repeat("M", 512))
-			require.NotContains(t, output.String(), strings.Repeat("M", 513))
+			require.Contains(t, output.String(), strings.Repeat("M", 32))
+			require.NotContains(t, output.String(), strings.Repeat("M", 33))
 		})
 	}
 }

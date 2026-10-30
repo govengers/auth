@@ -1,14 +1,23 @@
 # Gin
 
-`ginadapter` runs the library's `net/http` middleware in gin chains, registers provider routes on gin, gates routes with checks and records outcomes on the go-wide-event-logger event. `prometheusadapter` counts outcomes on your Prometheus registry. Only these two packages import gin and client_golang.
+`ginadapter` runs the library's `net/http` middleware in gin chains, registers provider routes on gin, gates routes with checks and records outcomes on the request's wide event of [wide-event-logger](https://github.com/govengers/wide-event-logger) v1. `prometheusadapter` counts outcomes on your Prometheus registry. Only these two packages import gin and client_golang.
 
 ## Wiring
 
 From [examples/github/main.go](../../examples/github/main.go) (tested):
 
 ```go
+	wideEvents, err := wideeventgin.NewMiddleware(&wideeventgin.Options{Emitter: wideevent.NewJSONEmitter(nil)}) // redacts every query value, OAuth code and state included
+	if err != nil {
+		return nil, err
+	}
+	// The event records a panic and its stack; gin.Recovery would also print the raw request, cookies included.
+	recovery := gin.CustomRecoveryWithWriter(io.Discard, func(ginContext *gin.Context, _ any) {
+		ginContext.AbortWithStatus(http.StatusInternalServerError)
+	})
+
 	engine := gin.New()
-	engine.Use(gin.Recovery(), wideevent.Middleware(wideevent.WithPreEnricher(ginadapter.RedactQuery)))
+	engine.Use(recovery, wideEvents)
 	ginadapter.RegisterRoutes(engine, provider.Routes()) // on the engine root: GET /auth/github/{login,callback,logout}, POST /auth/github/refresh-teams
 	engine.GET("/auth/me", ginadapter.Middleware(guard.RequireAPI()), gin.WrapH(auth.IdentityHandler()))
 	api := engine.Group("/api", ginadapter.Middleware(guard.RequireAPI()))
@@ -17,7 +26,7 @@ From [examples/github/main.go](../../examples/github/main.go) (tested):
 	engine.GET("/", ginadapter.Middleware(guard.RequireUI()), home)
 ```
 
-Handlers read the identity with `auth.IdentityFrom(ginContext.Request.Context())`.
+`wideeventgin` is the logger's own `ginadapter` package (`github.com/govengers/wide-event-logger/ginadapter`), aliased because its name collides with this module's. Handlers read the identity with `auth.IdentityFrom(ginContext.Request.Context())`.
 
 | Function | Use |
 |---|---|
@@ -26,11 +35,11 @@ Handlers read the identity with `auth.IdentityFrom(ginContext.Request.Context())
 | `ginadapter.Require(check)` | 401/403/500 JSON when the check refuses; `nil` check answers 500 |
 | `ginadapter.RequireMethodPermission(resource)` | GET/HEAD/OPTIONS need `<resource>:read`, every other method `<resource>:write` |
 | `ginadapter.Observe` | `auth.Observer` for provider, Guard, `apikey` and verifier options: `auth.*` fields on the wide event |
-| `ginadapter.RedactQuery` | wide-event pre-enricher that replaces every query value with `redacted` |
+| `ginadapter.RedactQuery` | deprecated, does nothing: the logger v1 middleware redacts the query itself |
 
 ## Wide events
 
-Mount `wideevent.Middleware` before every route so `Observe` and `Require` find the event; without one they record nothing. Mount it with `wideevent.WithPreEnricher(ginadapter.RedactQuery)`, or the `code` and `state` of every OAuth callback reach your logs: the middleware records `request.query` verbatim, and `RedactQuery` sets it again with every value replaced by `redacted`. JSON emitters print the latest value; dev emitters print every value, the raw query included. Need your own pre-enricher too? Call `ginadapter.RedactQuery(we, ginContext)` first in it. Recorded keys: [design 5.4](../design.md#54-wide-event-recording-ginadapterobserve).
+Mount the wide-event-logger v1 middleware (`ginadapter.NewMiddleware` of `github.com/govengers/wide-event-logger`) before every route so `Observe` and `Require` find the event; without one, or with the deprecated `mxcd/go-wide-event-logger`, they record nothing. It records `request.query` with every value replaced by `redacted` unless the parameter is in `Options.QueryAllowlist`, so the `code` and `state` of OAuth callbacks never reach your logs; never allowlist them. `ginadapter.RedactQuery` is a deprecated no-op; drop it from your pre-enricher. Recorded keys: [design 5.4](../design.md#54-wide-event-recording-ginadapterobserve).
 
 ## Prometheus
 

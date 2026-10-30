@@ -7,7 +7,8 @@ import (
 	"net/http/httptest"
 
 	"github.com/gin-gonic/gin"
-	wideevent "github.com/mxcd/go-wide-event-logger"
+	wideevent "github.com/govengers/wide-event-logger"
+	wideeventgin "github.com/govengers/wide-event-logger/ginadapter"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/authorization"
@@ -26,8 +27,13 @@ func Example() {
 		})
 	}
 
+	wideEvents, err := wideeventgin.NewMiddleware(&wideeventgin.Options{Emitter: wideevent.EmitterFunc(func(*wideevent.Event) {})})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 	engine := gin.New()
-	engine.Use(wideevent.Middleware(wideevent.WithEmitter(wideevent.EmitterFunc(func(*wideevent.Event) {}))))
+	engine.Use(wideEvents)
 	api := engine.Group("/api", ginadapter.Middleware(requireAPI))
 	api.GET("/reports", ginadapter.Require(authorization.IsAdmin()), func(ginContext *gin.Context) {
 		ginContext.String(http.StatusOK, "reports")

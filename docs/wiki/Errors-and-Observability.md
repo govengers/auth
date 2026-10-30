@@ -61,6 +61,6 @@ Ready-made observers: `ginadapter.Observe` (fields on the request's wide event, 
 
 ## What is never recorded
 
-Tokens, secrets, session IDs, passwords, TOTP codes, emails and names never appear in an error message, an `Outcome`, a wide-event field or a metric label; IDs (`Subject`, `UserID`) do. Errors of outbound calls name method, origin and a classified cause, never path, query or response bytes. The exception is your own wiring: the wide-event middleware's `request.query` unless you mount `ginadapter.RedactQuery` (see [Gin](Gin.md#wide-events)) and the text of your `apikey.Resolver` and hook errors.
+Tokens, secrets, session IDs, passwords, TOTP codes, emails and names never appear in an error message, an `Outcome`, a wide-event field or a metric label; IDs (`Subject`, `UserID`) do. Errors of outbound calls name method, origin and a classified cause, never path, query or response bytes. The exception is your own wiring: the query parameters you put into the wide-event middleware's `QueryAllowlist` (see [Gin](Gin.md#wide-events)) and the text of your `apikey.Resolver` and hook errors.
 
 Source: [errors.go](../../errors.go), [response.go](../../response.go), [outcome.go](../../outcome.go), [design section 5](../design.md#5-errors-json-shape-status-mapping-wide-event-recording).

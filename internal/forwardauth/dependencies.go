@@ -9,7 +9,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	wideevent "github.com/mxcd/go-wide-event-logger"
+	wideevent "github.com/govengers/wide-event-logger"
+	wideeventgin "github.com/govengers/wide-event-logger/ginadapter"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/govengers/auth/internal/dependency"
@@ -221,9 +222,9 @@ func (c *dependencyCalls) recordOn(we *wideevent.Event) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	for namespace, sum := range c.sums {
-		we.Int(namespace+".calls", sum.calls).Int(namespace+".failures", sum.failures).Dur(namespace+".duration_ms", sum.duration)
+		we.Int(namespace+".calls", sum.calls).Int(namespace+".failures", sum.failures).Duration(namespace+".duration_ms", sum.duration)
 		if sum.backend != "" {
-			we.Str(namespace+".backend", sum.backend)
+			we.String(namespace+".backend", sum.backend)
 		}
 		if sum.status != 0 {
 			we.Int(namespace+".status", sum.status)
@@ -239,7 +240,5 @@ func recordDependencies(ginContext *gin.Context) {
 	calls := &dependencyCalls{sums: map[string]*dependencySum{}}
 	ginContext.Request = ginContext.Request.WithContext(context.WithValue(ginContext.Request.Context(), dependencyCallsKey{}, calls))
 	ginContext.Next()
-	if we := wideevent.FromGin(ginContext); we != nil {
-		calls.recordOn(we)
-	}
+	calls.recordOn(wideeventgin.FromContext(ginContext))
 }

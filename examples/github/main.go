@@ -6,6 +6,7 @@
 package main
 
 import (
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,7 +14,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/govengers/config/v2"
-	wideevent "github.com/mxcd/go-wide-event-logger"
+	wideevent "github.com/govengers/wide-event-logger"
+	wideeventgin "github.com/govengers/wide-event-logger/ginadapter"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/authorization"
@@ -115,8 +117,17 @@ func newServer(options *serverOptions) (http.Handler, error) {
 		return nil, err
 	}
 
+	wideEvents, err := wideeventgin.NewMiddleware(&wideeventgin.Options{Emitter: wideevent.NewJSONEmitter(nil)}) // redacts every query value, OAuth code and state included
+	if err != nil {
+		return nil, err
+	}
+	// The event records a panic and its stack; gin.Recovery would also print the raw request, cookies included.
+	recovery := gin.CustomRecoveryWithWriter(io.Discard, func(ginContext *gin.Context, _ any) {
+		ginContext.AbortWithStatus(http.StatusInternalServerError)
+	})
+
 	engine := gin.New()
-	engine.Use(gin.Recovery(), wideevent.Middleware(wideevent.WithPreEnricher(ginadapter.RedactQuery)))
+	engine.Use(recovery, wideEvents)
 	ginadapter.RegisterRoutes(engine, provider.Routes()) // on the engine root: GET /auth/github/{login,callback,logout}, POST /auth/github/refresh-teams
 	engine.GET("/auth/me", ginadapter.Middleware(guard.RequireAPI()), gin.WrapH(auth.IdentityHandler()))
 	api := engine.Group("/api", ginadapter.Middleware(guard.RequireAPI()))

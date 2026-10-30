@@ -22,7 +22,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	wideevent "github.com/mxcd/go-wide-event-logger"
+	wideevent "github.com/govengers/wide-event-logger"
+	wideeventgin "github.com/govengers/wide-event-logger/ginadapter"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -232,13 +233,16 @@ func (s *Server) newEngine(metrics *httpMetrics) (*gin.Engine, error) {
 	if err := engine.SetTrustedProxies(s.options.TrustedProxies); err != nil {
 		return nil, fmt.Errorf("forwardauth server: trusted proxies: %w", err)
 	}
+	wideEvents, err := wideeventgin.NewMiddleware(&wideeventgin.Options{
+		Emitter:     wideevent.SampledEmitter(s.options.Emitter, sampler(s.options.SampleRate)),
+		SkipPaths:   []string{s.path("/health")},
+		PreEnricher: s.recordRequest,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("forwardauth server: wide events: %w", err)
+	}
 	engine.Use(
-		wideevent.Middleware(
-			wideevent.WithEmitter(latestValues(s.options.Emitter)),
-			wideevent.WithSampler(sampler(s.options.SampleRate)),
-			wideevent.WithPreEnricher(s.recordRequest),
-			wideevent.WithSkipPaths(s.path("/health")),
-		),
+		wideEvents,
 		metrics.middleware,
 		recordDependencies,
 		recovery,
@@ -284,9 +288,7 @@ func requireActive(ginContext *gin.Context) {
 		return
 	}
 	err := &auth.Error{Kind: auth.ErrForbidden, Reason: auth.ReasonInactive}
-	if we := wideevent.FromGin(ginContext); we != nil {
-		we.Failure(err)
-	}
+	wideeventgin.FromContext(ginContext).Failure(err)
 	auth.WriteError(ginContext.Writer, err)
 	ginContext.Abort()
 }
@@ -294,28 +296,22 @@ func requireActive(ginContext *gin.Context) {
 // issueToken puts the identity as a bearer token into the JWT header, which Traefik copies into the
 // upstream request (authResponseHeaders).
 func (s *Server) issueToken(ginContext *gin.Context) {
-	we := wideevent.FromGin(ginContext)
+	we := wideeventgin.FromContext(ginContext)
 	token, err := s.options.Signer.Sign(auth.IdentityFrom(ginContext.Request.Context()))
 	if err != nil {
-		if we != nil {
-			we.Failure(fmt.Errorf("sign the identity token: %w", err))
-		}
+		we.Failure(fmt.Errorf("sign the identity token: %w", err))
 		auth.WriteError(ginContext.Writer, err)
 		ginContext.Abort()
 		return
 	}
 	ginContext.Header(s.options.JWTHeader, bearerPrefix+token)
-	if we != nil {
-		we.Bool("forward.jwt_issued", true)
-	}
+	we.Bool("forward.jwt_issued", true)
 }
 
 // forward answers an authenticated check with 200, so Traefik forwards the original request.
 func forward(ginContext *gin.Context) {
 	ginContext.Header("Cache-Control", "no-store")
-	if we := wideevent.FromGin(ginContext); we != nil {
-		we.Success()
-	}
+	wideeventgin.FromContext(ginContext).Success()
 	ginContext.Status(http.StatusOK)
 }
 
@@ -324,22 +320,16 @@ func forward(ginContext *gin.Context) {
 // shutdown is no failure: it is recorded as a success with ready.shutting_down [LOG-011].
 func (s *Server) readiness(ginContext *gin.Context) {
 	if !s.ready.Load() {
-		if we := wideevent.FromGin(ginContext); we != nil {
-			we.Success().Bool("ready.shutting_down", true)
-		}
+		wideeventgin.FromContext(ginContext).Success().Bool("ready.shutting_down", true)
 		notReady(ginContext)
 		return
 	}
 	if err := s.checkReadiness(ginContext.Request.Context()); err != nil {
-		if we := wideevent.FromGin(ginContext); we != nil {
-			we.Failure(fmt.Errorf("readiness check: %w", err))
-		}
+		wideeventgin.FromContext(ginContext).Failure(fmt.Errorf("readiness check: %w", err))
 		notReady(ginContext)
 		return
 	}
-	if we := wideevent.FromGin(ginContext); we != nil {
-		we.Success()
-	}
+	wideeventgin.FromContext(ginContext).Success()
 	httpjson.Write(ginContext.Writer, http.StatusOK, statusResponse{Status: "ok"})
 }
 
@@ -370,9 +360,7 @@ func health(ginContext *gin.Context) {
 }
 
 func routeNotFound(ginContext *gin.Context) {
-	if we := wideevent.FromGin(ginContext); we != nil {
-		we.Failure(errNoRoute)
-	}
+	wideeventgin.FromContext(ginContext).Failure(errNoRoute)
 	httpjson.Write(ginContext.Writer, http.StatusNotFound, auth.ErrorResponse{Code: "not_found", Message: "not found"})
 }
 
@@ -380,9 +368,7 @@ func routeNotFound(ginContext *gin.Context) {
 func succeeding(handler http.Handler) gin.HandlerFunc {
 	return func(ginContext *gin.Context) {
 		handler.ServeHTTP(ginContext.Writer, ginContext.Request)
-		if we := wideevent.FromGin(ginContext); we != nil {
-			we.Success()
-		}
+		wideeventgin.FromContext(ginContext).Success()
 	}
 }
 
@@ -395,9 +381,7 @@ func recovery(ginContext *gin.Context) {
 			return
 		}
 		err := fmt.Errorf("panic: %v", recovered)
-		if we := wideevent.FromGin(ginContext); we != nil {
-			we.Failure(err).Str("panic.stack", string(debug.Stack()))
-		}
+		wideeventgin.FromContext(ginContext).Failure(err).String("panic.stack", string(debug.Stack()))
 		if !ginContext.Writer.Written() {
 			auth.WriteError(ginContext.Writer, err)
 		}

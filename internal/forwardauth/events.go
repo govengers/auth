@@ -8,14 +8,14 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
-	wideevent "github.com/mxcd/go-wide-event-logger"
+	wideevent "github.com/govengers/wide-event-logger"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/ginadapter"
 	"github.com/govengers/auth/prometheusadapter"
 )
 
-// maximumFieldBytes bounds each client-controlled field of a wide event [LOG-009].
+// maximumFieldBytes bounds each client-controlled field recordRequest adds to a wide event [LOG-009].
 const maximumFieldBytes = 512
 
 // ObserverOptions configure NewObserver.
@@ -50,54 +50,21 @@ func sampler(rate int) wideevent.Sampler {
 	)
 }
 
-// latestValues hands emitter a copy of every event with only the latest value of each field. The
-// pre-enricher replaces request.query by setting it again; the JSON emitter prints the latest value,
-// the dev emitter every value, the raw query included [LOG-009].
-func latestValues(emitter wideevent.Emitter) wideevent.Emitter {
-	return wideevent.EmitterFunc(func(we *wideevent.Event) {
-		emitter.Emit(latestFields(we))
-	})
-}
-
-// latestFields returns a new event with the latest value of each field of we, in the order of those values.
-func latestFields(we *wideevent.Event) *wideevent.Event {
-	fields := we.Fields()
-	latest := make(map[string]int, len(fields))
-	for index, field := range fields {
-		latest[field.Key] = index
-	}
-	deduplicated := &wideevent.Event{}
-	for index, field := range fields {
-		if latest[field.Key] == index {
-			deduplicated.Set(field.Key, field.Value)
-		}
-	}
-	return deduplicated
-}
-
-// recordRequest is the wide-event pre-enricher: it replaces the query the middleware recorded verbatim
-// (ginadapter.RedactQuery: callbacks carry code and state) [LOG-009] and records the version and what
-// Traefik asks to forward.
-// Only the path of X-Forwarded-Uri is recorded, never its query. Every field a client controls is cut to
-// maximumFieldBytes, also those the middleware recorded: 401s and unmatched paths are always kept.
+// recordRequest is the wide-event pre-enricher: it records the version and what Traefik asks to forward.
+// The middleware records the request itself, cuts its client-controlled fields and redacts the query
+// [LOG-009]. Only the path of X-Forwarded-Uri is recorded, never its query; each forward field is cut to
+// maximumFieldBytes: 401s and unmatched paths are always kept.
 func (s *Server) recordRequest(we *wideevent.Event, ginContext *gin.Context) {
-	request := ginContext.Request
-	ginadapter.RedactQuery(we, ginContext)
-	we.Str("request.method", truncated(request.Method)).
-		Str("request.path", truncated(request.URL.Path)).
-		Str("request.host", truncated(request.Host)).
-		Str("request.user_agent", truncated(request.UserAgent())).
-		Str("request.id", truncated(ginContext.GetHeader("X-Request-ID"))).
-		Str("service.version", s.options.Version)
+	we.String("service.version", s.options.Version)
 	if method := ginContext.GetHeader("X-Forwarded-Method"); method != "" {
-		we.Str("forward.method", truncated(method))
+		we.String("forward.method", truncated(method))
 	}
 	if host := ginContext.GetHeader("X-Forwarded-Host"); host != "" {
-		we.Str("forward.host", truncated(host))
+		we.String("forward.host", truncated(host))
 	}
 	if forwardedURI := ginContext.GetHeader("X-Forwarded-Uri"); forwardedURI != "" {
 		forwardedPath, _, _ := strings.Cut(forwardedURI, "?")
-		we.Str("forward.path", truncated(forwardedPath))
+		we.String("forward.path", truncated(forwardedPath))
 	}
 }
 

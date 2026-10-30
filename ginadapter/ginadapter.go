@@ -2,22 +2,21 @@
 // middleware of the providers in a gin chain, registers their routes on a gin router, gates routes
 // with authorization checks, and records authentication outcomes on the request's wide event.
 //
-// It is the only package of the library that imports gin and go-wide-event-logger. It records on the
-// wide event the wideevent.Middleware put into the request context and never emits one of its own; it
-// records IDs and decisions, never usernames, emails, names, tokens or codes. Mount the wide-event
-// middleware with RedactQuery, or the code and state of every OAuth callback reach your logs. Everything
-// in it is safe for concurrent use.
+// It is the only package of the library that imports gin and wide-event-logger. It records on the
+// wide event the wide-event middleware (wide-event-logger's ginadapter.NewMiddleware) put into the request
+// context and never emits one of its own; it records IDs and decisions, never usernames, emails, names,
+// tokens or codes. That middleware redacts every query value itself, so the code and state of OAuth
+// callbacks stay out of your logs. Everything in it is safe for concurrent use.
 package ginadapter
 
 import (
 	"context"
 	"errors"
 	"net/http"
-	"net/url"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	wideevent "github.com/mxcd/go-wide-event-logger"
+	wideevent "github.com/govengers/wide-event-logger"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/authorization"
@@ -78,12 +77,9 @@ func RegisterRoutes(router gin.IRoutes, routes []auth.Route) {
 // A session.Guard reports a refresh on the same event before the request's authenticate outcome, so a
 // refresh outcome goes under auth.refresh.* instead, without the user ID: no key is set twice. For the same
 // reason a session.Impersonator's outcome, which follows the Guard's, goes under auth.impersonation.*.
-// Without a wide event in ctx it does nothing.
+// Without a wide event in ctx it records nothing.
 func Observe(ctx context.Context, outcome auth.Outcome) {
 	we := wideevent.FromContext(ctx)
-	if we == nil {
-		return
-	}
 	prefix := requestPrefix
 	if outcome.Action == auth.ActionRefresh {
 		prefix = refreshPrefix
@@ -97,28 +93,13 @@ func Observe(ctx context.Context, outcome auth.Outcome) {
 	recordRequestOutcome(we, outcome)
 }
 
-// maximumQueryBytes bounds the recorded query: the client chooses its parameter names, and samplers
-// usually keep every refused request.
-const maximumQueryBytes = 512
-
-// RedactQuery is a wide-event pre-enricher: mount it with
-// wideevent.Middleware(wideevent.WithPreEnricher(ginadapter.RedactQuery)), or the code and state of
-// every OAuth callback reach your logs. The middleware records the raw query as request.query; RedactQuery
-// sets it again with every parameter name kept and every value replaced by "redacted", cut to 512 bytes.
-// The JSON emitters print the latest value of a key; the dev emitters print every value, the raw query
-// included, so keep those to development or emit only the latest values. Call it first from your own
-// pre-enricher when you need one.
-func RedactQuery(we *wideevent.Event, ginContext *gin.Context) {
-	redacted := url.Values{}
-	for name := range ginContext.Request.URL.Query() {
-		redacted.Set(name, "redacted")
-	}
-	query := redacted.Encode() // ASCII only: a byte cut leaves valid UTF-8
-	if len(query) > maximumQueryBytes {
-		query = query[:maximumQueryBytes]
-	}
-	we.Str("request.query", query)
-}
+// RedactQuery does nothing.
+//
+// Deprecated: the wide-event-logger v1 middleware (ginadapter.NewMiddleware) redacts request.query itself:
+// every value becomes "redacted" unless its parameter is in Options.QueryAllowlist. Drop RedactQuery from
+// your pre-enricher; it stays so enrichers that mount or call it keep compiling once they move to
+// wide-event-logger v1.
+func RedactQuery(we *wideevent.Event, ginContext *gin.Context) {}
 
 // The key prefixes of an outcome's fields.
 const (
@@ -142,9 +123,7 @@ func Require(check authorization.Check) gin.HandlerFunc {
 		if err == nil {
 			return
 		}
-		if we := wideevent.FromContext(ginContext.Request.Context()); we != nil {
-			recordDenial(we, err)
-		}
+		recordDenial(wideevent.FromContext(ginContext.Request.Context()), err)
 		auth.WriteError(ginContext.Writer, err)
 		ginContext.Abort()
 	}
@@ -166,9 +145,9 @@ func RequireMethodPermission(resource string) gin.HandlerFunc {
 }
 
 func recordDecision(we *wideevent.Event, prefix string, outcome auth.Outcome) {
-	we.Str(prefix+"provider", outcome.Provider).
-		Str(prefix+"action", string(outcome.Action)).
-		Str(prefix+"result", string(outcome.Result))
+	we.String(prefix+"provider", outcome.Provider).
+		String(prefix+"action", string(outcome.Action)).
+		String(prefix+"result", string(outcome.Result))
 }
 
 // recordOutcomeError records what the client was told and why. A denial's or failure's error itself
@@ -179,9 +158,9 @@ func recordOutcomeError(we *wideevent.Event, prefix string, outcome auth.Outcome
 		return
 	}
 	_, response := auth.ResponseFor(outcome.Err)
-	we.Str(prefix+"code", response.Code)
+	we.String(prefix+"code", response.Code)
 	if reason, _ := refusalReason(outcome.Err); reason != "" {
-		we.Str(prefix+"reason", reason)
+		we.String(prefix+"reason", reason)
 	}
 	switch outcome.Result {
 	case auth.ResultError:
@@ -199,9 +178,9 @@ func recordIdentity(we *wideevent.Event, prefix string, identity *auth.Identity)
 	if identity == nil {
 		return
 	}
-	we.Str(prefix+"subject", identity.Real().Subject)
+	we.String(prefix+"subject", identity.Real().Subject)
 	if identity.Impersonator != nil {
-		we.Bool(prefix+"impersonating", true).Str(prefix+"impersonated_subject", identity.Subject)
+		we.Bool(prefix+"impersonating", true).String(prefix+"impersonated_subject", identity.Subject)
 	}
 	if prefix == requestPrefix && identity.UserID != uuid.Nil {
 		we.UserID(identity.UserID)
@@ -231,7 +210,7 @@ func recordDenial(we *wideevent.Event, err error) {
 	}
 	we.Bool("authorization.denied", true)
 	if reason != "" {
-		we.Str("authorization.reason", reason)
+		we.String("authorization.reason", reason)
 	}
 	if status, _ := auth.ResponseFor(err); status == http.StatusInternalServerError {
 		we.Err("authorization.error", err)

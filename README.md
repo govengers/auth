@@ -77,7 +77,7 @@ Complete, tested servers: [password](examples/password/main.go), [OIDC with Keyc
 | [`apikey`](docs/wiki/API-Keys.md) | static and application-issued API keys |
 | [`jwt`](docs/wiki/JWT.md) | RS512 `Signer` with JWKS, `Verifier` with middleware |
 | [`authorization`](docs/wiki/Authorization.md) | `Check` primitives and combinators |
-| [`ginadapter`](docs/wiki/Gin.md) | net/http middleware and routes on gin, `Require`, wide-event `Observe`, `RedactQuery` |
+| [`ginadapter`](docs/wiki/Gin.md) | net/http middleware and routes on gin, `Require`, wide-event `Observe` |
 | [`prometheusadapter`](docs/wiki/Gin.md#prometheus) | outcome counter on your Prometheus registry |
 | [`cmd/forwardauth`](docs/wiki/Forward-Auth.md) | the forward-auth binary |
 
