@@ -50,9 +50,15 @@ func startIssuer(t *testing.T, configure func(options *fakeprovider.OIDCOptions)
 
 func newStore(t *testing.T) *session.Store {
 	t.Helper()
+	return newStoreWith(t, http.SameSiteLaxMode)
+}
+
+// newStoreWith returns a memory store whose cookie has sameSite.
+func newStoreWith(t *testing.T, sameSite http.SameSite) *session.Store {
+	t.Helper()
 	backend, err := session.NewMemoryBackend(nil)
 	require.NoError(t, err)
-	store, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: []byte("0123456789abcdef0123456789abcdef")})
+	store, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: []byte("0123456789abcdef0123456789abcdef"), SameSite: sameSite})
 	require.NoError(t, err)
 	return store
 }

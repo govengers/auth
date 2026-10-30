@@ -76,6 +76,7 @@ Without Keycloak, `OIDCRoles` (`realm_access.roles`), `OIDCClientRoles` (`resour
 
 ## Gotchas
 
+- `oidc.New` refuses a `Sessions` store whose cookie is SameSite Strict: the callback would arrive without it.
 - OIDC has no `Refresher`: roles and groups are read at login and stay until the session ends (`StoreOptions.MaximumAge`, default 24 h).
 - `/logout` refuses `Sec-Fetch-Site: cross-site` with 403: logout links must live on the app's own site.
 - Front-channel logout needs `StoreOptions.SameSite: http.SameSiteNoneMode` (https only), else the IdP's iframe gets no cookie.

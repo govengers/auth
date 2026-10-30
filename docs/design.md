@@ -403,7 +403,7 @@ type StoreOptions struct {
 	CookieName     string        // default "auth_session"; Secure, host-only and on "/": sent as "__Host-" + CookieName (an own "__Host-"/"__Secure-" prefix is kept and validated)
 	CookieDomain   string        // default "" (host-only cookie)
 	CookiePath     string        // default "/"
-	SameSite       http.SameSite // Lax (default), Strict or None; None requires InsecureCookie false (front-channel logout needs None); SameSiteDefaultMode (no attribute) is refused
+	SameSite       http.SameSite // Lax (default), Strict or None; None requires InsecureCookie false (front-channel logout needs None); Strict only for password-only stores (oidc and github refuse it, D41); SameSiteDefaultMode (no attribute) is refused
 	InsecureCookie bool          // drops the Secure attribute; local HTTP development only
 	MaximumAge     time.Duration // default 24h, at least 1s; absolute session lifetime, also the cookie Max-Age
 }
@@ -422,6 +422,8 @@ func (s *Store) Open(request *http.Request) (Session, error)
 func (s *Store) End(ctx context.Context, writer http.ResponseWriter, request *http.Request) error
 // MaximumAge returns the configured absolute session lifetime.
 func (s *Store) MaximumAge() time.Duration
+// SameSite returns the cookie's SameSite mode; oidc.New and github.New refuse http.SameSiteStrictMode (D41).
+func (s *Store) SameSite() http.SameSite
 
 // Session is a handle on one server-side session (value type, unexported fields: the backend ID, the store
 // and, on a handle Start returned, its one first save: the time Start issued it, shared by every copy and usable once). Values are AES-256-GCM sealed with a key derived per session
@@ -725,7 +727,7 @@ type Options struct {
 	ClaimMapper                  ClaimMapper       // default DefaultClaimMapper
 	AllowedEmailDomains          []string          // optional: requires email_verified=true and a matching domain (ASCII only, case-insensitive, exact; an IDN in its xn-- form)
 	DisableIframeLogoutDetection bool              // stop treating Sec-Fetch-Dest: iframe on /logout as front-channel (A-2.4); a cross-site iframe load of /logout is then refused (403)
-	Sessions                     *session.Store    // required
+	Sessions                     *session.Store    // required; not SameSite Strict (D41)
 	HTTPClient                   *http.Client      // default 10 s timeout; used for discovery, token exchange, JWKS
 	OnLogin                      auth.Hook         // e.g. keycloak.Client.Enrich, or an app closure calling it and then provisioning
 	OnLogout                     auth.LogoutHook
@@ -790,7 +792,7 @@ type Options struct {
 	AllowedTeams           []string      // required, >= 1, "org/team-slug" (one "/", no white space or control characters), case-insensitive
 	AdminTeams             []string      // members get auth.RoleAdmin; they still need an AllowedTeams membership
 	RelevantTeams          []string      // extra teams kept in Identity.Teams
-	Sessions               *session.Store // required
+	Sessions               *session.Store // required; not SameSite Strict (D41)
 	HTTPClient             *http.Client  // default 10 s timeout (token exchange, API, revocation)
 	OnLogin                auth.Hook
 	OnLogout               auth.LogoutHook
@@ -1510,6 +1512,7 @@ Decisions taken during implementation (29.10.2026, settled by the lead):
 | D38 | `MemoryBackend` also bounds the bytes it holds (`MaximumBytes`, default 64 MiB; expired entries first, then soonest expiring); the login state is JSON without HTML escaping and `SafeReturnPath` refuses invalid UTF-8. | Every anonymous login start stores its state: `json.Marshal` wrote each `<`, `>`, `&` of a 2048-byte return path as six bytes (12 KB a start, 1.2 GB at the entry cap), each invalid UTF-8 byte as `\ufffd`; an entry cap alone does not bound memory. |
 | D39 | The public listener reads at most 64 KiB of request line and headers; the wide event's client-controlled fields are cut to 512 bytes. | net/http's 1 MiB default let a client push up to 1 MiB of header bytes into every 401 or unmatched-path event, which the sampler always keeps. |
 | D40 | After the agent-docs pass (30.10.2026): the binary's query redaction moved into the library as `ginadapter.RedactQuery`, which the binary's pre-enricher calls. | Library consumers on gin mounted the wide-event middleware without redaction, so callback `code` and `state` reached their logs. |
+| D41 | After the agent-docs pass (30.10.2026): `session.Store.SameSite()`; `oidc.New` and `github.New` refuse a store whose cookie is SameSite Strict. Password-only stores may keep Strict. | A Strict cookie is withheld on the redirect back from the IdP or GitHub, so every callback failed with `login_expired` at runtime instead of at startup (the binary already refused `SESSION_SAME_SITE=strict`, D32). |
 
 ---
 

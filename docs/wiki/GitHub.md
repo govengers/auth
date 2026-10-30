@@ -51,7 +51,7 @@ Prefix `PathPrefix`, default `/auth/github`.
 
 | Option | Default | Note |
 |---|---|---|
-| `ClientID`, `ClientSecret`, `ExternalURL`, `Sessions` | required | |
+| `ClientID`, `ClientSecret`, `ExternalURL`, `Sessions` | required | `Sessions` must not be SameSite Strict |
 | `AllowedTeams` | required, at least one | `org/team-slug`, case-insensitive; everybody else gets 403 and no session |
 | `AdminTeams` | none | admin only together with an allowed team |
 | `RelevantTeams` | none | extra teams kept in `Identity.Teams` for your own checks |

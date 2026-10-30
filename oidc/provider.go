@@ -50,7 +50,7 @@ type Options struct {
 	ClaimMapper                  ClaimMapper     // default DefaultClaimMapper
 	AllowedEmailDomains          []string        // optional: requires email_verified=true and a matching domain (ASCII, case-insensitive, exact)
 	DisableIframeLogoutDetection bool            // stop treating Sec-Fetch-Dest: iframe on /logout as front-channel; a cross-site iframe load of /logout is then refused (403)
-	Sessions                     *session.Store  // required
+	Sessions                     *session.Store  // required; not SameSite Strict (the callback would arrive without the cookie)
 	HTTPClient                   *http.Client    // default 10 s timeout; used for discovery, token exchange, JWKS; a redirect fails the call
 	OnLogin                      auth.Hook       // e.g. keycloak.Client.Enrich, or an app closure calling it and then provisioning
 	OnLogout                     auth.LogoutHook // runs after a session was ended by /logout or /frontchannel-logout
@@ -256,6 +256,8 @@ func validateRequired(options *Options) error {
 		return errors.New("client ID and client secret are required")
 	case options.Sessions == nil:
 		return errors.New("sessions are required")
+	case options.Sessions.SameSite() == http.SameSiteStrictMode:
+		return errors.New("sessions must not use SameSite Strict: the callback would arrive without the session cookie")
 	case !redirect.IsSecureURL(options.Issuer):
 		return errors.New("issuer must be an https URL, or http on a loopback host")
 	}

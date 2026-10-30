@@ -27,7 +27,7 @@ The rules agents and humans get wrong most often, one line each with the page th
 - `LoginURL`, `ErrorURL` and `PostLogoutURL` are validated at startup and refuse fragments. [OIDC](OIDC.md#options-that-matter)
 - The cookie is named `__Host-<CookieName>` while it is Secure, host-only and on `/`; look for `__Host-auth_session`, not `auth_session`. [Sessions](Sessions.md#store)
 - Plain `http` off loopback loops every login unless `InsecureCookie` (`SESSION_INSECURE_COOKIE`) is set; local development only. [Sessions](Sessions.md#gotchas)
-- Front-channel logout needs `SameSite: None`; `Strict` breaks the OIDC and GitHub callbacks. [Sessions](Sessions.md#gotchas)
+- Front-channel logout needs `SameSite: None`; `oidc.New` and `github.New` refuse a `Strict` store (the callback would arrive without the cookie). [Sessions](Sessions.md#gotchas)
 - No component follows redirects of IdP, token, JWKS, Keycloak or GitHub endpoints (`redirect refused`); configure the final URLs. [OIDC](OIDC.md#gotchas)
 - Issuer, discovered endpoints, Keycloak and GitHub URLs must be `https`; `http` only on loopback hosts. [OIDC](OIDC.md#options-that-matter)
 

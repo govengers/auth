@@ -26,6 +26,16 @@ func validOptions(t *testing.T) *Options {
 	}
 }
 
+// strictStore returns a memory store whose cookie is SameSite Strict.
+func strictStore(t *testing.T) *session.Store {
+	t.Helper()
+	backend, err := session.NewMemoryBackend(nil)
+	require.NoError(t, err)
+	store, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: []byte("0123456789abcdef0123456789abcdef"), SameSite: http.SameSiteStrictMode})
+	require.NoError(t, err)
+	return store
+}
+
 func TestNewRefusesInvalidOptions(t *testing.T) {
 	testCases := []struct {
 		name   string
@@ -34,6 +44,7 @@ func TestNewRefusesInvalidOptions(t *testing.T) {
 		{name: "missing client ID", change: func(options *Options) { options.ClientID = "" }},
 		{name: "missing client secret", change: func(options *Options) { options.ClientSecret = "" }},
 		{name: "missing sessions", change: func(options *Options) { options.Sessions = nil }},
+		{name: "strict session cookie", change: func(options *Options) { options.Sessions = strictStore(t) }},
 		{name: "missing external URL", change: func(options *Options) { options.ExternalURL = "" }},
 		{name: "relative external URL", change: func(options *Options) { options.ExternalURL = "/app" }},
 		{name: "external URL with query", change: func(options *Options) { options.ExternalURL = "https://app.example.com/?x=1" }},

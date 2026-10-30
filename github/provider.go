@@ -43,7 +43,7 @@ type Options struct {
 	AllowedTeams           []string        // required, at least one, "org/team-slug", case-insensitive
 	AdminTeams             []string        // members get auth.RoleAdmin (they still need an AllowedTeams membership)
 	RelevantTeams          []string        // extra teams kept in Identity.Teams
-	Sessions               *session.Store  // required
+	Sessions               *session.Store  // required; not SameSite Strict (the callback would arrive without the cookie)
 	HTTPClient             *http.Client    // default 10 s timeout; token exchange, GitHub API, revocation (a redirect fails every call of the provider; HTTPClient(ctx, session) keeps this client's policy)
 	OnLogin                auth.Hook       // optional: maps or refuses the identity before the session exists
 	OnLogout               auth.LogoutHook // optional
@@ -95,6 +95,9 @@ func (p *Provider) LoginURL() string {
 func resolveOptions(options Options) (Options, error) {
 	if options.ClientID == "" || options.ClientSecret == "" || options.Sessions == nil {
 		return Options{}, errors.New("ClientID, ClientSecret and Sessions are required")
+	}
+	if options.Sessions.SameSite() == http.SameSiteStrictMode {
+		return Options{}, errors.New("sessions must not use SameSite Strict: the callback would arrive without the session cookie")
 	}
 	externalURL, err := redirect.ExternalURL(options.ExternalURL)
 	if err != nil {

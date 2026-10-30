@@ -12,7 +12,7 @@
 | `EncryptionKey` | required | exactly 32 bytes: `session.ParseKey(os.Getenv(...))`, generated with `openssl rand -base64 32`; same on every replica; changing it logs everyone out (no rotation list) |
 | `CookieName` | `auth_session` | sent as `__Host-auth_session` while the cookie is Secure, host-only and on `/` (the default) |
 | `CookieDomain`, `CookiePath` | host-only, `/` | either one drops the `__Host-` prefix |
-| `SameSite` | `http.SameSiteLaxMode` | `None` for OIDC front-channel logout (https only); `SameSiteDefaultMode` is refused |
+| `SameSite` | `http.SameSiteLaxMode` | `None` for OIDC front-channel logout (https only); `Strict` only without OIDC and GitHub providers; `SameSiteDefaultMode` is refused |
 | `InsecureCookie` | false | drops `Secure`; local plain-http development only |
 | `MaximumAge` | 24 h | absolute lifetime from the login, never extended by activity or refresh |
 
@@ -80,7 +80,7 @@ The Guard calls a provider's `Refresher` for identities whose last refresh is ol
 
 - Instances sharing `EncryptionKey`, Redis `KeyPrefix` and cookie name accept each other's sessions: give every application its own key and prefix.
 - Plain `http` on a host other than `localhost`/loopback: browsers drop the `Secure` cookie and every login loops; set `InsecureCookie` for local development only.
-- `SameSite: http.SameSiteStrictMode` withholds the cookie on the redirect back from the IdP; keep Lax for OIDC and GitHub.
+- `SameSite: http.SameSiteStrictMode` is for password-only stores: the browser withholds it on the redirect back from the IdP, so `oidc.New` and `github.New` refuse such a store.
 - No idle timeout: a session lives until logout, `MaximumAge` or a refusing refresh.
 
 Source: [session/](../../session/) ([store.go](../../session/store.go), [guard.go](../../session/guard.go), [session.go](../../session/session.go), [memory.go](../../session/memory.go)), [session/redisbackend/backend.go](../../session/redisbackend/backend.go).
