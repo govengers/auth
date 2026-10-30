@@ -86,8 +86,8 @@ func (p *Provider) verifyTOTP(writer http.ResponseWriter, request *http.Request)
 	return succeeded(http.StatusOK, auth.NewIdentityResponse(identity), identity)
 }
 
-// resumeVerification returns the user of the request's login pending verification. When that user is gone or
-// has no TOTP any more, it ends the pending session.
+// resumeVerification returns the user of the request's login pending verification. When that user is gone, has
+// no TOTP any more or changed the password or second factor since the password step, it ends the pending session.
 func (p *Provider) resumeVerification(writer http.ResponseWriter, request *http.Request) (*User, error) {
 	ctx := request.Context()
 	_, pending, err := p.openPendingLogin(ctx, request, purposeVerify)
@@ -100,6 +100,9 @@ func (p *Provider) resumeVerification(writer http.ResponseWriter, request *http.
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read password user %s: %w", pending.UserID, err)
+	}
+	if checkPendingStamp(pending, user) != nil {
+		return nil, p.endPendingLogin(writer, request, codeNoPendingLogin, credentialsChangedReason)
 	}
 	return user, nil
 }
