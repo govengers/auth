@@ -58,13 +58,15 @@ func (p *Provider) register(writer http.ResponseWriter, request *http.Request) r
 	return p.continueLogin(writer, request, user, http.StatusCreated)
 }
 
-// logout ends the request's session, whatever it holds, and tells OnLogout about the identity it had. A
-// cross-site request (logout CSRF) is refused before the session is touched.
+// logout ends the request's session, whatever it holds, and tells OnLogout about the identity it had, within
+// logoutTimeout. A cross-site request (logout CSRF) is refused before the session is touched.
 func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) reply {
 	if err := fetchmetadata.RefuseCrossSite(request); err != nil {
 		return refused(err)
 	}
-	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip OnLogout
+	// A disconnecting client must not skip OnLogout, a hanging dependency not hold the handler.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), p.logoutTimeout)
+	defer cancel()
 	identity, readError := p.sessionIdentity(ctx, request)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
 		return refused(fmt.Errorf("end session: %w", err)).degradedBy(readError)
@@ -169,7 +171,9 @@ func (p *Provider) verifyPassword(user *User, password string) (matched, rehash 
 }
 
 // upgradeHash replaces the user's stored hash with an Argon2id hash of password on the configured parameters,
-// unless the stored hash changed since the user was read (compare-and-swap).
+// unless the stored hash changed since the user was read (compare-and-swap), and sets it in user, so the session
+// the login opens is stamped with the new hash. When the swap lost to a concurrent password change, that stamp
+// matches nothing and the session ends at its first refresh.
 func (p *Provider) upgradeHash(ctx context.Context, user *User, password string) error {
 	newHash, err := Hash(password, p.options.HashParameters)
 	if err != nil {
@@ -178,5 +182,6 @@ func (p *Provider) upgradeHash(ctx context.Context, user *User, password string)
 	if err := p.options.Storage.UpdatePasswordHash(ctx, user.ID, user.PasswordHash, newHash); err != nil {
 		return fmt.Errorf("upgrade password hash of user %s: %w", user.ID, err)
 	}
+	user.PasswordHash = newHash
 	return nil
 }

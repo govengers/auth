@@ -62,7 +62,7 @@ func TestEmailPattern(t *testing.T) {
 	}
 }
 
-func TestPolicyCheck(t *testing.T) {
+func TestPolicyValidate(t *testing.T) {
 	everything := Policy{MinimumLength: 8, RequireUppercase: true, RequireLowercase: true, RequireDigit: true, RequireSpecial: true}
 	testCases := []struct {
 		name     string
@@ -72,6 +72,8 @@ func TestPolicyCheck(t *testing.T) {
 	}{
 		{name: "long enough", policy: Policy{MinimumLength: 12}, password: "abcdefghijkl", valid: true},
 		{name: "too short", policy: Policy{MinimumLength: 12}, password: "abcdefghijk"},
+		{name: "the zero policy is the default minimum of 12", password: "abcdefghijkl", valid: true},
+		{name: "the zero policy refuses 11 characters", password: "abcdefghijk"},
 		{name: "length counts characters, not bytes", policy: Policy{MinimumLength: 4}, password: "äöüß", valid: true},
 		{name: "multi-byte characters below the minimum", policy: Policy{MinimumLength: 5}, password: "äöüß"},
 		{name: "128 bytes", policy: Policy{MinimumLength: 1}, password: strings.Repeat("a", 128), valid: true},
@@ -86,7 +88,7 @@ func TestPolicyCheck(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			err := testCase.policy.check(testCase.password)
+			err := testCase.policy.Validate(testCase.password)
 			if testCase.valid {
 				require.NoError(t, err)
 				return

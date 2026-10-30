@@ -5,7 +5,8 @@
 //
 // Refusals are *auth.Error: ErrUnauthenticated when there is no identity, ErrForbidden otherwise,
 // with a Reason for the wide event that never reaches the client. Not and every primitive except
-// IsAuthenticated require an active identity, so a deactivated admin is not an admin.
+// IsAuthenticated require an active identity and, while impersonating, an active impersonator, so a
+// deactivated admin is not an admin.
 // A wiring mistake (a nil Check, All or Any without checks, HasPermission with an invalid permission)
 // fails with a plain error, answered 500, so it fails closed and Not cannot invert it into a pass.
 //
@@ -237,12 +238,14 @@ func activeIdentityWith(reason string, allowed func(identity *auth.Identity) boo
 	}
 }
 
-// inactiveRefusal returns the refusal of a missing (unauthenticated) or inactive (forbidden) identity, nil for an active one.
+// inactiveRefusal returns the refusal of a missing (unauthenticated) or inactive (forbidden) identity, nil for an
+// active one. While impersonating, both the identity and its impersonator must be active: a deactivated admin
+// keeps no access through the identity it impersonates.
 func inactiveRefusal(identity *auth.Identity) error {
 	if identity == nil {
 		return unauthenticated()
 	}
-	if !identity.Active {
+	if !identity.Active || !identity.Real().Active {
 		return forbidden(auth.ReasonInactive)
 	}
 	return nil

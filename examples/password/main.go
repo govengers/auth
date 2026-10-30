@@ -44,7 +44,7 @@ func run() error {
 	err := config.LoadConfig([]config.Value{
 		config.String("SESSION_ENCRYPTION_KEY").NotEmpty().Sensitive().Into(&encryptionKey), // openssl rand -base64 32
 		config.Bool("SESSION_INSECURE_COOKIE").Default(false).Into(&insecureCookie),
-		config.String("ADMINISTRATOR_PASSWORD").NotEmpty().Sensitive().Into(&administratorPassword), // at least 12 characters
+		config.String("ADMINISTRATOR_PASSWORD").NotEmpty().Sensitive().Into(&administratorPassword), // at least 12 characters (createUser checks)
 		config.String("ADDRESS").Default(":8080").Into(&address),
 	})
 	if err != nil {
@@ -63,13 +63,29 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
-	return server.ListenAndServe()
+	return newHTTPServer(address, handler).ListenAndServe()
 }
 
-// createUser stores a user with an Argon2id hash of plainPassword; your application does this in its own
-// sign-up or admin flow (or enables the provider's registration route).
+// newHTTPServer bounds what one client can hold: slow or endless requests, idle connections, header bytes.
+func newHTTPServer(address string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              address,
+		Handler:           handler,
+		MaxHeaderBytes:    64 << 10,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+}
+
+// createUser stores a user with an Argon2id hash of plainPassword, which must satisfy the provider's password
+// policy (the default, as newServer configures it); your application does this in its own sign-up or admin flow
+// (or enables the provider's registration route).
 func createUser(ctx context.Context, storage password.Storage, username, plainPassword string) (uuid.UUID, error) {
+	if err := (password.Policy{}).Validate(plainPassword); err != nil {
+		return uuid.Nil, fmt.Errorf("password of %s: %w", username, err)
+	}
 	hash, err := password.Hash(plainPassword, password.DefaultParameters())
 	if err != nil {
 		return uuid.Nil, err
@@ -91,7 +107,7 @@ func newServer(options *serverOptions) (http.Handler, error) {
 	provider, err := password.New(&password.Options{
 		Sessions:           store,
 		Storage:            options.Storage,
-		EnableRegistration: true,                                                   // POST /auth/password/register
+		EnableRegistration: true,                                                   // POST /auth/password/register: open sign-up for the demo
 		TOTP:               password.TOTPOptions{Enabled: true, Issuer: "Example"}, // optional second factor
 		OnLogin:            grantRoles(options.AdministratorID),
 	})

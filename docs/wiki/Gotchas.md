@@ -16,8 +16,8 @@ The rules agents and humans get wrong most often, one line each with the page th
 - `OnLogin` must not mutate its argument: return `identity.Clone()` with changes. [Authorization](Authorization.md#roles-from-your-application)
 - The password provider's `OnLogin` must keep `UserID`, or the login fails with 500. [Password](Password.md#gotchas)
 - `UserID` is `uuid.Nil` for OIDC, GitHub and API keys until your `OnLogin` (or `Resolver`) sets it; `HasUserID` never matches `uuid.Nil`. [Authorization](Authorization.md#identity-fields-and-who-fills-them)
-- Inactive identities (`Active: false`) pass only `IsAuthenticated`; a `Resolver` must set `Active: true`. [API-Keys](API-Keys.md#behaviour)
-- Roles from `OnLogin` and OIDC roles are fixed for the session's lifetime; only the password (user deleted) and GitHub (teams) refreshers change a running session. [Sessions](Sessions.md#refresh)
+- Inactive identities (`Active: false`), and identities impersonated by an inactive one, pass only `IsAuthenticated`; a `Resolver` must set `Active: true`. [API-Keys](API-Keys.md#behaviour)
+- Roles from `OnLogin` and OIDC roles are fixed for the session's lifetime; only the password (user deleted, password or second factor changed) and GitHub (teams) refreshers change a running session. [Sessions](Sessions.md#refresh)
 - The GitHub refresher re-derives `auth.RoleAdmin` from `AdminTeams` on every refresh, so an `OnLogin` that strips `admin` is undone; gate on a role of your own instead. [GitHub](GitHub.md#identity)
 - Browser sessions carry no `Permissions` unless a hook grants them; `HasPermission` alone locks interactive users out. [Authorization](Authorization.md#permissions)
 
@@ -34,7 +34,7 @@ The rules agents and humans get wrong most often, one line each with the page th
 
 ## Known limits
 
-- No rate limiting: rate-limit the password login and TOTP routes at the edge. [Password](Password.md#gotchas)
+- No rate limiting: rate-limit the password login, `POST {prefix}/register` (an anonymous Argon2id, like login) and TOTP routes at the edge. [Password](Password.md#gotchas)
 - No retries, no idle timeout, no key rotation list; changing `EncryptionKey` logs everyone out. [Sessions](Sessions.md#store)
 - `MemoryBackend` is for one replica at non-production scale; use `redisbackend` in production. [Sessions](Sessions.md#backends)
 - A stale `SaveIdentity` from your code can race a Guard refresh; use `Session.SwapIdentity`. [Sessions](Sessions.md#store)
