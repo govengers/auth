@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	wideevent "github.com/mxcd/go-wide-event-logger"
@@ -14,6 +15,9 @@ import (
 	"github.com/govengers/auth/ginadapter"
 	"github.com/govengers/auth/prometheusadapter"
 )
+
+// maximumFieldBytes bounds each client-controlled field of a wide event [LOG-009].
+const maximumFieldBytes = 512
 
 // ObserverOptions configure NewObserver.
 type ObserverOptions struct {
@@ -74,20 +78,38 @@ func latestFields(we *wideevent.Event) *wideevent.Event {
 
 // recordRequest is the wide-event pre-enricher: it replaces the query the middleware recorded verbatim
 // (callbacks carry code and state) [LOG-009] and records the version and what Traefik asks to forward.
-// Only the path of X-Forwarded-Uri is recorded, never its query.
+// Only the path of X-Forwarded-Uri is recorded, never its query. Every field a client controls is cut to
+// maximumFieldBytes, also those the middleware recorded: 401s and unmatched paths are always kept.
 func (s *Server) recordRequest(we *wideevent.Event, ginContext *gin.Context) {
-	we.Str("request.query", redactedQuery(ginContext.Request.URL.Query())).
+	request := ginContext.Request
+	we.Str("request.query", truncated(redactedQuery(request.URL.Query()))).
+		Str("request.path", truncated(request.URL.Path)).
+		Str("request.host", truncated(request.Host)).
+		Str("request.user_agent", truncated(request.UserAgent())).
+		Str("request.id", truncated(ginContext.GetHeader("X-Request-ID"))).
 		Str("service.version", s.options.Version)
 	if method := ginContext.GetHeader("X-Forwarded-Method"); method != "" {
-		we.Str("forward.method", method)
+		we.Str("forward.method", truncated(method))
 	}
 	if host := ginContext.GetHeader("X-Forwarded-Host"); host != "" {
-		we.Str("forward.host", host)
+		we.Str("forward.host", truncated(host))
 	}
 	if forwardedURI := ginContext.GetHeader("X-Forwarded-Uri"); forwardedURI != "" {
 		forwardedPath, _, _ := strings.Cut(forwardedURI, "?")
-		we.Str("forward.path", forwardedPath)
+		we.Str("forward.path", truncated(forwardedPath))
 	}
+}
+
+// truncated cuts value to at most maximumFieldBytes, at a character boundary.
+func truncated(value string) string {
+	if len(value) <= maximumFieldBytes {
+		return value
+	}
+	cut := maximumFieldBytes
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut]
 }
 
 // redactedQuery keeps every parameter name and replaces every value with "redacted".

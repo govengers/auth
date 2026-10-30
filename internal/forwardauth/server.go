@@ -38,6 +38,7 @@ const (
 	bearerPrefix          = "Bearer "
 	readinessCheckTimeout = 2 * time.Second
 	shutdownTimeout       = 20 * time.Second // below the 30 s default termination grace period [LAY-003]
+	maximumHeaderBytes    = 64 << 10
 
 	// MaximumPort is the highest TCP port.
 	MaximumPort = 65535
@@ -110,11 +111,15 @@ func newMetricsServer(port int, registry *prometheus.Registry, errorLog *log.Log
 	return newHTTPServer(port, routes, errorLog)
 }
 
-// newHTTPServer bounds every phase of a connection, so slow or idle clients cannot hold it [LAY-006, MET-001].
+// newHTTPServer bounds every phase of a connection, so slow or idle clients cannot hold it [LAY-006, MET-001],
+// and the request line with the headers to 64 KiB (net/http answers 431 above): Traefik forwards the
+// client's headers, large cookies fit, and net/http's 1 MiB default would let a client push that into
+// every always-kept event.
 func newHTTPServer(port int, handler http.Handler, errorLog *log.Logger) *http.Server {
 	return &http.Server{
 		Addr:              ":" + strconv.Itoa(port),
 		Handler:           handler,
+		MaxHeaderBytes:    maximumHeaderBytes,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,

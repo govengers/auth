@@ -13,8 +13,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	wideevent "github.com/mxcd/go-wide-event-logger"
@@ -547,4 +549,63 @@ func TestMethodLabelBoundsTheMethods(t *testing.T) {
 func TestMain(m *testing.M) {
 	gin.SetMode(gin.TestMode)
 	goleak.VerifyTestMain(m)
+}
+
+func TestThePublicListenerAnswersOversizedHeadersWith431(t *testing.T) {
+	testHarness := newHarness(t, harnessOptions{})
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	var connections sync.WaitGroup // a 431 connection lingers 500 ms after the answer; goleak waits for none
+	testHarness.server.httpServer.ConnState = func(_ net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateNew:
+			connections.Add(1)
+		case http.StateClosed, http.StateHijacked:
+			connections.Done()
+		case http.StateActive, http.StateIdle:
+		}
+	}
+	served := make(chan error, 1)
+	go func() { served <- testHarness.server.httpServer.Serve(listener) }()
+	t.Cleanup(func() {
+		require.NoError(t, testHarness.server.httpServer.Close())
+		require.ErrorIs(t, <-served, http.ErrServerClosed)
+		connections.Wait()
+	})
+	transport := &http.Transport{}
+	t.Cleanup(transport.CloseIdleConnections)
+	statusWith := func(headerBytes int) int {
+		request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+listener.Addr().String()+"/auth/health", nil)
+		require.NoError(t, err)
+		request.Header.Set("Cookie", "large="+strings.Repeat("a", headerBytes))
+		response, err := (&http.Client{Transport: transport}).Do(request)
+		require.NoError(t, err)
+		require.NoError(t, response.Body.Close())
+		return response.StatusCode
+	}
+
+	require.Equal(t, http.StatusOK, statusWith(60<<10), "large cookies fit")
+	require.Equal(t, http.StatusRequestHeaderFieldsTooLarge, statusWith(80<<10), "64 KiB plus the slack net/http reads ahead")
+}
+
+func TestClientControlledEventFieldsAreCut(t *testing.T) {
+	testHarness := newHarness(t, harnessOptions{})
+	long := strings.Repeat("a", 1000)
+
+	testHarness.serve(t, http.MethodGet, "/"+long+"?"+long+"=1", http.Header{
+		"User-Agent": {strings.Repeat("€", 400)}, "X-Request-Id": {long},
+		"X-Forwarded-Method": {long}, "X-Forwarded-Host": {long}, "X-Forwarded-Uri": {"/" + long},
+	})
+
+	event := testHarness.events.last(t)
+	request := event["request"].(map[string]any)
+	for _, field := range []string{"path", "query", "id"} {
+		require.Len(t, request[field], 512, field)
+	}
+	userAgent := request["user_agent"].(string)
+	require.Len(t, userAgent, 510, "cut before the character that would cross 512 bytes")
+	require.True(t, utf8.ValidString(userAgent))
+	for _, field := range []string{"method", "host", "path"} {
+		require.Len(t, event["forward"].(map[string]any)[field], 512, "forward."+field)
+	}
 }
