@@ -1,5 +1,8 @@
 name: CI
 
+# Lint, tests, e2e and vulncheck on every push and pull request; on a push to main or a v* tag, the image
+# ghcr.io/govengers/forwardauth is published only after all of them passed: :main on main, :1.2.3, :1.2, :1 and
+# :latest on a v1.2.3 tag (the moving tags only when the tag is the newest release they cover).
 on:
   push:
     branches: [main]
@@ -16,3 +19,88 @@ jobs:
       e2e: true
     permissions:
       contents: write # the badges job pushes test and coverage badges to the badges branch
+
+  image:
+    name: build, attest and push ghcr.io/govengers/forwardauth
+    needs: go-library
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # One run per ref at a time, the newest last: a slower run of an older main commit cannot re-point :main.
+    # Tags get a group each (a shared group would drop a queued release); which moving tags a tag may move is
+    # decided from the repository's tags, not from run order.
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io with the workflow token
+      id-token: write # sign the build provenance attestation (Sigstore, keyless)
+      attestations: write # store the attestation with the repository
+    # Third-party actions are pinned by commit SHA: this job holds packages: write, and a moved tag must not
+    # change what runs with it. GitHub's own actions keep their major tag, as in govengers/.github.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # all tags, to tell whether this tag is the newest release
+
+      # A tag moves :latest, :<major> and :<major>.<minor> only when it is the highest stable version they
+      # cover, so a backport (v1.0.5 after v1.1.0) or a late push of an older tag never moves them back.
+      - id: newest
+        name: decide which moving tags this release may move
+        env:
+          TAG: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          newest() { git tag --list "$1" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1; }
+          is_newest() { if [ "$REF_TYPE" = tag ] && [ "$(newest "$1")" = "$TAG" ]; then echo true; else echo false; fi; }
+          major="${TAG%%.*}"
+          minor="${TAG%.*}"
+          {
+            echo "latest=$(is_newest 'v*')"
+            echo "major=$(is_newest "${major}.*")"
+            echo "minor=$(is_newest "${minor}.*")"
+          } >> "$GITHUB_OUTPUT"
+
+      # The builder stage cross-compiles (--platform=$BUILDPLATFORM) and the runtime stage only copies a file,
+      # so the arm64 image needs no QEMU.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ghcr.io/govengers/forwardauth
+          flavor: latest=false
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.newest.outputs.minor }}
+            type=semver,pattern={{major}},enable=${{ steps.newest.outputs.major }}
+            type=raw,value=latest,enable=${{ steps.newest.outputs.latest }}
+            type=sha
+
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: docker/forwardauth.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Consumers verify the image came from this workflow:
+      # gh attestation verify oci://ghcr.io/govengers/forwardauth@<digest> --repo govengers/auth
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/govengers/forwardauth
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
