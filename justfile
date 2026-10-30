@@ -56,5 +56,22 @@ test-e2e:
 vulncheck:
     {{govulncheck}} ./...
 
+# Mirror docs/wiki to the GitHub wiki (the repository stays the source; links become GitHub URLs)
+wiki:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target="$(mktemp -d)"
+    trap 'rm -rf "$target"' EXIT
+    git clone --quiet https://github.com/govengers/auth.wiki.git "$target"
+    find "$target" -maxdepth 1 -name '*.md' -delete
+    blob=https://github.com/govengers/auth/blob/main
+    for page in docs/wiki/*.md; do
+        sed -E -e "s|\]\(\.\./\.\./([^)]*)\)|](${blob}/\1)|g" -e "s|\]\(\.\./([^)]*)\)|](${blob}/docs/\1)|g" -e 's|\]\(([A-Za-z-]+)\.md(#[^)]*)?\)|](\1\2)|g' "$page" > "$target/$(basename "$page")"
+    done
+    printf 'Mirror of [docs/wiki](%s/docs/wiki) at %s. Edit the repository, not this wiki.\n' "$blob" "$(git rev-parse --short HEAD)" > "$target/_Footer.md"
+    git -C "$target" add -A
+    git -C "$target" diff --cached --quiet || git -C "$target" commit --quiet -m "Mirror docs/wiki at $(git rev-parse --short HEAD)"
+    git -C "$target" push --quiet
+
 # Everything CI runs
 check: lint test test-e2e vulncheck

@@ -101,7 +101,7 @@ Guarantees and known limits (no rate limiting, among others): [docs/wiki/Securit
 
 ## Contributing
 
-`just check` runs lint, unit tests with `-race` and an 80 % coverage gate (total and per package), both end-to-end suites and `govulncheck`; `just docker-build` builds the image. Code follows the [govengers standards](https://github.com/govengers/standards) with the `library` profile (`.govengers.yml`; one waived rule, DES-008, reason in the file); reviewers also apply the service rules (CFG, LAY, LOG, MET, DEP, API-001, API-002) to `cmd/forwardauth` and `internal/forwardauth`. CI, image and e2e details: [docs/infrastructure-notes.md](docs/infrastructure-notes.md). Releases: push a `vX.Y.Z` tag; the release workflow publishes the image. After the very first push the GHCR package must be made public once by hand (package settings; there is no API for it).
+`just check` runs lint, unit tests with `-race` and an 80 % coverage gate (total and per package), both end-to-end suites and `govulncheck`; `just docker-build` builds the image. Code follows the [govengers standards](https://github.com/govengers/standards) with the `library` profile (`.govengers.yml`; one waived rule, DES-008, reason in the file); reviewers also apply the service rules (CFG, LAY, LOG, MET, DEP, API-001, API-002) to `cmd/forwardauth` and `internal/forwardauth`. CI, image and e2e details: [docs/infrastructure-notes.md](docs/infrastructure-notes.md). `docs/wiki` is the source of the GitHub wiki; `just wiki` mirrors it after a docs change. Releases: push a `vX.Y.Z` tag; the release workflow publishes the image. After the very first push the GHCR package must be made public once by hand (package settings; there is no API for it).
 
 ## License
 
