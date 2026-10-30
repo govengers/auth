@@ -148,7 +148,7 @@ func bearerIdentity(t *testing.T, whoamiBody string) *auth.Identity {
 		}
 	}
 	require.NotEmpty(t, token, whoamiBody)
-	verifier, err := jwt.NewVerifier(t.Context(), &jwt.VerifierOptions{JWKSURL: appURL + "/auth/jwks", Issuer: appURL})
+	verifier, err := jwt.NewVerifier(t.Context(), &jwt.VerifierOptions{JWKSURL: appURL + "/auth/jwks", Issuer: appURL, Audience: "app"}) // JWT_AUDIENCE in compose.yml
 	require.NoError(t, err)
 	identity, err := verifier.Verify(t.Context(), token)
 	require.NoError(t, err)
