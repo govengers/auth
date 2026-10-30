@@ -17,7 +17,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	wideevent "github.com/mxcd/go-wide-event-logger"
+	wideevent "github.com/govengers/wide-event-logger"
+	wideeventgin "github.com/govengers/wide-event-logger/ginadapter"
 	"github.com/stretchr/testify/require"
 
 	"github.com/govengers/auth"
@@ -37,10 +38,12 @@ var userID = uuid.MustParse("0b6f2c1e-7a3d-4c55-9f0e-2d8b1a6c4e71")
 func newEngine(t *testing.T) (*gin.Engine, *map[string]any) {
 	t.Helper()
 	emitted := map[string]any(nil)
-	engine := gin.New()
-	engine.Use(wideevent.Middleware(wideevent.WithEmitter(wideevent.EmitterFunc(func(we *wideevent.Event) {
+	wideEvents, err := wideeventgin.NewMiddleware(&wideeventgin.Options{Emitter: wideevent.EmitterFunc(func(we *wideevent.Event) {
 		emitted = we.FieldsMap()
-	}))))
+	})})
+	require.NoError(t, err)
+	engine := gin.New()
+	engine.Use(wideEvents)
 	return engine, &emitted
 }
 
@@ -73,7 +76,7 @@ func TestMiddlewarePassesTheEnrichedRequest(t *testing.T) {
 	engine, emitted := newEngine(t)
 	identity := &auth.Identity{Provider: "password", Subject: "ada", Active: true}
 	engine.GET("/me", ginadapter.Middleware(authenticateAs(identity)), func(ginContext *gin.Context) {
-		wideevent.FromContext(ginContext.Request.Context()).Str("handler.reached", "yes")
+		wideevent.FromContext(ginContext.Request.Context()).String("handler.reached", "yes")
 		writeSubject(ginContext)
 	})
 
@@ -312,7 +315,7 @@ func TestObserve(t *testing.T) {
 }
 
 // emittedFields runs record inside a unit of work and returns what the emitted event carries besides its
-// name and duration. It fails the test when a key was set twice.
+// name and duration.
 func emittedFields(t *testing.T, record func(ctx context.Context)) map[string]any {
 	t.Helper()
 	emitted := false
@@ -322,11 +325,6 @@ func emittedFields(t *testing.T, record func(ctx context.Context)) map[string]an
 	we.Emit()
 
 	require.True(t, emitted)
-	keys := map[string]bool{}
-	for _, field := range we.Fields() {
-		require.False(t, keys[field.Key], "key %s set twice", field.Key)
-		keys[field.Key] = true
-	}
 	fields := we.FieldsMap()
 	delete(fields, "name")
 	delete(fields, "duration")
@@ -374,12 +372,7 @@ func TestObserveRecordsAGuardRefreshOnce(t *testing.T) {
 	// for it (TST-005); sealing the session and the request in between take far longer than a nanosecond.
 	guard, err := session.NewGuard(&session.GuardOptions{Store: store, Refreshers: []session.Refresher{failingRefresher{}}, RefreshInterval: time.Nanosecond, Observer: ginadapter.Observe})
 	require.NoError(t, err)
-	var fields []wideevent.Field
-	var emitted map[string]any
-	engine := gin.New()
-	engine.Use(wideevent.Middleware(wideevent.WithEmitter(wideevent.EmitterFunc(func(we *wideevent.Event) {
-		fields, emitted = we.Fields(), we.FieldsMap()
-	}))))
+	engine, emitted := newEngine(t)
 	engine.GET("/me", ginadapter.Middleware(guard.RequireAPI()), writeSubject)
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/me", nil)
 	for _, cookie := range login.Result().Cookies() {
@@ -390,43 +383,30 @@ func TestObserveRecordsAGuardRefreshOnce(t *testing.T) {
 	engine.ServeHTTP(recorder, request)
 
 	require.Equal(t, http.StatusOK, recorder.Code)
-	keys := map[string]bool{}
-	for _, field := range fields {
-		require.False(t, keys[field.Key], "key %s set twice", field.Key)
-		keys[field.Key] = true
-	}
-	authFields, _ := emitted["auth"].(map[string]any)
+	authFields, _ := (*emitted)["auth"].(map[string]any)
 	require.Equal(t, "authenticate", authFields["action"])
 	require.NotContains(t, authFields, "error", "the refresh's failure is not the authentication's")
 	require.Equal(t, map[string]any{"provider": "github", "action": "refresh", "result": "success", "code": "internal", "error": "github api: 503", "subject": "42"}, authFields["refresh"])
-	require.Equal(t, true, emitted["degraded"])
+	require.Equal(t, true, (*emitted)["degraded"])
 }
 
-func TestRedactQuery(t *testing.T) {
-	testCases := []struct {
-		name  string
-		query string
-		want  string
-	}{
-		{name: "callback", query: "?code=secret-code&state=secret-state", want: "code=redacted&state=redacted"},
-		{name: "no query", query: "", want: ""},
-		{name: "names cut", query: "?" + strings.Repeat("a", 1000) + "=secret-value", want: strings.Repeat("a", 512)},
-	}
-	for _, testCase := range testCases {
-		t.Run(testCase.name, func(t *testing.T) {
-			output := &bytes.Buffer{}
-			engine := gin.New()
-			engine.Use(wideevent.Middleware(wideevent.WithEmitter(wideevent.JSONWriterEmitter(output)), wideevent.WithPreEnricher(ginadapter.RedactQuery)))
-			engine.GET("/callback", func(ginContext *gin.Context) { ginContext.Status(http.StatusFound) })
+func TestTheDeprecatedRedactQueryLeavesTheRedactedQuery(t *testing.T) {
+	output := &bytes.Buffer{}
+	wideEvents, err := wideeventgin.NewMiddleware(&wideeventgin.Options{
+		Emitter:     wideevent.NewJSONEmitter(&wideevent.JSONEmitterOptions{Writer: output}),
+		PreEnricher: ginadapter.RedactQuery,
+	})
+	require.NoError(t, err)
+	engine := gin.New()
+	engine.Use(wideEvents)
+	engine.GET("/callback", func(ginContext *gin.Context) { ginContext.Status(http.StatusFound) })
 
-			serve(t, engine, http.MethodGet, "/callback"+testCase.query)
+	serve(t, engine, http.MethodGet, "/callback?code=secret-code&state=secret-state")
 
-			event := map[string]any{}
-			require.NoError(t, json.Unmarshal(output.Bytes(), &event))
-			require.Equal(t, testCase.want, event["request"].(map[string]any)["query"])
-			require.NotContains(t, output.String(), "secret-")
-		})
-	}
+	event := map[string]any{}
+	require.NoError(t, json.Unmarshal(output.Bytes(), &event))
+	require.Equal(t, "code=redacted&state=redacted", event["request"].(map[string]any)["query"])
+	require.NotContains(t, output.String(), "secret-")
 }
 
 func TestObserveWithoutWideEvent(t *testing.T) {

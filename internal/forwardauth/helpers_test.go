@@ -7,13 +7,14 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 
-	wideevent "github.com/mxcd/go-wide-event-logger"
+	wideevent "github.com/govengers/wide-event-logger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
@@ -188,4 +189,17 @@ func (h *harness) serve(t *testing.T, method, target string, header http.Header,
 
 func testIdentity() *auth.Identity {
 	return &auth.Identity{Provider: "oidc", Subject: "user-1", Username: "alice", Active: true, Roles: []string{"admin"}}
+}
+
+// newDevEmitter and newJSONEmitter are the two emitters the binary chooses from, writing to writer.
+func newDevEmitter(t *testing.T, writer io.Writer) wideevent.Emitter {
+	t.Helper()
+	emitter, err := wideevent.NewDevEmitter(&wideevent.DevEmitterOptions{Writer: writer})
+	require.NoError(t, err)
+	return emitter
+}
+
+func newJSONEmitter(t *testing.T, writer io.Writer) wideevent.Emitter {
+	t.Helper()
+	return wideevent.NewJSONEmitter(&wideevent.JSONEmitterOptions{Writer: writer})
 }
