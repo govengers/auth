@@ -10,7 +10,7 @@ From [examples/password/main.go](../../examples/password/main.go) (tested by its
 	provider, err := password.New(&password.Options{
 		Sessions:           store,
 		Storage:            options.Storage,
-		EnableRegistration: true,                                                   // POST /auth/password/register
+		EnableRegistration: true,                                                   // POST /auth/password/register: open sign-up for the demo
 		TOTP:               password.TOTPOptions{Enabled: true, Issuer: "Example"}, // optional second factor
 		OnLogin:            grantRoles(options.AdministratorID),
 	})
@@ -80,7 +80,7 @@ Prefix `PathPrefix`, default `/auth/password`. The provider reads sessions itsel
 
 ## Changing a password
 
-The provider has no password-change or reset route; your application does it: confirm the current password (`password.Verify` against the stored hash, or a fresh login), then `Storage.UpdatePasswordHash(ctx, id, currentHash, password.Hash(newPassword, parameters))`. Every session of the user, including the one that asked for the change, ends within `RefreshInterval` (default 1 minute), and the TOTP routes refuse them at once; let the user log in again with the new password.
+The provider has no password-change or reset route; your application does it: confirm the current password (`password.Verify` against the stored hash, or a fresh login), check the new one with `Policy.Validate` (the provider's `Options.Policy`), then `Storage.UpdatePasswordHash(ctx, id, currentHash, password.Hash(newPassword, parameters))`. Every session of the user, including the one that asked for the change, ends within `RefreshInterval` (default 1 minute), and the TOTP routes refuse them at once; let the user log in again with the new password.
 
 ## Refusal codes
 

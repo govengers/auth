@@ -37,7 +37,7 @@ Provider, Guard and routes, from [examples/password/main.go](examples/password/m
 	provider, err := password.New(&password.Options{
 		Sessions:           store,
 		Storage:            options.Storage,
-		EnableRegistration: true,                                                   // POST /auth/password/register
+		EnableRegistration: true,                                                   // POST /auth/password/register: open sign-up for the demo
 		TOTP:               password.TOTPOptions{Enabled: true, Issuer: "Example"}, // optional second factor
 		OnLogin:            grantRoles(options.AdministratorID),
 	})
