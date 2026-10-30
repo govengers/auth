@@ -21,10 +21,12 @@ import (
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/internal/failure"
+	"github.com/govengers/auth/internal/redirect"
 )
 
 const (
 	defaultRefreshInterval = time.Hour
+	defaultMaximumKeyAge   = 24 * time.Hour
 	minimumFetchSpacing    = time.Minute
 	clockSkew              = 30 * time.Second
 	defaultHTTPTimeout     = 10 * time.Second
@@ -35,10 +37,11 @@ const (
 
 // VerifierOptions configure a Verifier.
 type VerifierOptions struct {
-	JWKSURL         string        // required: absolute http(s) URL of the signer's JWKS (at most 1 MiB); only its RSA keys with an RSA signature alg (RS*, PS*), a kid and use "sig" (or none) count
+	JWKSURL         string        // required: https URL (http only on a loopback host) of the signer's JWKS (at most 1 MiB), without user info; only its RSA keys with an RSA signature alg (RS*, PS*), a kid and use "sig" (or none) count
 	Issuer          string        // required: expected iss
-	Audience        string        // optional: when set, aud must contain it
+	Audience        string        // required: aud must contain it
 	RefreshInterval time.Duration // default 1 h, at least 1 min; an unknown kid triggers a refetch at most once per minute
+	MaximumKeyAge   time.Duration // default 24 h, at least RefreshInterval: keys stop being trusted this long after the last successful fetch
 	HTTPClient      *http.Client  // default 10 s timeout; a redirect fails the JWKS fetch
 	HeaderName      string        // default "Authorization", value "Bearer <token>"
 	Observer        auth.Observer // optional; Middleware reports one ActionAuthenticate outcome per request
@@ -48,14 +51,16 @@ type VerifierOptions struct {
 // cache and starts no goroutine: Verify refetches the JWKS lazily, after RefreshInterval or for an
 // unknown key ID, at most once per minute; the refetch is not cancelled with the triggering request and
 // takes at most 10 s. Meanwhile verifications with a known key ID go on with the current keys, those
-// with an unknown one wait for it or for the end of their request. It is safe for concurrent use.
+// with an unknown one wait for it or for the end of their request. Keys older than MaximumKeyAge count as
+// unknown, so a key the signer rotated out is not trusted forever while its JWKS is unreachable. It is
+// safe for concurrent use.
 type Verifier struct {
 	options VerifierOptions
 	now     func() time.Time
 
 	mutex       sync.Mutex // guards the fields below; never held during a JWKS fetch
 	keys        jwk.Set
-	fetchedAt   time.Time     // last successful fetch
+	fetchedAt   time.Time     // last successful fetch, the age of keys
 	attemptedAt time.Time     // last fetch, successful or not
 	fetchDone   chan struct{} // closed when the fetch in flight ends; nil without one
 }
@@ -84,11 +89,21 @@ func resolveVerifierOptions(options *VerifierOptions) (VerifierOptions, error) {
 	if resolved.Issuer == "" {
 		return VerifierOptions{}, errors.New("new JWT verifier: Issuer is required")
 	}
+	// Without aud a token minted for any other backend of the same signer would pass.
+	if resolved.Audience == "" {
+		return VerifierOptions{}, errors.New("new JWT verifier: Audience is required")
+	}
 	if resolved.RefreshInterval == 0 {
 		resolved.RefreshInterval = defaultRefreshInterval
 	}
 	if resolved.RefreshInterval < minimumFetchSpacing {
 		return VerifierOptions{}, fmt.Errorf("new JWT verifier: RefreshInterval %s is below %s", resolved.RefreshInterval, minimumFetchSpacing)
+	}
+	if resolved.MaximumKeyAge == 0 {
+		resolved.MaximumKeyAge = defaultMaximumKeyAge
+	}
+	if resolved.MaximumKeyAge < resolved.RefreshInterval {
+		return VerifierOptions{}, fmt.Errorf("new JWT verifier: MaximumKeyAge %s is below RefreshInterval %s", resolved.MaximumKeyAge, resolved.RefreshInterval)
 	}
 	if resolved.HTTPClient == nil {
 		resolved.HTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
@@ -110,8 +125,9 @@ func validateJWKSURL(jwksURL string) error {
 		}
 		return fmt.Errorf("JWKSURL is no URL: %w", err)
 	}
-	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return fmt.Errorf("JWKSURL %s must be an absolute http or https URL", redactedURL(parsed))
+	// The keys decide which tokens pass; fetched over plain http, anyone on the way could swap them (D16).
+	if !redirect.IsSecureURL(jwksURL) {
+		return fmt.Errorf("JWKSURL %s must be an https URL, or http on a loopback host, without user info", redactedURL(parsed))
 	}
 	return nil
 }
@@ -126,7 +142,8 @@ func redactedURL(location *url.URL) string {
 // the fields of the package claim table and Claims = all claims of the token. Claims of the wrong type
 // are skipped. An invalid token is an *auth.Error{Kind: auth.ErrUnauthenticated, Code: "invalid_token"};
 // a failed JWKS fetch for an unknown kid is a plain error. A failed periodic refresh keeps the previous
-// keys (Middleware reports it as a degraded outcome).
+// keys (Middleware reports it as a degraded outcome) until they are MaximumKeyAge old; from then on every
+// token is a plain error until a fetch succeeds.
 func (v *Verifier) Verify(ctx context.Context, token string) (*auth.Identity, error) {
 	// The refresh error is survived with the previous keys; Verify has no channel for it, Middleware reports it.
 	identity, _, err := v.verify(ctx, token)
@@ -175,7 +192,8 @@ func keyIDOf(token string) (string, error) {
 
 // keysFor returns the keys to verify a token with key ID keyID, refetching them first when they are
 // stale or lack keyID and the last fetch is at least a minute ago. A failed refetch is err when the
-// keys lack keyID, and refreshError (the previous keys are returned) when they have it.
+// keys lack keyID or are older than MaximumKeyAge, and refreshError (the previous keys are returned)
+// otherwise.
 func (v *Verifier) keysFor(ctx context.Context, keyID string) (keys jwk.Set, refreshError, err error) {
 	claim, err := v.claimFetch(ctx, keyID)
 	if err != nil {
@@ -200,8 +218,8 @@ func (v *Verifier) keysFor(ctx context.Context, keyID string) (keys jwk.Set, ref
 	}
 }
 
-// fetchClaim is what claimFetch found: the current keys, whether they have the key ID, and fetchDone,
-// non-nil when the caller claimed a fetch.
+// fetchClaim is what claimFetch found: the current keys, whether they have the key ID and are trusted
+// (knows), and fetchDone, non-nil when the caller claimed a fetch.
 type fetchClaim struct {
 	keys      jwk.Set
 	known     bool
@@ -211,11 +229,12 @@ type fetchClaim struct {
 // claimFetch returns the current keys and whether they have keyID. When a fetch is due it claims it and
 // returns a non-nil fetchDone: the caller fetches without the mutex and ends the claim with endFetch.
 // While a fetch is in flight, a known keyID goes on with the current keys and an unknown one waits for
-// the fetch (at most 10 s), which may bring it, or until ctx ends; err is then ctx's error.
+// the fetch (at most 10 s), which may bring it, or until ctx ends; err is then ctx's error. Keys older
+// than MaximumKeyAge are an error when no fetch is due: the last one failed less than a minute ago.
 func (v *Verifier) claimFetch(ctx context.Context, keyID string) (fetchClaim, error) {
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
-	_, known := v.keys.LookupKeyID(keyID)
+	known := v.knows(keyID)
 	for v.fetchDone != nil && !known {
 		inFlight := v.fetchDone
 		v.mutex.Unlock()
@@ -224,9 +243,12 @@ func (v *Verifier) claimFetch(ctx context.Context, keyID string) (fetchClaim, er
 		if err != nil {
 			return fetchClaim{}, err
 		}
-		_, known = v.keys.LookupKeyID(keyID)
+		known = v.knows(keyID)
 	}
 	if v.fetchDone != nil || !v.fetchDue(known) {
+		if v.keysExpired() {
+			return fetchClaim{}, fmt.Errorf("JWKS keys are older than MaximumKeyAge %s and the last refetch failed", v.options.MaximumKeyAge)
+		}
 		return fetchClaim{keys: v.keys, known: known}, nil
 	}
 	v.fetchDone = make(chan struct{})
@@ -249,6 +271,16 @@ func (v *Verifier) endFetch(fetchDone chan struct{}) {
 	defer v.mutex.Unlock()
 	v.fetchDone = nil
 	close(fetchDone)
+}
+
+// knows reports whether the current keys have keyID and are still trusted. The caller holds the mutex.
+func (v *Verifier) knows(keyID string) bool {
+	_, found := v.keys.LookupKeyID(keyID)
+	return found && !v.keysExpired()
+}
+
+func (v *Verifier) keysExpired() bool {
+	return v.now().Sub(v.fetchedAt) >= v.options.MaximumKeyAge
 }
 
 func (v *Verifier) fetchDue(keyKnown bool) bool {
@@ -334,17 +366,14 @@ func hasRSASignatureAlgorithm(key jwk.Key) bool {
 }
 
 func (v *Verifier) parseOptions(keys jwk.Set) []jwxjwt.ParseOption {
-	options := []jwxjwt.ParseOption{
+	return []jwxjwt.ParseOption{
 		jwxjwt.WithKeySet(keys),
 		jwxjwt.WithIssuer(v.options.Issuer),
+		jwxjwt.WithAudience(v.options.Audience),
 		jwxjwt.WithRequiredClaim(jwxjwt.ExpirationKey),
 		jwxjwt.WithAcceptableSkew(clockSkew),
 		jwxjwt.WithClock(jwxjwt.ClockFunc(v.now)),
 	}
-	if v.options.Audience != "" {
-		options = append(options, jwxjwt.WithAudience(v.options.Audience))
-	}
-	return options
 }
 
 // claimsOf returns the claims of a verified token as JSON values (numbers are float64).

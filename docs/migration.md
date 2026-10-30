@@ -351,13 +351,23 @@ Notes: the old github image already took a base64 32-byte `SESSION_ENCRYPTION_KE
 
 ```go
 verifier := must(jwt.NewVerifier(ctx, &jwt.VerifierOptions{
-	JWKSURL: "http://forwardauth:8080/auth/jwks",
-	Issuer:  "https://app.example.com", // JWT_ISSUER
+	JWKSURL:  "https://app.example.com/auth/jwks", // https, or http on loopback only
+	Issuer:   "https://app.example.com",           // JWT_ISSUER
+	Audience: "app",                               // one of JWT_AUDIENCE
 }))
 mux.Handle("GET /orders", verifier.Middleware()(orders))
 ```
 
 Do not cache tokens beyond their `exp`; the proxy sends a fresh one with every request.
+
+## After v1.0.0
+
+Breaking changes released after v1.0.0, from the audit hardening.
+
+- **jwt**: `VerifierOptions.Audience` is required; `NewVerifier` refuses an empty one, so a token minted for another upstream of the same signer no longer passes (D54). Set it to one of the signer's `aud` values (the image's `JWT_AUDIENCE`).
+- **jwt**: `VerifierOptions.JWKSURL` must be `https` (plain `http` only on a loopback host) and carry no user info; an in-cluster `http://forwardauth:8080/auth/jwks` is refused. Point backends at the external `https://<host>/auth/jwks` (D54).
+- **jwt**: new `VerifierOptions.MaximumKeyAge` (default 24 h, at least `RefreshInterval`): while the JWKS stays unreachable longer than that since the last successful fetch, `Verify` returns a plain error (the middleware 500) for every token instead of trusting the old keys forever. A `RefreshInterval` above 24 h now needs a `MaximumKeyAge` at least as long (D55).
+- **forwardauth image**: `JWT_AUDIENCE` is required with `JWT_ENABLED=true` (D54).
 
 ## Rolling back
 

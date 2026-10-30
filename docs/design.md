@@ -525,10 +525,11 @@ func (s *Signer) Sign(identity *auth.Identity) (string, error)
 func (s *Signer) JWKSHandler() http.Handler
 
 type VerifierOptions struct {
-	JWKSURL         string        // required: absolute http(s) URL (http allowed: in-cluster JWKS), at most 1 MiB; only its RSA keys with an RSA signature alg (RS*, PS*), a kid and use "sig" (or none) count, a JWKS without one fails NewVerifier ("JWKS has no RSA signing key with alg and kid")
+	JWKSURL         string        // required: https URL (http only on a loopback host), no user info (D54), at most 1 MiB; only its RSA keys with an RSA signature alg (RS*, PS*), a kid and use "sig" (or none) count, a JWKS without one fails NewVerifier ("JWKS has no RSA signing key with alg and kid")
 	Issuer          string        // required: expected iss
-	Audience        string        // optional: when set, aud must contain it
+	Audience        string        // required: aud must contain it (D54)
 	RefreshInterval time.Duration // default 1 h, at least 1 min; an unknown kid triggers a refetch at most once per minute
+	MaximumKeyAge   time.Duration // default 24 h, at least RefreshInterval; keys are trusted that long after the last successful fetch (D55)
 	HTTPClient      *http.Client  // default 10 s timeout
 	HeaderName      string        // default "Authorization", value "Bearer <token>"
 	Observer        auth.Observer // optional; Middleware reports one ActionAuthenticate outcome per request (Provider "jwt")
@@ -542,7 +543,8 @@ func NewVerifier(ctx context.Context, options *VerifierOptions) (*Verifier, erro
 // token issued in the future, issuer mismatch, audience mismatch, expiry missing, token invalid), never jwx's message,
 // which quotes token material. JWKS fetch failure for an unknown kid: plain error; a verification waiting for another
 // request's fetch stops when its own ctx ends (plain error wrapping context.Canceled/DeadlineExceeded). A failed periodic refresh keeps
-// the previous keys and the token verifies with them.
+// the previous keys and the token verifies with them until they are MaximumKeyAge old; then every token is a plain error
+// until a fetch succeeds (D55).
 func (v *Verifier) Verify(ctx context.Context, token string) (*auth.Identity, error)
 // Middleware requires a valid token in HeaderName ("Bearer <token>", scheme matched case-insensitively, spaces around the token trimmed): identity
 // into the context; missing: 401 "unauthenticated", invalid: 401 "invalid_token", both with WWW-Authenticate: Bearer
@@ -1333,7 +1335,7 @@ Values without a default are required: `LoadConfig` fails and the process exits 
 | `JWT_ENABLED` | bool | `false` | | | |
 | `JWT_PRIVATE_KEY` | string | `""` | when JWT | yes | PEM; no generated fallback (it broke multi-replica and restarts) |
 | `JWT_ISSUER` | string | `""` | | | default EXTERNAL_URL (without a trailing "/") |
-| `JWT_AUDIENCE` | string array | `[]` | | | |
+| `JWT_AUDIENCE` | string array | `[]` | when JWT (>= 1) | | every token carries aud (D54) |
 | `JWT_LIFETIME_SECONDS` | int | `300` | | | 1..86400 |
 | `JWT_HEADER` | string | `Authorization` | not empty | | value `Bearer <jwt>`; an HTTP header name (RFC 9110 token), not `Cache-Control`, `Set-Cookie`, `Connection`, `Content-Length`, `Transfer-Encoding`, `Cookie` or `Host` (`forwardauth.ValidateJWTHeader`) |
 
@@ -1522,6 +1524,8 @@ Decisions taken during implementation (29.10.2026, settled by the lead):
 | D48 | The OIDC provider reads roles, client roles and groups from the access token only when its `sub` equals the verified ID token's `sub`; otherwise it ignores the access token as it ignores one that does not verify. A minted JWT no longer copies `realm_access` and `resource_access` from the ID token claims. | The access token's claims win over the ID token's, but nothing bound them to the user who logged in, so a token issued to another subject (an IdP bug, a confused token endpoint) would hand that subject's roles to this login. The JWT carried Keycloak's raw role claims next to the enriched `realm_roles` and `client_roles`, so a backend reading the raw ones saw stale roles that Keycloak enrichment or OnLogin had replaced. |
 | D49 | OIDC and GitHub logout run their session reads and `OnLogout` on `context.WithTimeout(context.WithoutCancel(...), 10 s)` (`logoutTimeout`), like `Store.End` and the GitHub token revocation, which keep their own 10 s. `prometheusadapter.OutcomeCounter.Observe` drops an outcome whose label value Prometheus refuses (invalid UTF-8) instead of panicking. | The detached context had no deadline, so a hung session backend or a hook waiting on its context held the logout request and its goroutine forever. `WithLabelValues` panics on such a value, and an Observer runs inside the request. |
 | D50 | The binary's gin engine matches the request path as sent (`UseRawPath`), so a percent-encoded variant of a route (`/auth/%75i`, `/auth%2Fui`) is 404; `{prefix}/me` refuses an inactive identity with 403 like the checks. | gin matched the decoded path, so `/auth/%75i` reached the check and `/auth/%72eady` the probe; that was safe only while Traefik also matched decoded paths, and a router rule on the encoded path would route requests the binary then answered as a check or probe. `/me` answered 200 for an identity the checks refuse. |
+| D54 | `jwt.Verifier` requires `Audience` and a `JWKSURL` that `redirect.IsSecureURL` accepts (https, http on loopback only, no user info); the binary requires `JWT_AUDIENCE` with `JWT_ENABLED`, so its tokens always carry `aud`. | Without `aud` on both sides, a token the forward-auth server minted for one upstream passed at every other backend trusting the same signer. A JWKS fetched over plain http could be swapped on the way, and its keys decide which tokens pass; the OIDC, Keycloak and GitHub URLs already follow this rule (D16). Backends that fetched `http://forwardauth:8080/auth/jwks` in-cluster go through the external https URL. |
+| D55 | `jwt.VerifierOptions.MaximumKeyAge` (default 24 h, at least `RefreshInterval`): keys older than that since the last successful JWKS fetch count as unknown, so a token is a plain error (500) until a fetch succeeds. | A failed refresh kept the previous keys forever: a key the signer had rotated out (for example after a leak) stayed trusted for as long as the JWKS was unreachable (observed after 30 days). A plain error, not a refusal, because the token may be valid; 24 h outlasts any JWKS outage worth riding out. |
 
 ---
 

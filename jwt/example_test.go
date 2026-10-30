@@ -30,7 +30,7 @@ func ExampleSigner() {
 		fmt.Println(err)
 		return
 	}
-	signer, err := jwt.NewSigner(&jwt.SignerOptions{PrivateKey: privateKey, Issuer: "https://auth.example.com"})
+	signer, err := jwt.NewSigner(&jwt.SignerOptions{PrivateKey: privateKey, Issuer: "https://auth.example.com", Audience: []string{"builds-api"}})
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -57,7 +57,7 @@ func ExampleVerifier() {
 		fmt.Println(err)
 		return
 	}
-	signer, err := jwt.NewSigner(&jwt.SignerOptions{PrivateKey: privateKey, Issuer: "https://auth.example.com"})
+	signer, err := jwt.NewSigner(&jwt.SignerOptions{PrivateKey: privateKey, Issuer: "https://auth.example.com", Audience: []string{"builds-api"}})
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -65,7 +65,7 @@ func ExampleVerifier() {
 	forwardAuth := httptest.NewServer(signer.JWKSHandler())
 	defer forwardAuth.Close()
 
-	verifier, err := jwt.NewVerifier(context.Background(), &jwt.VerifierOptions{JWKSURL: forwardAuth.URL, Issuer: "https://auth.example.com"})
+	verifier, err := jwt.NewVerifier(context.Background(), &jwt.VerifierOptions{JWKSURL: forwardAuth.URL, Issuer: "https://auth.example.com", Audience: "builds-api"})
 	if err != nil {
 		fmt.Println(err)
 		return

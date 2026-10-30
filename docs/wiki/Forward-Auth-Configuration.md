@@ -34,6 +34,7 @@ services:
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
       JWT_ENABLED: "true"
       JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY}                 # export JWT_PRIVATE_KEY="$(cat jwt.pem)"
+      JWT_AUDIENCE: app                                   # the backend's verifier Audience
     labels:
       - traefik.enable=true
       # login, callback, logout, jwks; never the checks or the probes. No forwardAuth middleware; its longer rule wins
@@ -228,7 +229,7 @@ Values without a default are required. *not empty* marks values with a default t
 | `JWT_ENABLED` | `false` | | | sign an identity token per allowed request |
 | `JWT_PRIVATE_KEY` | empty | when enabled | yes | PEM RSA key, at least 2048 bits; no generated fallback, so every replica signs with the same key |
 | `JWT_ISSUER` | empty | | | what backends configure as `Issuer`; empty means `EXTERNAL_URL` |
-| `JWT_AUDIENCE` | empty | | | |
+| `JWT_AUDIENCE` | empty | when enabled (at least one) | | `aud` of every token, e.g. `app`; backends configure one of the values as the verifier's `Audience`, so a token minted for this app passes nowhere else |
 | `JWT_LIFETIME_SECONDS` | `300` | | | 1 to 86400 |
 | `JWT_HEADER` | `Authorization` | not empty | | value `Bearer <jwt>`; list the header in `authResponseHeaders`; a header name, not `Cache-Control`, `Set-Cookie`, `Connection`, `Content-Length`, `Transfer-Encoding`, `Cookie` or `Host` |
 

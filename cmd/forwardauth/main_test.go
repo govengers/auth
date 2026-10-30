@@ -73,7 +73,7 @@ func TestValidateConfigurationAcceptsCompleteSetups(t *testing.T) {
 			configuration.KeycloakURL, configuration.KeycloakRealm = "https://keycloak.example.com", "company"
 			configuration.KeycloakClientID, configuration.KeycloakClientSecret = "forwardauth", "keycloak-secret"
 			configuration.SessionRedisEnabled, configuration.SessionRedisAddress = true, "redis:6379"
-			configuration.JWTEnabled, configuration.JWTPrivateKey = true, "-----BEGIN PRIVATE KEY-----"
+			configuration.JWTEnabled, configuration.JWTPrivateKey, configuration.JWTAudience = true, "-----BEGIN PRIVATE KEY-----", []string{"app"}
 			configuration.APIKeysEnabled, configuration.APIKeys = true, []string{"ci:" + testSecret}
 			configuration.APIKeyPermissions = []string{"ci=builds:write+*:read"}
 			configuration.SessionSameSite = "none"
@@ -158,7 +158,10 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 			configuration.SessionInsecureCookie, configuration.ExternalURL = true, "HtTpS://app.example.com"
 		}, problems: []string{"SESSION_INSECURE_COOKIE=true with an https EXTERNAL_URL"}},
 		{name: "jwt lifetime beyond a day", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTLifetimeSeconds = 86401 }, problems: []string{"JWT_LIFETIME_SECONDS 86401 must be between 1 and 86400"}},
-		{name: "jwt without key", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTEnabled = true }, problems: []string{"JWT_PRIVATE_KEY"}},
+		{name: "jwt without key and audience", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTEnabled = true }, problems: []string{"JWT_PRIVATE_KEY is required", "JWT_AUDIENCE is required when JWT_ENABLED=true"}},
+		{name: "jwt with a blank audience", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
+			configuration.JWTEnabled, configuration.JWTPrivateKey, configuration.JWTAudience = true, "-----BEGIN PRIVATE KEY-----", []string{" "}
+		}, problems: []string{"JWT_AUDIENCE is required when JWT_ENABLED=true"}},
 		{name: "jwt header that is no header name", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "X Auth" }, problems: []string{"JWT_HEADER \"X Auth\" is not an HTTP header name"}},
 		{name: "jwt header of the upstream request", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "cookie" }, problems: []string{"JWT_HEADER \"cookie\" would replace the upstream request's own header"}},
 		{name: "jwt header the check answer sets", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "Cache-Control" }, problems: []string{"JWT_HEADER \"Cache-Control\" is set by the check answer"}},

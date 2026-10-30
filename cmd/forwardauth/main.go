@@ -781,7 +781,11 @@ func validateJWT(configuration *Configuration) error {
 		problems = append(problems, fmt.Errorf("JWT_HEADER %w", err))
 	}
 	if configuration.JWTEnabled {
-		problems = append(problems, requireValues("JWT_ENABLED=true", namedValue{"JWT_PRIVATE_KEY", configuration.JWTPrivateKey}))
+		// Without aud, a token minted for one upstream would pass at every other one (jwt.Verifier requires it).
+		problems = append(problems, requireValues("JWT_ENABLED=true",
+			namedValue{"JWT_PRIVATE_KEY", configuration.JWTPrivateKey},
+			namedValue{"JWT_AUDIENCE", strings.Join(configuration.JWTAudience, "")},
+		))
 	}
 	return errors.Join(problems...)
 }
