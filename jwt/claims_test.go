@@ -17,6 +17,7 @@ func TestIdentityClaimsCopiesOnlyForeignClaims(t *testing.T) {
 		"c_hash": "h", "auth_time": 1, "sid": "s", "azp": "a", "provider": "p", "user_id": "u", "preferred_username": "u",
 		"name": "n", "email": "e", "picture": "p", "roles": []any{auth.RoleAdmin}, "realm_roles": []any{"r"},
 		"client_roles": []any{"c"}, "groups": []any{"g"}, "teams": []any{"t"}, "permissions": []any{"*:write"},
+		"Roles": []any{auth.RoleAdmin}, "PERMISSIONS": []any{"*:write"}, "Sub": "s", "User_ID": "u",
 	}
 	allClaims := maps.Clone(ownedClaims)
 	maps.Copy(allClaims, foreignClaims)

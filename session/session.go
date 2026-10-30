@@ -56,7 +56,20 @@ func (e identityEnvelope) verifiedAt() time.Time {
 }
 
 // Put seals value and stores it under key for ttl (positive). A revoked session refuses with ErrUnauthenticated.
+// The key "identity" is reserved: only SaveIdentity and SwapIdentity write it, with their lifetime and swap rules.
 func (s Session) Put(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	if key == identityKey {
+		return errReservedKey("put", key)
+	}
+	return s.put(ctx, key, value, ttl)
+}
+
+// errReservedKey is the error of a generic value operation on the identity's key.
+func errReservedKey(operation, key string) error {
+	return fmt.Errorf("%s session value %q: the key is reserved for the identity", operation, key)
+}
+
+func (s Session) put(ctx context.Context, key string, value []byte, ttl time.Duration) error {
 	if key == "" || ttl <= 0 {
 		return fmt.Errorf("put session value %q for %s: key must not be empty and ttl must be positive", key, ttl)
 	}
@@ -84,8 +97,12 @@ func (s Session) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	return value, found, nil
 }
 
-// Pop returns the value under key and deletes it; of two concurrent Pops at most one finds it.
+// Pop returns the value under key and deletes it; of two concurrent Pops at most one finds it. The key
+// "identity" is reserved, as for Put.
 func (s Session) Pop(ctx context.Context, key string) ([]byte, bool, error) {
+	if key == identityKey {
+		return nil, false, errReservedKey("pop", key)
+	}
 	sealed, found, err := s.store.options.Backend.Pop(ctx, s.id, key)
 	if err != nil {
 		return nil, false, fmt.Errorf("pop session value %q: %w", key, err)
@@ -132,7 +149,7 @@ func (s Session) saveFirstIdentity(ctx context.Context, identity *auth.Identity,
 	if !s.start.used.CompareAndSwap(false, true) {
 		return absent
 	}
-	return s.Put(ctx, identityKey, encoded, ttl)
+	return s.put(ctx, identityKey, encoded, ttl)
 }
 
 // Identity returns the stored identity; none, expired (now > authenticatedAt + MaximumAge) or revoked: *auth.Error ErrUnauthenticated.

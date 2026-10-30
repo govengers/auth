@@ -55,6 +55,7 @@ func TestNewValidatesOptions(t *testing.T) {
 		{name: "scope with a space", change: func(options *oidc.Options) { options.Scopes = []string{"openid email"} }},
 		{name: "email domain with @", change: func(options *oidc.Options) { options.AllowedEmailDomains = []string{"@example.com"} }},
 		{name: "empty email domain", change: func(options *oidc.Options) { options.AllowedEmailDomains = []string{""} }},
+		{name: "non-ASCII email domain", change: func(options *oidc.Options) { options.AllowedEmailDomains = []string{"\u212Aiel.example"} }},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

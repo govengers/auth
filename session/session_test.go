@@ -321,7 +321,7 @@ func TestIdentityRefusesUnreadableEnvelopes(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			current, _ := startSession(t, newTestStore(t, newTestClock()))
-			require.NoError(t, current.Put(t.Context(), identityKey, []byte(testCase.encoded), time.Hour))
+			require.NoError(t, current.put(t.Context(), identityKey, []byte(testCase.encoded), time.Hour))
 
 			_, err := current.Identity(t.Context())
 
@@ -335,7 +335,7 @@ func putEnvelope(t *testing.T, current Session, envelope identityEnvelope) {
 	t.Helper()
 	encoded, err := json.Marshal(envelope)
 	require.NoError(t, err)
-	require.NoError(t, current.Put(t.Context(), identityKey, encoded, time.Hour))
+	require.NoError(t, current.put(t.Context(), identityKey, encoded, time.Hour))
 }
 
 func TestSwapIdentity(t *testing.T) {
@@ -428,4 +428,20 @@ func TestSwapIdentityRefusals(t *testing.T) {
 	require.NoError(t, err)
 	_, err = ended.SwapIdentity(ctx, testIdentity(), testIdentity())
 	require.ErrorIs(t, err, auth.ErrUnauthenticated, "revoked")
+}
+
+func TestGenericValueOperationsRefuseTheIdentityKey(t *testing.T) {
+	store := newTestStore(t, newTestClock())
+	request := login(t, store, testIdentity())
+	current, err := store.Open(request)
+	require.NoError(t, err)
+
+	putError := current.Put(t.Context(), "identity", []byte(`{"identity":{"subject":"forged"}}`), time.Hour)
+	_, _, popError := current.Pop(t.Context(), "identity")
+
+	require.ErrorContains(t, putError, "reserved for the identity")
+	require.ErrorContains(t, popError, "reserved for the identity")
+	identity, err := current.Identity(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, testIdentity(), identity, "the identity is untouched")
 }

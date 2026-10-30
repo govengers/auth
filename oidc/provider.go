@@ -48,7 +48,7 @@ type Options struct {
 	PostLogoutURL                string          // default ExternalURL + "/"; path or absolute http(s) URL, no fragment; a path is made absolute with ExternalURL
 	ErrorURL                     string          // optional: callback failures (refusals and code=internal) redirect to ErrorURL?code=<code> instead of answering JSON; same rules as PostLogoutURL
 	ClaimMapper                  ClaimMapper     // default DefaultClaimMapper
-	AllowedEmailDomains          []string        // optional: requires email_verified=true and a matching domain (case-insensitive, exact)
+	AllowedEmailDomains          []string        // optional: requires email_verified=true and a matching domain (ASCII, case-insensitive, exact)
 	DisableIframeLogoutDetection bool            // stop treating Sec-Fetch-Dest: iframe on /logout as front-channel; a cross-site iframe load of /logout is then refused (403)
 	Sessions                     *session.Store  // required
 	HTTPClient                   *http.Client    // default 10 s timeout; used for discovery, token exchange, JWKS; a redirect fails the call
@@ -336,7 +336,11 @@ func lowerCaseDomains(domains []string) ([]string, error) {
 		if domain == "" || strings.ContainsRune(domain, '@') || strings.ContainsFunc(domain, isSpaceOrControl) {
 			return nil, errors.New("allowed email domains must be bare domains like example.com")
 		}
-		result = append(result, strings.ToLower(domain))
+		lowered, ascii := asciiLower(domain)
+		if !ascii {
+			return nil, fmt.Errorf("allowed email domain %q must be ASCII: write an internationalized domain in its xn-- form", domain)
+		}
+		result = append(result, lowered)
 	}
 	return result, nil
 }

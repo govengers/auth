@@ -261,13 +261,17 @@ func TestAllowedEmailDomains(t *testing.T) {
 		{name: "subdomain", email: "ada@sub.example.com", emailVerified: true, wantStatus: http.StatusForbidden},
 		{name: "unverified", email: "ada@example.com", emailVerified: false, wantStatus: http.StatusForbidden},
 		{name: "no email", email: "", emailVerified: true, wantStatus: http.StatusForbidden},
+		{name: "Kelvin sign folding to an allowed domain", email: "ada@\u212Aiel.example", emailVerified: true, wantStatus: http.StatusForbidden},
+		{name: "allowed domain with k", email: "ada@kiel.example", emailVerified: true, wantStatus: http.StatusFound},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			issuer := startIssuer(t, func(options *fakeprovider.OIDCOptions) {
 				options.User.Email, options.User.EmailVerified = testCase.email, testCase.emailVerified
 			})
-			application := newApplication(t, issuer, func(options *oidc.Options) { options.AllowedEmailDomains = []string{"EXAMPLE.com", "corp.example"} })
+			application := newApplication(t, issuer, func(options *oidc.Options) {
+				options.AllowedEmailDomains = []string{"EXAMPLE.com", "corp.example", "kiel.example"}
+			})
 
 			response := newBrowser(t).signIn(application, prefix+"/login")
 

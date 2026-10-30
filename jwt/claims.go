@@ -3,6 +3,7 @@ package jwt
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 	jwxjwt "github.com/lestrrat-go/jwx/v3/jwt"
@@ -94,11 +95,14 @@ func permissionTexts(permissions []auth.Permission) ([]string, error) {
 	return texts, nil
 }
 
+// ownedClaim matches case-insensitively: decoders such as encoding/json read "Roles" into a "roles" field
+// when the token has no exact match, so a foreign claim in another case must not ride along.
 func ownedClaim(name string) bool {
-	return name == claimUserID || name == claimPermissions ||
-		slices.Contains(uncopiedClaims, name) ||
-		slices.ContainsFunc(stringClaims, func(claim stringClaim) bool { return claim.name == name }) ||
-		slices.ContainsFunc(stringListClaims, func(claim stringListClaim) bool { return claim.name == name })
+	sameName := func(owned string) bool { return strings.EqualFold(owned, name) }
+	return sameName(claimUserID) || sameName(claimPermissions) ||
+		slices.ContainsFunc(uncopiedClaims, sameName) ||
+		slices.ContainsFunc(stringClaims, func(claim stringClaim) bool { return sameName(claim.name) }) ||
+		slices.ContainsFunc(stringListClaims, func(claim stringListClaim) bool { return sameName(claim.name) })
 }
 
 // identityFromClaims returns the identity a verified token carries. Claims of the wrong type are skipped.

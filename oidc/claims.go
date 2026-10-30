@@ -3,6 +3,7 @@ package oidc
 import (
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/govengers/auth"
 )
@@ -92,7 +93,8 @@ func firstNonEmpty(candidates ...[]string) []string {
 }
 
 // checkEmailDomain allows any login when allowedDomains is empty. Otherwise the ID token must carry
-// email_verified true and an email whose domain (lower-cased) is one of allowedDomains (lower-case).
+// email_verified true and an email whose domain (ASCII lower-cased; a non-ASCII domain never matches) is
+// one of allowedDomains (lower-case ASCII).
 func checkEmailDomain(claims map[string]any, allowedDomains []string) error {
 	if len(allowedDomains) == 0 {
 		return nil
@@ -101,8 +103,20 @@ func checkEmailDomain(claims map[string]any, allowedDomains []string) error {
 		return &auth.Error{Kind: auth.ErrForbidden, Reason: "email not verified"}
 	}
 	_, domain, found := strings.Cut(stringClaim(claims, "email"), "@")
-	if !found || !slices.Contains(allowedDomains, strings.ToLower(domain)) {
+	domain, ascii := asciiLower(domain)
+	if !found || !ascii || !slices.Contains(allowedDomains, domain) {
 		return &auth.Error{Kind: auth.ErrForbidden, Reason: "email domain not allowed"}
 	}
 	return nil
+}
+
+// asciiLower lower-cases the ASCII letters of value; false when value has a non-ASCII byte. strings.ToLower
+// alone also folds Unicode (the Kelvin sign U+212A becomes "k"), so another domain could match an allowed one.
+func asciiLower(value string) (string, bool) {
+	for index := range len(value) {
+		if value[index] >= utf8.RuneSelf {
+			return "", false
+		}
+	}
+	return strings.ToLower(value), true
 }

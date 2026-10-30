@@ -37,6 +37,7 @@ func TestNewStoreValidation(t *testing.T) {
 		{name: "long key", options: valid(func(options *StoreOptions) { options.EncryptionKey = append(options.EncryptionKey, 'x') }), wantError: "EncryptionKey has 33 bytes"},
 		{name: "maximum age below a second", options: valid(func(options *StoreOptions) { options.MaximumAge = 500 * time.Millisecond }), wantError: "below one second"},
 		{name: "negative maximum age", options: valid(func(options *StoreOptions) { options.MaximumAge = -time.Hour }), wantError: "below one second"},
+		{name: "same site default mode", options: valid(func(options *StoreOptions) { options.SameSite = http.SameSiteDefaultMode }), wantError: "SameSite must be Lax, Strict or None"},
 		{name: "unknown same site", options: valid(func(options *StoreOptions) { options.SameSite = 9 }), wantError: "SameSite 9 is unknown"},
 		{name: "same site none on an insecure cookie", options: valid(func(options *StoreOptions) {
 			options.SameSite = http.SameSiteNoneMode

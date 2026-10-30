@@ -33,7 +33,7 @@ type StoreOptions struct {
 	CookieName     string        // default "auth_session"; "__Host-" is prepended when Secure, host-only and on "/" (see NewStore)
 	CookieDomain   string        // default "" (host-only cookie)
 	CookiePath     string        // default "/"
-	SameSite       http.SameSite // default http.SameSiteLaxMode; SameSiteNoneMode requires InsecureCookie false (front-channel logout needs None)
+	SameSite       http.SameSite // Lax (default), Strict or None; None requires InsecureCookie false (front-channel logout needs None); SameSiteDefaultMode would send no attribute and is refused
 	InsecureCookie bool          // drops the Secure attribute; local HTTP development only
 	MaximumAge     time.Duration // default 24h, at least 1s; absolute session lifetime, also the cookie Max-Age
 }
@@ -86,7 +86,10 @@ func validateStoreOptions(options StoreOptions) error {
 	if options.MaximumAge < time.Second {
 		return fmt.Errorf("session store: MaximumAge %s is below one second", options.MaximumAge)
 	}
-	if options.SameSite < http.SameSiteDefaultMode || options.SameSite > http.SameSiteNoneMode {
+	if options.SameSite == http.SameSiteDefaultMode {
+		return errors.New("session store: SameSite must be Lax, Strict or None; SameSiteDefaultMode sends no attribute and leaves it to the browser")
+	}
+	if options.SameSite < http.SameSiteLaxMode || options.SameSite > http.SameSiteNoneMode {
 		return fmt.Errorf("session store: SameSite %d is unknown", options.SameSite)
 	}
 	if options.SameSite == http.SameSiteNoneMode && options.InsecureCookie {

@@ -403,7 +403,7 @@ type StoreOptions struct {
 	CookieName     string        // default "auth_session"; Secure, host-only and on "/": sent as "__Host-" + CookieName (an own "__Host-"/"__Secure-" prefix is kept and validated)
 	CookieDomain   string        // default "" (host-only cookie)
 	CookiePath     string        // default "/"
-	SameSite       http.SameSite // default http.SameSiteLaxMode; SameSiteNoneMode requires InsecureCookie false (front-channel logout needs None)
+	SameSite       http.SameSite // Lax (default), Strict or None; None requires InsecureCookie false (front-channel logout needs None); SameSiteDefaultMode (no attribute) is refused
 	InsecureCookie bool          // drops the Secure attribute; local HTTP development only
 	MaximumAge     time.Duration // default 24h, at least 1s; absolute session lifetime, also the cookie Max-Age
 }
@@ -454,7 +454,7 @@ func (s Session) Identity(ctx context.Context) (*auth.Identity, error)
 func (s Session) SwapIdentity(ctx context.Context, previous, identity *auth.Identity) (bool, error)
 ```
 
-Reserved session keys (binding): `identity` (envelope `{"identity", "authenticatedAt", "refreshedAt"}`, unexported type), `<provider name>.<anything>` for provider state (`password.pending`, `password.totp_setup`, `<oidc name>.login`, `<oidc name>.id_token`, `github.login`, `github.token`). Applications prefix their own keys with `app.`.
+Reserved session keys (binding): `identity` (envelope `{"identity", "authenticatedAt", "refreshedAt", "verifiedAt"}`, unexported type; `Session.Put` and `Pop` refuse it, so only SaveIdentity and SwapIdentity write it), `<provider name>.<anything>` for provider state (`password.pending`, `password.totp_setup`, `<oidc name>.login`, `<oidc name>.id_token`, `github.login`, `github.token`). Applications prefix their own keys with `app.`.
 
 Guard:
 
@@ -563,7 +563,7 @@ Claims written by `Sign` and read back by `Verify` (binding):
 | `preferred_username`, `name`, `email`, `picture` | `Username`, `Name`, `Email`, `Picture` | omitted when empty |
 | `roles`, `realm_roles`, `client_roles`, `groups`, `teams` | `Roles`, `OIDCRoles`, `OIDCClientRoles`, `Groups`, `Teams` | JSON arrays, omitted when empty |
 | `permissions` | `Permissions` | JSON array of text forms (`["builds:write","*:read"]`), omitted when empty; `Sign` fails on an invalid permission; `Verify` parses each entry with `auth.ParsePermission` and drops entries that do not parse or are not strings (fail closed per entry) |
-| every other key of `Claims` | `Claims` | copied; never copied: `iss sub aud exp nbf iat jti nonce at_hash c_hash auth_time sid azp` and every claim name of the rows above (`provider`, `user_id`, `preferred_username`, `name`, `email`, `picture`, `roles`, `realm_roles`, `client_roles`, `groups`, `teams`, `permissions`), so an identity field left empty cannot come back from `Claims` (an IdP `roles` claim must not become application roles) |
+| every other key of `Claims` | `Claims` | copied; never copied: `iss sub aud exp nbf iat jti nonce at_hash c_hash auth_time sid azp` and every claim name of the rows above (`provider`, `user_id`, `preferred_username`, `name`, `email`, `picture`, `roles`, `realm_roles`, `client_roles`, `groups`, `teams`, `permissions`), matched case-insensitively (decoders like encoding/json read `Roles` into a `roles` field), so an identity field left empty cannot come back from `Claims` (an IdP `roles` claim must not become application roles) |
 
 `Verify` sets `Active=true`, the fields above, and `Claims` = all claims of the token. Wrong claim types are skipped, never asserted (no panics). `Attributes`, `Data` and `Impersonator` are not carried.
 
@@ -723,7 +723,7 @@ type Options struct {
 	PostLogoutURL                string            // default ExternalURL + "/"; a safe path or an absolute http(s) URL, no fragment; a path is made absolute with ExternalURL
 	ErrorURL                     string            // optional: every callback failure (refusals and code=internal) redirects to ErrorURL?code=<code> instead of answering JSON; same rules as PostLogoutURL
 	ClaimMapper                  ClaimMapper       // default DefaultClaimMapper
-	AllowedEmailDomains          []string          // optional: requires email_verified=true and a matching domain (case-insensitive, exact)
+	AllowedEmailDomains          []string          // optional: requires email_verified=true and a matching domain (ASCII only, case-insensitive, exact; an IDN in its xn-- form)
 	DisableIframeLogoutDetection bool              // stop treating Sec-Fetch-Dest: iframe on /logout as front-channel (A-2.4); a cross-site iframe load of /logout is then refused (403)
 	Sessions                     *session.Store    // required
 	HTTPClient                   *http.Client      // default 10 s timeout; used for discovery, token exchange, JWKS
@@ -1126,7 +1126,7 @@ Wherever F2 ends the pending session (steps 2, 3, 5), a failing `Store.End` fail
 2. Exchange `code` with `oauth2.VerifierOption(verifier)` (ctx carries HTTPClient). The IdP answered with an error below 500 (`tokenendpoint.Refused`): refuse `{ErrUnauthenticated, "login_failed", Reason "token exchange"}`; a 5xx answer or an unreachable IdP: fail (500). Either error is `tokenendpoint.Error("oidc: exchange code", err)`: status and OAuth error code only, never the IdP's description or body (LOG-009).
 3. `id_token` present and verified (`Verifier` with ClientID audience: signature, iss, aud, exp); `idToken.Nonce == state.Nonce` (constant time); a non-empty `sub`; failures refuse `login_failed`. A verification failure has the fixed Reason `ID token expired` or `ID token verification` (Err only a cancelled callback's `ctx.Err()`), never go-oidc's message, which quotes the token header and claims and the JWKS request's error; a JWKS outage therefore reads like an invalid token.
 4. ID token claims into a map; ClaimMapper; access token claims via the audience-free verifier (opaque token: ignored, A-2.4).
-5. AllowedEmailDomains set: `email_verified == true` and domain allowed, else refuse `{ErrForbidden, Reason "email domain not allowed"}`.
+5. AllowedEmailDomains set: `email_verified == true` and domain allowed (ASCII lower-cased; a non-ASCII domain never matches, since Unicode folding maps the Kelvin sign to `k`), else refuse `{ErrForbidden, Reason "email domain not allowed"}`.
 6. Identity `{Provider Name, Subject sub, Username/Name/Email/Picture from Profile, Active true, OIDCRoles, OIDCClientRoles, Groups from tokens, Claims}`.
 7. `OnLogin` (e.g. Keycloak `Enrich` replaces roles/groups/attributes and enforces required ones).
 8. `Store.Start`; put `<Name>.id_token` (raw) with TTL MaximumAge; `SaveIdentity` (the identity last, so a failed write leaves no authenticated session behind).
