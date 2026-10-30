@@ -16,7 +16,7 @@ Tested ([jwt/example_test.go](../../jwt/example_test.go), `ExampleVerifier`):
 		identity := auth.IdentityFrom(request.Context())
 ```
 
-- `JWKSURL`: the signer's JWKS over `https`, e.g. `https://app.example.com/auth/jwks` (the image serves it through Traefik); plain `http` only on a loopback host, no user info. The keys decide which tokens pass, so a JWKS fetched over plain `http` (also in-cluster, `http://forwardauth:8080/auth/jwks`) is refused: anyone on the way could swap them. `NewVerifier` fetches it once and fails fast.
+- `JWKSURL`: the signer's JWKS over `https`, e.g. `https://app.example.com/auth/jwks` (the image serves it through Traefik); plain `http` only on a loopback host, no user info. The keys decide which tokens pass, so a JWKS fetched over plain `http` (also in-cluster, `http://forwardauth:8080/auth/jwks`) is refused unless `InsecureJWKSURL: true` says you trust the network path to it: anyone on the way could swap the keys. `NewVerifier` fetches it once and fails fast.
 - `Issuer`: the signer's issuer; for the image `JWT_ISSUER`, default its `EXTERNAL_URL`.
 - `Audience` (required): this backend's name, one of the signer's `aud` values (the image's `JWT_AUDIENCE`). A token without it is refused, so a token minted for another upstream of the same signer does not pass here.
 - `Middleware()` reads `Authorization: Bearer <token>` (`HeaderName` to change; scheme in any case, spaces around the token ignored) and answers 401 `unauthenticated` (missing) or `invalid_token` (invalid), with `WWW-Authenticate: Bearer`. Why a token was refused (expired, issuer mismatch, ...) is in the outcome's Reason, never token content. `Verify(ctx, token)` is the same check as a function.

@@ -365,21 +365,22 @@ Do not cache tokens beyond their `exp`; the proxy sends a fresh one with every r
 Breaking changes released after v1.0.0, from the audit hardening.
 
 - **jwt**: `VerifierOptions.Audience` is required; `NewVerifier` refuses an empty one, so a token minted for another upstream of the same signer no longer passes (D54). Set it to one of the signer's `aud` values (the image's `JWT_AUDIENCE`).
-- **jwt**: `VerifierOptions.JWKSURL` must be `https` (plain `http` only on a loopback host) and carry no user info; an in-cluster `http://forwardauth:8080/auth/jwks` is refused. Point backends at the external `https://<host>/auth/jwks` (D54).
+- **jwt**: `VerifierOptions.JWKSURL` must be `https` (plain `http` only on a loopback host) and carry no user info; an in-cluster `http://forwardauth:8080/auth/jwks` is refused unless the new `InsecureJWKSURL: true` says the network path is trusted. Point backends at the external `https://<host>/auth/jwks`, or set `InsecureJWKSURL` (D54).
 - **jwt**: new `VerifierOptions.MaximumKeyAge` (default 24 h, at least `RefreshInterval`): while the JWKS stays unreachable longer than that since the last successful fetch, `Verify` returns a plain error (the middleware 500) for every token instead of trusting the old keys forever. A `RefreshInterval` above 24 h now needs a `MaximumKeyAge` at least as long (D55).
 - **forwardauth image**: `JWT_AUDIENCE` is required with `JWT_ENABLED=true` (D54).
 - **oidc**: `oidc.New` refuses `Issuer: oidc.GoogleIssuer` with neither `AllowedEmailDomains` nor `OnLogin`; set the new `AllowAnyAccount: true` to admit every Google account on purpose (D56).
 - **oidc**: with the Google issuer, a domain in `AllowedEmailDomains` other than `gmail.com` and `googlemail.com` also requires the ID token's `hd` claim to equal it, so only Workspace accounts of that domain pass; a consumer Google account with a company address is now refused 403 (`hosted domain mismatch`). Admit such accounts through `OnLogin` (D56).
 - **forwardauth image**: `PROVIDER=oidc` with Google (`OIDC_ISSUER=https://accounts.google.com` or `OIDC_CLAIM_MAPPER=google`) refuses to boot without `OIDC_ALLOWED_EMAIL_DOMAINS` or an enforced `KEYCLOAK_REQUIRED_*` list; the new `OIDC_ALLOW_ANY_ACCOUNT=true` admits every Google account on purpose (D56).
 - **session**: new optional `session.Revoker` interface; `github.Provider` implements it. GitHub OAuth tokens are now revoked at GitHub also when the Guard ends a refused session (team removal, token rejected, `MaximumUnverifiedAge`), when `/refresh-teams` ends one and when a GitHub re-login replaces a session; such outcomes may carry the revocation error (degraded). No configuration change (D57).
+- **password**: every password session is bound to a credential stamp (password hash, TOTP state); sessions from before the upgrade end at their first refresh, so every password user logs in once more. A password change or TOTP enable/disable ends the user's other sessions; when your application changes a password, the session it acts in ends too (D45).
+- **session**: `ParseKey` and `NewStore` refuse an encryption key that repeats one byte (all zero included), so such a `SESSION_ENCRYPTION_KEY` fails the boot (D44).
+- **session**: `SaveIdentity` and `SwapIdentity` no longer reset the Guard's refresh clock (D44).
+- **authorization**: every check except `IsAuthenticated` refuses an identity whose impersonator (`Real()`) is inactive (D47).
+- **forwardauth image**: routes match the path as sent, so percent-encoded variants (`/auth/%75i`) answer 404; `{prefix}/me` refuses an inactive identity with 403 (D50).
+- **forwardauth image**: the image is published only after CI passed; `:latest`, `:<major>` and `:<major>.<minor>` move only for the newest stable tag they cover (D59).
+- **forwardauth `request.client_ip`**: the wide event's client IP is the peer address (Traefik's) unless `TRUSTED_PROXIES` lists the peer; it no longer believes a client's `X-Forwarded-For` or `X-Real-IP`. Set `TRUSTED_PROXIES` to Traefik's addresses or network to record the client again. An entry that is neither an IP nor a CIDR fails the boot.
+- **forwardauth Redis validation**: with `SESSION_REDIS_ENABLED=true`, a `SESSION_REDIS_ADDRESS` that is not `host:port` fails the boot during validation (before, the ping failed). New optional values: `SESSION_REDIS_USERNAME`, `SESSION_REDIS_SENTINEL_*` and `SESSION_REDIS_TLS_*` (see the configuration reference); nothing changes for a setup that sets none of them.
 
 ## Rolling back
 
 The old modules and images keep working with their own keys and configuration. Sessions never carry over in either direction, so a rollback logs users out once more. Keycloak and most IdPs accept several redirect URIs, so old and new can be registered side by side; a GitHub OAuth app has one callback URL, so that switch happens at the cutover.
-
-## After v1.0.0
-
-Changes after the v1.0.0 release that can break an existing setup.
-
-- **forwardauth `request.client_ip`**: the wide event's client IP is the peer address (Traefik's) unless `TRUSTED_PROXIES` lists the peer; it no longer believes a client's `X-Forwarded-For` or `X-Real-IP`. Set `TRUSTED_PROXIES` to Traefik's addresses or network to record the client again. An entry that is neither an IP nor a CIDR fails the boot.
-- **forwardauth Redis validation**: with `SESSION_REDIS_ENABLED=true`, a `SESSION_REDIS_ADDRESS` that is not `host:port` fails the boot during validation (before, the ping failed). New optional values: `SESSION_REDIS_USERNAME`, `SESSION_REDIS_SENTINEL_*` and `SESSION_REDIS_TLS_*` (see the configuration reference); nothing changes for a setup that sets none of them.

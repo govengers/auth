@@ -37,7 +37,8 @@ const (
 
 // VerifierOptions configure a Verifier.
 type VerifierOptions struct {
-	JWKSURL         string        // required: https URL (http only on a loopback host) of the signer's JWKS (at most 1 MiB), without user info; only its RSA keys with an RSA signature alg (RS*, PS*), a kid and use "sig" (or none) count
+	JWKSURL         string        // required: https URL (http only on a loopback host or with InsecureJWKSURL) of the signer's JWKS (at most 1 MiB), without user info; only its RSA keys with an RSA signature alg (RS*, PS*), a kid and use "sig" (or none) count
+	InsecureJWKSURL bool          // allows a plain http JWKSURL on any host, e.g. the in-cluster http://forwardauth:8080/auth/jwks; only where the network path to it is trusted
 	Issuer          string        // required: expected iss
 	Audience        string        // required: aud must contain it
 	RefreshInterval time.Duration // default 1 h, at least 1 min; an unknown kid triggers a refetch at most once per minute
@@ -83,7 +84,7 @@ func resolveVerifierOptions(options *VerifierOptions) (VerifierOptions, error) {
 		return VerifierOptions{}, errors.New("new JWT verifier: options are required")
 	}
 	resolved := *options
-	if err := validateJWKSURL(resolved.JWKSURL); err != nil {
+	if err := validateJWKSURL(resolved.JWKSURL, resolved.InsecureJWKSURL); err != nil {
 		return VerifierOptions{}, fmt.Errorf("new JWT verifier: %w", err)
 	}
 	if resolved.Issuer == "" {
@@ -115,8 +116,9 @@ func resolveVerifierOptions(options *VerifierOptions) (VerifierOptions, error) {
 	return resolved, nil
 }
 
-// validateJWKSURL checks jwksURL. Its errors never quote user info or query, which may carry credentials.
-func validateJWKSURL(jwksURL string) error {
+// validateJWKSURL checks jwksURL; insecure also allows plain http off loopback. Its errors never quote user
+// info or query, which may carry credentials.
+func validateJWKSURL(jwksURL string, insecure bool) error {
 	parsed, err := url.Parse(jwksURL)
 	if err != nil {
 		var urlError *url.Error
@@ -126,10 +128,16 @@ func validateJWKSURL(jwksURL string) error {
 		return fmt.Errorf("JWKSURL is no URL: %w", err)
 	}
 	// The keys decide which tokens pass; fetched over plain http, anyone on the way could swap them (D16).
-	if !redirect.IsSecureURL(jwksURL) {
-		return fmt.Errorf("JWKSURL %s must be an https URL, or http on a loopback host, without user info", redactedURL(parsed))
+	allowedPlainHTTP := insecure && isPlainHTTPURL(parsed)
+	if !redirect.IsSecureURL(jwksURL) && !allowedPlainHTTP {
+		return fmt.Errorf("JWKSURL %s must be an https URL, or http on a loopback host or with InsecureJWKSURL, without user info", redactedURL(parsed))
 	}
 	return nil
+}
+
+// isPlainHTTPURL reports whether parsed is an absolute http URL with a host and without user info.
+func isPlainHTTPURL(parsed *url.URL) bool {
+	return parsed.Scheme == "http" && parsed.Host != "" && parsed.User == nil
 }
 
 // redactedURL is location without user info, query and fragment, for error messages [LOG-009].

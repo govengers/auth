@@ -114,7 +114,7 @@ func requireInvalidToken(t *testing.T, err error, wantReason string) {
 }
 
 func TestNewVerifierRejectsInvalidOptions(t *testing.T) {
-	const wantInsecureURL = "must be an https URL, or http on a loopback host, without user info"
+	const wantInsecureURL = "must be an https URL, or http on a loopback host or with InsecureJWKSURL, without user info"
 	testCases := []struct {
 		name      string
 		options   *VerifierOptions
@@ -125,6 +125,8 @@ func TestNewVerifierRejectsInvalidOptions(t *testing.T) {
 		{name: "relative URL", options: &VerifierOptions{JWKSURL: "/auth/jwks", Issuer: testIssuer, Audience: "backend"}, wantError: wantInsecureURL},
 		{name: "other scheme", options: &VerifierOptions{JWKSURL: "ftp://auth.example.com/jwks", Issuer: testIssuer, Audience: "backend"}, wantError: wantInsecureURL},
 		{name: "plain http on another host", options: &VerifierOptions{JWKSURL: "http://forwardauth:8080/auth/jwks", Issuer: testIssuer, Audience: "backend"}, wantError: wantInsecureURL},
+		{name: "insecure JWKS URL keeps refusing user info", options: &VerifierOptions{JWKSURL: "http://user:password@forwardauth:8080/auth/jwks", InsecureJWKSURL: true, Issuer: testIssuer, Audience: "backend"}, wantError: wantInsecureURL},
+		{name: "insecure JWKS URL keeps refusing other schemes", options: &VerifierOptions{JWKSURL: "ftp://forwardauth/jwks", InsecureJWKSURL: true, Issuer: testIssuer, Audience: "backend"}, wantError: wantInsecureURL},
 		{name: "user info", options: &VerifierOptions{JWKSURL: "https://user:password@auth.example.com/jwks", Issuer: testIssuer, Audience: "backend"}, wantError: wantInsecureURL},
 		{name: "unparsable URL", options: &VerifierOptions{JWKSURL: "http://auth example.com/%zz", Issuer: testIssuer, Audience: "backend"}, wantError: "JWKSURL is no URL"},
 		{name: "missing issuer", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks", Audience: "backend"}, wantError: "Issuer is required"},
@@ -157,6 +159,15 @@ func TestNewVerifierAppliesDefaultsToACopy(t *testing.T) {
 	require.Equal(t, 10*time.Second, verifier.options.HTTPClient.Timeout)
 	require.Equal(t, "Authorization", verifier.options.HeaderName)
 	require.Equal(t, int32(1), keySets.fetches.Load())
+}
+
+func TestInsecureJWKSURLAllowsPlainHTTPOnAnyHost(t *testing.T) {
+	options := &VerifierOptions{JWKSURL: "http://forwardauth:8080/auth/jwks", InsecureJWKSURL: true, Issuer: testIssuer, Audience: "backend"}
+
+	resolved, err := resolveVerifierOptions(options)
+
+	require.NoError(t, err)
+	require.Equal(t, "http://forwardauth:8080/auth/jwks", resolved.JWKSURL)
 }
 
 // truncatedKeySet serves a JWKS document that ends early.
