@@ -48,7 +48,7 @@ Tested excerpt of a Guard in front of API and UI routes ([session/example_test.g
 
 The Guard calls a provider's `Refresher` for identities whose last refresh is older than `RefreshInterval`, once per interval per session, detached from the request (30 s bound). `auth.ErrUnauthenticated` or `auth.ErrForbidden` from it ends the session; any other error keeps the identity until `MaximumUnverifiedAge` since the last successful check, then ends it. A refresh never overwrites a change saved while it ran.
 
-- `password`: re-reads the user; a deleted user loses the session. Updates `Username` and `Email` only.
+- `password`: re-reads the user; a deleted user loses the session, and so does a session opened before the user's password hash or second factor changed ([Password](Password.md#gotchas)). Updates `Username` and `Email` only.
 - `github`: refetches teams; outside every allowed team or token revoked ends the session; admin role follows `AdminTeams`.
 - `oidc`: no refresher; roles and groups are fixed at login.
 

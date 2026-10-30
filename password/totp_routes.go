@@ -217,13 +217,20 @@ func setupSecret(ctx context.Context, current session.Session) (string, error) {
 	return setup.Secret, nil
 }
 
-// storeTOTP enables TOTP for the account and returns the identity to answer with. A login pending enrollment
-// becomes a session: OnLogin decides and the new session starts before SetTOTP, so a refused or failed login
-// leaves the account unchanged, and the identity is saved after it, so no full session exists without the second
-// factor.
+// storeTOTP enables TOTP for the account and returns the identity to answer with. The account's session is
+// stamped with the enrolled credentials before SetTOTP, so it survives the change that ends the user's other
+// sessions; a failed SetTOTP leaves it stamped for a change that did not happen, and it ends at its next refresh.
+// A login pending enrollment becomes a session: OnLogin decides and the new session starts before SetTOTP, so a
+// refused or failed login leaves the account unchanged, and the identity is saved after it, so no full session
+// exists without the second factor.
 func (p *Provider) storeTOTP(writer http.ResponseWriter, request *http.Request, account totpAccount, secret string, hashes []string) (*auth.Identity, error) {
 	ctx := request.Context()
+	enrolled := *account.user
+	enrolled.TOTPEnabled, enrolled.TOTPSecret = true, &secret
 	if account.identity != nil {
+		if err := p.stampSession(ctx, account.session, &enrolled); err != nil {
+			return nil, err
+		}
 		if err := p.setTOTP(ctx, account.user.ID, secret, hashes); err != nil {
 			return nil, err
 		}
@@ -231,6 +238,9 @@ func (p *Provider) storeTOTP(writer http.ResponseWriter, request *http.Request, 
 	}
 	current, identity, err := p.admit(writer, request, account.user)
 	if err != nil {
+		return nil, err
+	}
+	if err := p.stampSession(ctx, current, &enrolled); err != nil {
 		return nil, err
 	}
 	if err := p.setTOTP(ctx, account.user.ID, secret, hashes); err != nil {
@@ -271,6 +281,12 @@ func (p *Provider) disableTOTP(writer http.ResponseWriter, request *http.Request
 	}
 	if !account.user.TOTPEnabled {
 		return refused(&auth.Error{Kind: auth.ErrConflict, Code: codeTOTPNotEnabled})
+	}
+	// Stamped before the change, like enable: this session survives it, the user's other sessions end.
+	cleared := *account.user
+	cleared.TOTPEnabled, cleared.TOTPSecret = false, nil
+	if err := p.stampSession(ctx, account.session, &cleared); err != nil {
+		return refused(err)
 	}
 	if err := p.options.Storage.ClearTOTP(ctx, account.user.ID); err != nil {
 		return refused(fmt.Errorf("disable TOTP of user %s: %w", account.user.ID, err))

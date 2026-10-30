@@ -109,11 +109,15 @@ func (p *Provider) Routes() []auth.Route {
 }
 
 // Refresh implements session.Refresher: it re-reads the user by the identity's UserID (the Storage user ID, which
-// OnLogin must keep) and updates Username and Email, keeping every other field. A deleted user is
-// ErrUnauthenticated, which ends the session.
-func (p *Provider) Refresh(ctx context.Context, _ session.Session, identity *auth.Identity) (*auth.Identity, error) {
+// OnLogin must keep) and updates Username and Email, keeping every other field. A deleted user, and a session
+// whose user changed the password hash or the second factor since (in another session) or that the provider did
+// not open, is ErrUnauthenticated, which ends the session.
+func (p *Provider) Refresh(ctx context.Context, current session.Session, identity *auth.Identity) (*auth.Identity, error) {
 	user, err := p.knownUser(ctx, identity.UserID, "user deleted")
 	if err != nil {
+		return nil, err
+	}
+	if err := checkStamp(ctx, current, user); err != nil {
 		return nil, err
 	}
 	refreshed := identity.Clone()
@@ -179,11 +183,14 @@ func (r reply) write(writer http.ResponseWriter) {
 	}
 }
 
-// signIn runs OnLogin for user, starts a fresh session (revoking the request's current one) and saves the
-// identity in it.
+// signIn runs OnLogin for user, starts a fresh session (revoking the request's current one), stamps it with
+// user's credentials and saves the identity in it.
 func (p *Provider) signIn(writer http.ResponseWriter, request *http.Request, user *User) (*auth.Identity, error) {
 	current, identity, err := p.admit(writer, request, user)
 	if err != nil {
+		return nil, err
+	}
+	if err := p.stampSession(request.Context(), current, user); err != nil {
 		return nil, err
 	}
 	if err := current.SaveIdentity(request.Context(), identity); err != nil {

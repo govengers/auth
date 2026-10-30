@@ -78,6 +78,10 @@ Prefix `PathPrefix`, default `/auth/password`. The provider reads sessions itsel
 | `LegacyVerifier` | none | `password.VerifyBcrypt` upgrades bcrypt hashes at the next login |
 | `OnLogin` | none | must keep `UserID` |
 
+## Changing a password
+
+The provider has no password-change or reset route; your application does it: confirm the current password (`password.Verify` against the stored hash, or a fresh login), then `Storage.UpdatePasswordHash(ctx, id, currentHash, password.Hash(newPassword, parameters))`. Every session of the user, including the one that asked for the change, ends within `RefreshInterval` (default 1 minute), and the TOTP routes refuse them at once; let the user log in again with the new password.
+
 ## Refusal codes
 
 `invalid_credentials` (401: login, TOTP enable and disable), `no_pending_login` and `invalid_totp_code` (401: verify, enable), `totp_setup_missing` (400), `totp_already_enabled`, `totp_not_enabled` (409), `user_exists` (409), `weak_password`, `invalid_username`, `invalid_email` (400: register), `forbidden` (403: cross-site logout). Shape and mapping: [Errors-and-Observability](Errors-and-Observability.md).
@@ -85,7 +89,7 @@ Prefix `PathPrefix`, default `/auth/password`. The provider reads sessions itsel
 ## Gotchas
 
 - `OnLogin` must keep `identity.UserID` (the `Storage` user ID); return `identity.Clone()` with changes. A replaced `UserID` fails the login with 500.
-- The provider as `Refresher` re-reads the user every minute and updates only `Username` and `Email`; a deleted user loses the session. Roles added by `OnLogin` stay until the session ends.
+- The provider as `Refresher` re-reads the user every minute and updates only `Username` and `Email`; a deleted user loses the session, and so does a session opened before the user's password hash or second factor changed (`UpdatePasswordHash`, a login's rehash, TOTP enable or disable in another session); the TOTP routes refuse such a session at once. The session that enabled or disabled TOTP, or whose login rehashed the password, stays. Sessions from before this check (no credential stamp) end at their first refresh: users log in once more after the upgrade. Roles added by `OnLogin` stay until the session ends.
 - `TOTP.Enabled` off while users have TOTP enrolled: their logins fail with 500. Clear their TOTP first.
 - Anyone with the password can lock the second factor (`MaximumAttempts`); rate-limit `/login` and `/totp/verify` at the edge. There is no in-process rate limit.
 - With `TOTP.Required`, enrollment is trust-on-first-use.

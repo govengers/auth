@@ -609,18 +609,19 @@ func TestEnrollmentChangesNothingWhenTheLoginFails(t *testing.T) {
 	}
 }
 
-func TestEnableOnAFullSessionWritesNoSession(t *testing.T) {
+func TestEnableOnAFullSessionStampsTheSessionFirst(t *testing.T) {
 	fixture := newFixture(t, totpOptions())
 	user := fixture.createUser(t, "ada", "")
 	browser := loggedInClient(t, fixture)
 	secret := decodeBody[setupResponse](t, browser.post(setupPath, map[string]any{})).Secret
+	fixture.outcomes.take()
 	fixture.failSessions(t, "Put")
 
 	recorder := browser.post(enablePath, map[string]any{"code": fixture.code(t, secret, 0), "password": testPassword})
 
-	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
-	require.Len(t, decodeBody[enableResponse](t, recorder).BackupCodes, 10)
-	require.True(t, fixture.storedUser(t, user.ID).TOTPEnabled)
+	requireRefusal(t, recorder, http.StatusInternalServerError, "internal")
+	require.ErrorContains(t, fixture.outcomes.last(t).Err, "stamp session of user")
+	require.False(t, fixture.storedUser(t, user.ID).TOTPEnabled, "a session that cannot follow the change makes none")
 }
 
 // pausingStorage runs pause, once, after the next GetUserByID read the user and before it returns it: the reading
@@ -806,7 +807,7 @@ func TestSessionBackendFailures(t *testing.T) {
 		body     any
 		wantStep string // the step the error names
 	}{
-		{name: "login", prepare: func(t *testing.T, fixture *fixture) *client { return fixture.newClient(t) }, path: "/auth/password/login", body: map[string]any{"identifier": "ada", "password": testPassword}, wantStep: "save session identity of user"},
+		{name: "login", prepare: func(t *testing.T, fixture *fixture) *client { return fixture.newClient(t) }, path: "/auth/password/login", body: map[string]any{"identifier": "ada", "password": testPassword}, wantStep: "stamp session of user"},
 		{name: "login with a TOTP challenge", options: totpOptions(), prepare: func(t *testing.T, fixture *fixture) *client {
 			requireSetTOTP(t, fixture.storage, mustUserID(t, fixture, "ada"), testSecret, nil)
 			return fixture.newClient(t)

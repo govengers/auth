@@ -379,38 +379,61 @@ func TestRegistrationStorageFailure(t *testing.T) {
 }
 
 func TestRefresh(t *testing.T) {
-	fixture := newFixture(t, Options{})
+	fixture := newFixture(t, Options{OnLogin: func(_ context.Context, identity *auth.Identity) (*auth.Identity, error) {
+		granted := identity.Clone()
+		granted.Roles = []string{auth.RoleAdmin}
+		granted.Data = map[string]any{"tenant": "a"}
+		return granted, nil
+	}})
 	user := fixture.createUser(t, "ada", "ada@example.com")
-	current := identityOf(user)
-	current.Roles = []string{auth.RoleAdmin}
-	current.Data = map[string]any{"tenant": "a"}
+	browser := fixture.newClient(t)
+	require.Equal(t, http.StatusOK, browser.login("ada").Code)
+	current, err := fixture.sessionIdentity(t, browser)
+	require.NoError(t, err)
 	require.NoError(t, fixture.storage.update(user.ID, func(stored *memoryUser) error {
 		stored.user.Username = new("ada_lovelace")
 		stored.user.Email = nil
 		return nil
 	}))
 
-	refreshed, err := fixture.provider.Refresh(t.Context(), session.Session{}, current)
+	refreshed, err := fixture.refresh(t, browser)
 
 	require.NoError(t, err)
 	want := current.Clone()
 	want.Username = "ada_lovelace"
 	want.Email = ""
 	require.Equal(t, want, refreshed)
-	require.Equal(t, "ada", current.Username)
 }
 
 func TestRefreshRefuses(t *testing.T) {
 	fixture := newFixture(t, Options{})
 	user := fixture.createUser(t, "ada", "")
+	browser := fixture.newClient(t)
+	require.Equal(t, http.StatusOK, browser.login("ada").Code)
 
-	refreshed, err := fixture.provider.Refresh(t.Context(), session.Session{}, identityOf(&User{ID: uuid.New()}))
+	fixture.failStorage("GetUserByID")
+	refreshed, err := fixture.refresh(t, browser)
+	require.ErrorIs(t, err, errStorageDown)
+	require.NotErrorIs(t, err, auth.ErrUnauthenticated)
+	require.Nil(t, refreshed)
+
+	fixture.provider.options.Storage = fixture.storage
+	current, err := fixture.openSession(t, browser)
+	require.NoError(t, err)
+	refreshed, err = fixture.provider.Refresh(t.Context(), current, identityOf(&User{ID: uuid.New()}))
 	require.ErrorIs(t, err, auth.ErrUnauthenticated)
 	require.Nil(t, refreshed)
 
-	fixture.failStorage("GetUserByID")
-	refreshed, err = fixture.provider.Refresh(t.Context(), session.Session{}, identityOf(user))
-	require.ErrorIs(t, err, errStorageDown)
+	failing, err := session.NewStore(&session.StoreOptions{Backend: &failingBackend{Backend: fixture.backend, failing: []string{"Get"}}, EncryptionKey: testEncryptionKey})
+	require.NoError(t, err)
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody)
+	for _, cookie := range browser.cookies {
+		request.AddCookie(cookie)
+	}
+	current, err = failing.Open(request)
+	require.NoError(t, err)
+	refreshed, err = fixture.provider.Refresh(t.Context(), current, identityOf(user))
+	require.ErrorIs(t, err, errStorageDown, "an unreadable stamp is a failure, not a refusal")
 	require.NotErrorIs(t, err, auth.ErrUnauthenticated)
 	require.Nil(t, refreshed)
 }

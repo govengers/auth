@@ -284,7 +284,9 @@ type totpAccount struct {
 }
 
 // sessionAccount returns the account of the request's full password session: its identity has Provider
-// "password" and nobody impersonates it (TOTP changes while impersonating are forbidden).
+// "password", nobody impersonates it (TOTP changes while impersonating are forbidden) and its credential stamp
+// matches the user's credentials, so a session from before a password change or a TOTP enrollment cannot change
+// the second factor.
 func (p *Provider) sessionAccount(ctx context.Context, request *http.Request) (totpAccount, error) {
 	current, err := p.options.Sessions.Open(request)
 	if err != nil {
@@ -302,6 +304,9 @@ func (p *Provider) sessionAccount(ctx context.Context, request *http.Request) (t
 	}
 	user, err := p.knownUser(ctx, identity.UserID, "session user deleted")
 	if err != nil {
+		return totpAccount{}, err
+	}
+	if err := checkStamp(ctx, current, user); err != nil {
 		return totpAccount{}, err
 	}
 	return totpAccount{session: current, user: user, identity: identity}, nil

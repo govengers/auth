@@ -169,7 +169,9 @@ func (p *Provider) verifyPassword(user *User, password string) (matched, rehash 
 }
 
 // upgradeHash replaces the user's stored hash with an Argon2id hash of password on the configured parameters,
-// unless the stored hash changed since the user was read (compare-and-swap).
+// unless the stored hash changed since the user was read (compare-and-swap), and sets it in user, so the session
+// the login opens is stamped with the new hash. When the swap lost to a concurrent password change, that stamp
+// matches nothing and the session ends at its first refresh.
 func (p *Provider) upgradeHash(ctx context.Context, user *User, password string) error {
 	newHash, err := Hash(password, p.options.HashParameters)
 	if err != nil {
@@ -178,5 +180,6 @@ func (p *Provider) upgradeHash(ctx context.Context, user *User, password string)
 	if err := p.options.Storage.UpdatePasswordHash(ctx, user.ID, user.PasswordHash, newHash); err != nil {
 		return fmt.Errorf("upgrade password hash of user %s: %w", user.ID, err)
 	}
+	user.PasswordHash = newHash
 	return nil
 }
