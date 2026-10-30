@@ -28,7 +28,7 @@ func validOIDCConfiguration() *Configuration {
 		Provider: providerOIDC, ExternalURL: "https://app.example.com", PathPrefix: "/auth",
 		Port: 8080, MetricsPort: 9090, WideEventSampleRate: 10, ShutdownDelaySeconds: 5,
 		SessionEncryptionKey: testEncryptionKey, SessionCookieName: "forwardauth_session", SessionSameSite: "lax",
-		SessionMaximumAgeSeconds: 86400, SessionRefreshIntervalSeconds: 60, SessionRedisKeyPrefix: "forwardauth",
+		SessionMaximumAgeSeconds: 86400, SessionRefreshIntervalSeconds: 60, SessionMaximumUnverifiedAgeSeconds: 3600, SessionRedisKeyPrefix: "forwardauth",
 		OIDCName: "oidc", OIDCIssuer: "https://idp.example.com", OIDCClientID: "forwardauth", OIDCClientSecret: "client-secret",
 		OIDCScopes: []string{"openid", "profile", "email"}, OIDCClaimMapper: claimMapperDefault,
 		KeycloakGrantType: string(keycloak.GrantTypeClientCredentials), GitHubScopes: []string{"read:org"},
@@ -118,6 +118,7 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 			configuration.SessionMaximumAgeSeconds, configuration.SessionRefreshIntervalSeconds, configuration.JWTLifetimeSeconds = 0, 0, 0
 			configuration.SessionRedisDatabase = -1
 		}, problems: []string{"WIDE_EVENT_SAMPLE_RATE", "SHUTDOWN_DELAY_SECONDS", "SESSION_MAXIMUM_AGE_SECONDS", "SESSION_REFRESH_INTERVAL_SECONDS", "JWT_LIFETIME_SECONDS", "SESSION_REDIS_DATABASE"}},
+		{name: "maximum unverified age below the refresh interval", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionMaximumUnverifiedAgeSeconds = 59 }, problems: []string{"SESSION_MAXIMUM_UNVERIFIED_AGE_SECONDS 59 must be at least 60"}},
 		{name: "shutdown delay beyond the grace period", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.ShutdownDelaySeconds = 11 }, problems: []string{"SHUTDOWN_DELAY_SECONDS 11 must be between 0 and 10"}},
 		{name: "session key not base64", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionEncryptionKey = "not base64!" }, problems: []string{"SESSION_ENCRYPTION_KEY"}},
 		{name: "session key too short", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionEncryptionKey = "c2hvcnQ=" }, problems: []string{"SESSION_ENCRYPTION_KEY"}},

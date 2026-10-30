@@ -42,7 +42,17 @@ type identityEnvelope struct {
 	Identity        *auth.Identity `json:"identity"`
 	AuthenticatedAt time.Time      `json:"authenticatedAt"`
 	RefreshedAt     time.Time      `json:"refreshedAt"`
+	VerifiedAt      time.Time      `json:"verifiedAt"` // the login or the last successful Guard refresh; see verifiedAt
 	sealed          []byte         // the stored value it was read from or swapped in (never encoded): what swapEnvelope compares
+}
+
+// verifiedAt is when a provider last vouched for the identity; an envelope stored before VerifiedAt
+// existed falls back to its AuthenticatedAt.
+func (e identityEnvelope) verifiedAt() time.Time {
+	if e.VerifiedAt.IsZero() {
+		return e.AuthenticatedAt
+	}
+	return e.VerifiedAt
 }
 
 // Put seals value and stores it under key for ttl (positive). A revoked session refuses with ErrUnauthenticated.
@@ -115,7 +125,7 @@ func (s Session) SaveIdentity(ctx context.Context, identity *auth.Identity) erro
 // saveFirstIdentity begins the session's lifetime at its start, once per Start; absent is the refusal of a
 // handle whose capability is used.
 func (s Session) saveFirstIdentity(ctx context.Context, identity *auth.Identity, absent error) error {
-	encoded, ttl, err := s.encodeEnvelope(identityEnvelope{Identity: identity, AuthenticatedAt: s.start.at, RefreshedAt: s.store.now()})
+	encoded, ttl, err := s.encodeEnvelope(identityEnvelope{Identity: identity, AuthenticatedAt: s.start.at, RefreshedAt: s.store.now(), VerifiedAt: s.start.at})
 	if err != nil {
 		return err
 	}

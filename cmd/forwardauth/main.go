@@ -68,18 +68,19 @@ type Configuration struct {
 	APIKeys                 []string
 	APIKeyPermissions       []string
 
-	SessionEncryptionKey          string
-	SessionCookieName             string
-	SessionCookieDomain           string
-	SessionInsecureCookie         bool
-	SessionSameSite               string
-	SessionMaximumAgeSeconds      int
-	SessionRefreshIntervalSeconds int
-	SessionRedisEnabled           bool
-	SessionRedisAddress           string
-	SessionRedisPassword          string
-	SessionRedisDatabase          int
-	SessionRedisKeyPrefix         string
+	SessionEncryptionKey               string
+	SessionCookieName                  string
+	SessionCookieDomain                string
+	SessionInsecureCookie              bool
+	SessionSameSite                    string
+	SessionMaximumAgeSeconds           int
+	SessionRefreshIntervalSeconds      int
+	SessionMaximumUnverifiedAgeSeconds int
+	SessionRedisEnabled                bool
+	SessionRedisAddress                string
+	SessionRedisPassword               string
+	SessionRedisDatabase               int
+	SessionRedisKeyPrefix              string
 
 	OIDCName                         string
 	OIDCIssuer                       string
@@ -198,12 +199,13 @@ func newServer(ctx context.Context, configuration *Configuration, sessions *sess
 		return nil, err
 	}
 	guard, err := session.NewGuard(&session.GuardOptions{
-		Store:            sessions.store,
-		LoginURL:         selected.loginURL,
-		ReturnPathHeader: "X-Forwarded-Uri",
-		Refreshers:       selected.refreshers,
-		RefreshInterval:  seconds(configuration.SessionRefreshIntervalSeconds),
-		Observer:         observer,
+		Store:                sessions.store,
+		LoginURL:             selected.loginURL,
+		ReturnPathHeader:     "X-Forwarded-Uri",
+		Refreshers:           selected.refreshers,
+		RefreshInterval:      seconds(configuration.SessionRefreshIntervalSeconds),
+		MaximumUnverifiedAge: seconds(configuration.SessionMaximumUnverifiedAgeSeconds),
+		Observer:             observer,
 	})
 	if err != nil {
 		return nil, err
@@ -523,6 +525,7 @@ func sessionValues(configuration *Configuration) []config.Value {
 		config.String("SESSION_SAME_SITE").NotEmpty().Default("lax").Into(&configuration.SessionSameSite),
 		config.Int("SESSION_MAXIMUM_AGE_SECONDS").Default(86400).Into(&configuration.SessionMaximumAgeSeconds),
 		config.Int("SESSION_REFRESH_INTERVAL_SECONDS").Default(60).Into(&configuration.SessionRefreshIntervalSeconds),
+		config.Int("SESSION_MAXIMUM_UNVERIFIED_AGE_SECONDS").Default(3600).Into(&configuration.SessionMaximumUnverifiedAgeSeconds),
 		config.Bool("SESSION_REDIS_ENABLED").Default(false).Into(&configuration.SessionRedisEnabled),
 		config.String("SESSION_REDIS_ADDRESS").Default("").Into(&configuration.SessionRedisAddress),
 		config.String("SESSION_REDIS_PASSWORD").Default("").Sensitive().Into(&configuration.SessionRedisPassword),
@@ -649,6 +652,7 @@ func validateSession(configuration *Configuration) error {
 	problems = append(problems,
 		minimumProblem("SESSION_MAXIMUM_AGE_SECONDS", configuration.SessionMaximumAgeSeconds, 1),
 		minimumProblem("SESSION_REFRESH_INTERVAL_SECONDS", configuration.SessionRefreshIntervalSeconds, 1),
+		minimumProblem("SESSION_MAXIMUM_UNVERIFIED_AGE_SECONDS", configuration.SessionMaximumUnverifiedAgeSeconds, max(1, configuration.SessionRefreshIntervalSeconds)),
 		minimumProblem("SESSION_REDIS_DATABASE", configuration.SessionRedisDatabase, 0),
 	)
 	if configuration.SessionRedisEnabled {

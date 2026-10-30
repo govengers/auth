@@ -14,7 +14,10 @@ import (
 )
 
 const (
-	defaultRefreshInterval = time.Minute
+	defaultRefreshInterval      = time.Minute
+	defaultMaximumUnverifiedAge = time.Hour
+	// unverifiedReason is the Reason of the refusal that ends a session whose refreshes kept failing.
+	unverifiedReason = "identity could not be verified"
 	// refreshTimeout bounds a refresh, which runs without the request's cancellation (as ending a session
 	// does): a GitHub refresh may page through the teams.
 	refreshTimeout = 30 * time.Second
@@ -23,8 +26,8 @@ const (
 // Refresher re-validates identities of one provider. The Guard calls it for identities whose last
 // refresh is older than RefreshInterval, always with the real identity (identity.Real()).
 // Return a copy with provider-owned fields updated; keep every other field (roles set by OnLogin etc.).
-// ErrUnauthenticated or ErrForbidden end the session; any other error keeps the identity (degraded).
-// Refresh runs without the request's cancellation, bounded by 30 s. Implementations must be safe for
+// ErrUnauthenticated or ErrForbidden end the session; any other error keeps the identity (degraded) until
+// the last successful verification is older than GuardOptions.MaximumUnverifiedAge. Refresh runs without the request's cancellation, bounded by 30 s. Implementations must be safe for
 // concurrent use.
 type Refresher interface {
 	Name() string // the Identity.Provider it refreshes
@@ -38,7 +41,11 @@ type GuardOptions struct {
 	ReturnPathHeader string        // header carrying the original request URI (forward auth: "X-Forwarded-Uri"); default: request.URL.RequestURI()
 	Refreshers       []Refresher   // optional; names must be unique
 	RefreshInterval  time.Duration // default 1 min
-	Observer         auth.Observer // optional
+	// MaximumUnverifiedAge bounds a degraded refresh: a refresh failing for longer than this since the login
+	// or the last successful refresh ends the session. Default 1 h (RefreshInterval when that is longer); at
+	// least RefreshInterval.
+	MaximumUnverifiedAge time.Duration
+	Observer             auth.Observer // optional
 }
 
 // Guard authenticates requests by their session: it puts the stored identity into the request
@@ -68,6 +75,12 @@ func NewGuard(options *GuardOptions) (*Guard, error) {
 	}
 	if resolved.RefreshInterval < 0 {
 		return nil, fmt.Errorf("session guard: RefreshInterval %s is negative", resolved.RefreshInterval)
+	}
+	if resolved.MaximumUnverifiedAge == 0 {
+		resolved.MaximumUnverifiedAge = max(defaultMaximumUnverifiedAge, resolved.RefreshInterval)
+	}
+	if resolved.MaximumUnverifiedAge < resolved.RefreshInterval {
+		return nil, fmt.Errorf("session guard: MaximumUnverifiedAge %s is below RefreshInterval %s", resolved.MaximumUnverifiedAge, resolved.RefreshInterval)
 	}
 	refreshers, err := refreshersByName(resolved.Refreshers)
 	if err != nil {
@@ -172,7 +185,8 @@ func (g *Guard) refreshDue(stored identityEnvelope) bool {
 // fails, the request fails with 500, the outcome is an error and the claim is released, as the session
 // stays usable); any other
 // failure keeps the identity and is reported as a degraded success (Result success with Err set): the
-// request is still answered. The save swaps against the claim: when another request saved the session
+// request is still answered. Once the identity was last verified longer than MaximumUnverifiedAge ago, such
+// a failure is a refusal as well. The save swaps against the claim: when another request saved the session
 // meanwhile, that save wins and the request continues with it. The Refresher and everything after it run
 // without the request's cancellation: a client aborting each due refresh would otherwise keep a refused
 // identity alive with the claim taken.
@@ -193,8 +207,9 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 	refreshContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
 	defer cancel()
 	refreshed, err := g.refreshers[realIdentity.Provider].Refresh(refreshContext, current, realIdentity.Clone())
+	err = g.refreshError(claimed, realIdentity.Provider, refreshed, err)
 	switch {
-	case errors.Is(err, auth.ErrUnauthenticated) || errors.Is(err, auth.ErrForbidden):
+	case isRefusal(err):
 		outcome.Err = err
 		if endError := g.endRefusedSession(writer, request.WithContext(refreshContext), current, claimed, readAt); endError != nil {
 			// The session stays usable: a 500, not the refusal (kept as text only, so it cannot decide the answer).
@@ -203,10 +218,9 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 		return nil, g.reportFailure(ctx, outcome)
 	case err != nil:
 		outcome.Err = err
-	case refreshed == nil:
-		outcome.Err = fmt.Errorf("refresher %q returned no identity", realIdentity.Provider)
 	default:
 		claimed.Identity = impersonation.WithReal(claimed.Identity, refreshed)
+		claimed.VerifiedAt = g.now()
 	}
 	claimed.RefreshedAt = g.now()
 	saved, swapped, err := current.swapEnvelope(refreshContext, claimed)
@@ -220,6 +234,24 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 	outcome.Identity, outcome.Result = saved.Identity, auth.ResultSuccess
 	g.report(ctx, outcome)
 	return saved.Identity, nil
+}
+
+// refreshError is the error of a refresh that returned refreshed and err: nil on success, a missing
+// identity, err, or, when the identity was last verified longer than MaximumUnverifiedAge ago, a refusal
+// with err as its cause, so a lasting failure cannot keep stale teams and roles until MaximumAge.
+func (g *Guard) refreshError(claimed identityEnvelope, provider string, refreshed *auth.Identity, err error) error {
+	if err == nil && refreshed == nil {
+		err = fmt.Errorf("refresher %q returned no identity", provider)
+	}
+	if err == nil || isRefusal(err) || g.now().Sub(claimed.verifiedAt()) <= g.options.MaximumUnverifiedAge {
+		return err
+	}
+	return &auth.Error{Kind: auth.ErrUnauthenticated, Reason: unverifiedReason, Err: err}
+}
+
+// isRefusal reports whether a Refresher refused the identity, which ends the session.
+func isRefusal(err error) bool {
+	return errors.Is(err, auth.ErrUnauthenticated) || errors.Is(err, auth.ErrForbidden)
 }
 
 // endRefusedSession ends the session whose refresh was refused and returns the error of ending it. When

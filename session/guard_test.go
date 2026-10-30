@@ -112,6 +112,7 @@ func TestNewGuardValidation(t *testing.T) {
 		{name: "absolute URL without host", options: &GuardOptions{Store: store, LoginURL: "https:///login"}, wantError: "LoginURL must be"},
 		{name: "login URL with a fragment", options: &GuardOptions{Store: store, LoginURL: "https://auth.example.com/login#/signin"}, wantError: "without a fragment"},
 		{name: "negative refresh interval", options: &GuardOptions{Store: store, RefreshInterval: -time.Second}, wantError: "RefreshInterval -1s is negative"},
+		{name: "maximum unverified age below the refresh interval", options: &GuardOptions{Store: store, RefreshInterval: time.Hour, MaximumUnverifiedAge: time.Minute}, wantError: "MaximumUnverifiedAge 1m0s is below RefreshInterval 1h0m0s"},
 		{name: "nil refresher", options: &GuardOptions{Store: store, Refreshers: []Refresher{nil}}, wantError: "every Refresher needs a name"},
 		{name: "unnamed refresher", options: &GuardOptions{Store: store, Refreshers: []Refresher{&fakeRefresher{}}}, wantError: "every Refresher needs a name"},
 		{name: "duplicate refresher names", options: &GuardOptions{Store: store, Refreshers: []Refresher{refresher, &fakeRefresher{name: "password"}}}, wantError: `two Refreshers are named "password"`},
@@ -138,7 +139,11 @@ func TestNewGuardDefaultsOnACopy(t *testing.T) {
 	require.Zero(t, options.RefreshInterval, "caller's options untouched")
 	require.Equal(t, "/", guard.options.LoginURL)
 	require.Equal(t, time.Minute, guard.options.RefreshInterval)
+	require.Equal(t, time.Hour, guard.options.MaximumUnverifiedAge)
 	require.Equal(t, map[string]Refresher{"password": refresher}, guard.refreshers)
+	slowGuard, err := NewGuard(&GuardOptions{Store: store, RefreshInterval: 2 * time.Hour})
+	require.NoError(t, err)
+	require.Equal(t, 2*time.Hour, slowGuard.options.MaximumUnverifiedAge, "the default never undercuts the interval")
 
 	for _, loginURL := range []string{"/login", "/login?provider=oidc", "http://localhost:8080/login", "https://auth.example.com/auth/oidc/oidc/login"} {
 		_, err := NewGuard(&GuardOptions{Store: store, LoginURL: loginURL})
@@ -781,4 +786,88 @@ func TestGuardFinishesARefreshItsClientCancelled(t *testing.T) {
 			require.Equal(t, testCase.wantIdentity, stored)
 		})
 	}
+}
+
+// clearVerifiedAt stores the session's envelope without verifiedAt, as sessions saved before it existed are.
+func clearVerifiedAt(t *testing.T, store *Store, request *http.Request) {
+	t.Helper()
+	current, err := store.Open(request)
+	require.NoError(t, err)
+	stored, err := current.envelope(t.Context())
+	require.NoError(t, err)
+	stored.VerifiedAt = time.Time{}
+	_, swapped, err := current.swapEnvelope(t.Context(), stored)
+	require.NoError(t, err)
+	require.True(t, swapped)
+}
+
+func TestGuardEndsASessionWhoseRefreshFailsBeyondTheMaximumUnverifiedAge(t *testing.T) {
+	errOutage := errors.New("provider down")
+	testCases := []struct {
+		name            string
+		clearVerifiedAt bool
+		after           time.Duration
+		wantEnded       bool
+	}{
+		{name: "failing within the bound keeps the identity", after: 30 * time.Minute},
+		{name: "failing beyond the bound ends the session", after: 61 * time.Minute, wantEnded: true},
+		{name: "a session without verifiedAt counts from its login", clearVerifiedAt: true, after: 30 * time.Minute},
+		{name: "a session without verifiedAt ends beyond the bound", clearVerifiedAt: true, after: 61 * time.Minute, wantEnded: true},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			refresher := &fakeRefresher{name: "password", refresh: func(*auth.Identity) (*auth.Identity, error) {
+				return nil, errOutage
+			}}
+			fixture := newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
+			request := login(t, fixture.store, testIdentity())
+			if testCase.clearVerifiedAt {
+				clearVerifiedAt(t, fixture.store, request)
+			}
+			fixture.clock.advance(testCase.after)
+
+			result := serveGuarded(fixture.guard.RequireAPI(), request)
+
+			refreshOutcome := fixture.observer.take()[0]
+			require.Equal(t, auth.ActionRefresh, refreshOutcome.Action)
+			require.ErrorIs(t, refreshOutcome.Err, errOutage)
+			if !testCase.wantEnded {
+				require.Equal(t, http.StatusNoContent, result.recorder.Code)
+				require.Equal(t, testIdentity(), result.identity)
+				require.Equal(t, auth.ResultSuccess, refreshOutcome.Result, "degraded")
+				return
+			}
+			require.Equal(t, http.StatusUnauthorized, result.recorder.Code)
+			requireExpiredCookie(t, result.recorder)
+			current, err := fixture.store.Open(request)
+			require.NoError(t, err)
+			_, err = current.Identity(t.Context())
+			require.ErrorIs(t, err, auth.ErrUnauthenticated, "session ended")
+			require.Equal(t, auth.ResultDenied, refreshOutcome.Result)
+			var refusal *auth.Error
+			require.ErrorAs(t, refreshOutcome.Err, &refusal)
+			require.Equal(t, "identity could not be verified", refusal.Reason)
+		})
+	}
+}
+
+func TestGuardRestartsTheUnverifiedAgeOnASuccessfulRefresh(t *testing.T) {
+	failing := false
+	refresher := &fakeRefresher{name: "password", refresh: func(identity *auth.Identity) (*auth.Identity, error) {
+		if failing {
+			return nil, errors.New("provider down")
+		}
+		return identity, nil
+	}}
+	fixture := newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
+	request := login(t, fixture.store, testIdentity())
+	fixture.clock.advance(50 * time.Minute)
+	require.Equal(t, http.StatusNoContent, serveGuarded(fixture.guard.RequireAPI(), request).recorder.Code)
+	failing = true
+	fixture.clock.advance(50 * time.Minute)
+
+	result := serveGuarded(fixture.guard.RequireAPI(), request)
+
+	require.Equal(t, http.StatusNoContent, result.recorder.Code, "verified 50 minutes ago, 100 after the login")
+	require.Equal(t, testIdentity(), result.identity)
 }
