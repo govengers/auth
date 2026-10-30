@@ -304,6 +304,7 @@ The image is published by the `image` job of `ci.yml` (formerly a separate `rele
 - Concurrency: one run per ref, the newest last, never cancelling a running publication.
 - Provenance: `actions/attest-build-provenance` signs a SLSA build provenance attestation (Sigstore, keyless, `id-token: write`, `attestations: write`) and pushes it next to the image. Verify with `gh attestation verify oci://ghcr.io/govengers/forwardauth@<digest> --repo govengers/auth`.
 - Pinning: third-party actions by commit SHA, GitHub's own by major tag (as in `govengers/.github`); Dockerfile base images by digest. `.github/dependabot.yml` proposes weekly bumps for Go modules, actions and base images.
+- Wiki: the `wiki` job `needs` the image job and runs only when the tag is the newest stable release (`latest` output of the image job). It runs `.github/scripts/publish-wiki.sh <tag>` with `contents: write`: the checkout's persisted workflow token pushes to `govengers/auth.wiki`, an exact mirror of the tag's `docs/wiki` with links pointing at the tag (D63). `just wiki [<tag>|main]` runs the same script by hand (default: the newest stable tag). The wiki repository exists only after its first page was saved in the browser.
 - Owner checks outside the repository: the GHCR package's Actions access lists only `govengers/auth` with write, and a tag ruleset limits `v*` tags to maintainers.
 
 ## 5. End-to-end with docker compose

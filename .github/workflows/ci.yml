@@ -2,7 +2,8 @@ name: CI
 
 # Lint, tests, e2e and vulncheck on every push and pull request; on a push to main or a v* tag, the image
 # ghcr.io/govengers/forwardauth is published only after all of them passed: :main on main, :1.2.3, :1.2, :1 and
-# :latest on a v1.2.3 tag (the moving tags only when the tag is the newest release they cover).
+# :latest on a v1.2.3 tag (the moving tags only when the tag is the newest release they cover). The newest
+# stable release then mirrors its docs/wiki to the GitHub wiki.
 on:
   push:
     branches: [main]
@@ -25,6 +26,8 @@ jobs:
     needs: go-library
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    outputs:
+      latest: ${{ steps.newest.outputs.latest }} # this run published the newest stable release
     # One run per ref at a time, the newest last: a slower run of an older main commit cannot re-point :main.
     # Tags get a group each (a shared group would drop a queued release); which moving tags a tag may move is
     # decided from the repository's tags, not from run order.
@@ -104,3 +107,26 @@ jobs:
           subject-name: ghcr.io/govengers/forwardauth
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+  wiki:
+    name: mirror docs/wiki to the GitHub wiki
+    needs: image
+    # Only the newest stable release: a backport or a pre-release must not put older docs on the wiki.
+    if: needs.image.outputs.latest == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: wiki
+      cancel-in-progress: false
+    permissions:
+      contents: write # push to the repository's wiki with the workflow token the checkout persisted
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: publish docs/wiki of this release
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          .github/scripts/publish-wiki.sh "$TAG"
