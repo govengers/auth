@@ -123,8 +123,8 @@ func TestLogoutWhileImpersonatingUsesTheRealLogin(t *testing.T) {
 	application := newApplication(t, issuer, nil)
 	person := newBrowser(t)
 	require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
-	person.replaceIdentity(application.store, func(real *auth.Identity) *auth.Identity {
-		return &auth.Identity{Provider: "password", Subject: "user-9", Active: true, Impersonator: real}
+	person.replaceIdentity(application.store, func(impersonator *auth.Identity) *auth.Identity {
+		return &auth.Identity{Provider: "password", Subject: "user-9", Active: true, Impersonator: impersonator}
 	})
 
 	response := person.get(application.handler, prefix+"/logout", nil)

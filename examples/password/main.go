@@ -23,6 +23,8 @@ import (
 	"github.com/govengers/auth/session"
 )
 
+const contentTypeHeader = "Content-Type"
+
 // serverOptions is what newServer needs; main fills it from the environment.
 type serverOptions struct {
 	EncryptionKey   []byte           // 32 bytes, see session.ParseKey; the same on every replica
@@ -160,7 +162,7 @@ func authorize(check authorization.Check) func(http.Handler) http.Handler {
 
 func listNotes(writer http.ResponseWriter, request *http.Request) {
 	identity := auth.IdentityFrom(request.Context()) // never nil behind the Guard
-	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set(contentTypeHeader, "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]any{"owner": identity.Username, "notes": []string{}}) // a failed write means the client left
 }
 
@@ -169,13 +171,13 @@ func deleteNotes(writer http.ResponseWriter, _ *http.Request) {
 }
 
 func home(writer http.ResponseWriter, request *http.Request) {
-	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	writer.Header().Set(contentTypeHeader, "text/plain; charset=utf-8")
 	_, _ = fmt.Fprintf(writer, "hello %s\n", auth.IdentityFrom(request.Context()).Username) // a failed write means the client left
 }
 
 // loginPage stands in for your frontend's login form, which posts {"identifier","password"} as JSON to
 // /auth/password/login.
 func loginPage(writer http.ResponseWriter, _ *http.Request) {
-	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	writer.Header().Set(contentTypeHeader, "text/plain; charset=utf-8")
 	_, _ = fmt.Fprintln(writer, "POST {\"identifier\",\"password\"} to /auth/password/login") // a failed write means the client left
 }

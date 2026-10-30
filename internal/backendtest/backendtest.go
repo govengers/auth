@@ -16,6 +16,9 @@ import (
 
 const raceRounds = 50
 
+// roundMessage names the race round in a failed assertion.
+const roundMessage = "round %d"
+
 // Run exercises every session.Backend contract (put/get/pop/compare-and-swap/revoke, TTL, atomic pop and swap
 // under -race, revoke marker vs put).
 // newBackend returns a fresh, empty backend for one subtest and the function that moves that backend's
@@ -237,13 +240,13 @@ func testConcurrentPop(t *testing.T, backend session.Backend, _ func(time.Durati
 
 		winners := 0
 		for _, result := range results {
-			require.NoError(t, result.err, "round %d", round)
+			require.NoError(t, result.err, roundMessage, round)
 			if result.found {
 				winners++
-				require.Equal(t, "value", string(result.value), "round %d", round)
+				require.Equal(t, "value", string(result.value), roundMessage, round)
 			}
 		}
-		require.Equal(t, 1, winners, "round %d", round)
+		require.Equal(t, 1, winners, roundMessage, round)
 		requireAbsent(t, backend, "s", "state")
 	}
 }
@@ -264,7 +267,7 @@ func testConcurrentCompareAndSwap(t *testing.T, backend session.Backend, _ func(
 
 		winner := -1
 		for index := range swapped {
-			require.NoError(t, swapErrors[index], "round %d", round)
+			require.NoError(t, swapErrors[index], roundMessage, round)
 			if swapped[index] {
 				require.Equal(t, -1, winner, "round %d: two swaps of one value", round)
 				winner = index
@@ -288,13 +291,13 @@ func testRevokeRacingPut(t *testing.T, backend session.Backend, _ func(time.Dura
 		waitGroup.Go(func() { revokeError = backend.Revoke(ctx, sessionID, time.Hour) })
 		waitGroup.Wait()
 
-		require.NoError(t, revokeError, "round %d", round)
+		require.NoError(t, revokeError, roundMessage, round)
 		if putError != nil {
-			require.ErrorIs(t, putError, session.ErrRevoked, "round %d", round)
+			require.ErrorIs(t, putError, session.ErrRevoked, roundMessage, round)
 		}
 		requireAbsent(t, backend, sessionID, "a")
 		requireAbsent(t, backend, sessionID, "b")
-		require.ErrorIs(t, backend.Put(ctx, sessionID, "c", []byte("3"), time.Hour), session.ErrRevoked, "round %d", round)
+		require.ErrorIs(t, backend.Put(ctx, sessionID, "c", []byte("3"), time.Hour), session.ErrRevoked, roundMessage, round)
 	}
 }
 

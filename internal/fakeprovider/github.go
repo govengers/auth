@@ -21,6 +21,7 @@ const (
 	defaultGitHubClientSecret = "github-client-secret" //nolint:gosec // G101: the fake's fixed test credential
 	githubDefaultPageSize     = 30
 	githubMaximumPageSize     = 100
+	configuredFailureMessage  = "configured failure" // the error message of a FailWith answer
 )
 
 // GitHubEndpoint names an endpoint of the fake GitHub for FailWith and Calls.
@@ -224,7 +225,7 @@ func (s *GitHubServer) issueCode(grant githubGrant) string {
 // token answers like GitHub: problems with the code or the client are HTTP 200 with an "error" field.
 func (s *GitHubServer) token(writer http.ResponseWriter, request *http.Request) {
 	if failure := s.begin(GitHubEndpointToken); failure != 0 {
-		writeGitHubError(writer, failure, "configured failure")
+		writeGitHubError(writer, failure, configuredFailureMessage)
 		return
 	}
 	if err := request.ParseForm(); err != nil {
@@ -327,7 +328,7 @@ func githubQueryNumber(request *http.Request, name string, fallback int) int {
 // authorizeAPI counts the call and checks the configured failure and the bearer token; false means it answered.
 func (s *GitHubServer) authorizeAPI(writer http.ResponseWriter, request *http.Request, endpoint GitHubEndpoint) bool {
 	if failure := s.begin(endpoint); failure != 0 {
-		writeGitHubError(writer, failure, "configured failure")
+		writeGitHubError(writer, failure, configuredFailureMessage)
 		return false
 	}
 	authorization := request.Header.Get("Authorization")
@@ -346,7 +347,7 @@ func (s *GitHubServer) authorizeAPI(writer http.ResponseWriter, request *http.Re
 
 func (s *GitHubServer) revoke(writer http.ResponseWriter, request *http.Request) {
 	if failure := s.begin(GitHubEndpointRevoke); failure != 0 {
-		writeGitHubError(writer, failure, "configured failure")
+		writeGitHubError(writer, failure, configuredFailureMessage)
 		return
 	}
 	clientID, clientSecret, found := request.BasicAuth()
