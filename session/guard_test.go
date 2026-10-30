@@ -645,12 +645,17 @@ func TestGuardRefreshLosesToAConcurrentSave(t *testing.T) {
 	}
 }
 
-// swapFailingBackend fails every CompareAndSwap and passes everything else on.
+// swapFailingBackend passes the first passes CompareAndSwaps on and fails every later one without
+// committing it; everything else passes through.
 type swapFailingBackend struct {
 	Backend
+	passes atomic.Int32
 }
 
-func (swapFailingBackend) CompareAndSwap(context.Context, string, string, []byte, []byte) (bool, error) {
+func (b *swapFailingBackend) CompareAndSwap(ctx context.Context, sessionID, key string, previous, value []byte) (bool, error) {
+	if b.passes.Add(-1) >= 0 {
+		return b.Backend.CompareAndSwap(ctx, sessionID, key, previous, value)
+	}
 	return false, errBackendDown
 }
 
@@ -659,16 +664,39 @@ func TestGuardAnswersAFailedRefreshSaveWith500(t *testing.T) {
 		return identity, nil
 	}}
 	fixture := newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
-	fixture.store.options.Backend = swapFailingBackend{Backend: fixture.store.options.Backend}
+	backend := &swapFailingBackend{Backend: fixture.store.options.Backend}
+	backend.passes.Store(1) // the claim
+	fixture.store.options.Backend = backend
 	request := login(t, fixture.store, testIdentity())
 	fixture.clock.advance(2 * time.Minute)
 
 	result := serveGuarded(fixture.guard.RequireAPI(), request)
 
 	require.Equal(t, http.StatusInternalServerError, result.recorder.Code)
+	require.Equal(t, 1, refresher.callCount())
 	outcomes := fixture.observer.take()
 	require.Len(t, outcomes, 1)
 	require.Equal(t, auth.ActionRefresh, outcomes[0].Action)
+	require.Equal(t, auth.ResultError, outcomes[0].Result)
+	require.ErrorIs(t, outcomes[0].Err, errBackendDown)
+}
+
+func TestGuardCallsNoProviderWhileTheBackendFailsWrites(t *testing.T) {
+	refresher := &fakeRefresher{name: "password", refresh: func(identity *auth.Identity) (*auth.Identity, error) {
+		return identity, nil
+	}}
+	fixture := newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
+	fixture.store.options.Backend = &swapFailingBackend{Backend: fixture.store.options.Backend}
+	request := login(t, fixture.store, testIdentity())
+	fixture.clock.advance(2 * time.Minute)
+
+	for range 30 {
+		require.Equal(t, http.StatusInternalServerError, serveGuarded(fixture.guard.RequireAPI(), request).recorder.Code)
+	}
+
+	require.Zero(t, refresher.callCount(), "no claim committed, so no request may call the provider")
+	outcomes := fixture.observer.take()
+	require.Len(t, outcomes, 30)
 	require.Equal(t, auth.ResultError, outcomes[0].Result)
 	require.ErrorIs(t, outcomes[0].Err, errBackendDown)
 }
