@@ -1,0 +1,324 @@
+package github
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"slices"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/fakeprovider"
+	"github.com/govengers/auth/session"
+)
+
+const (
+	testExternalURL = "https://app.example.com"
+	testCookieName  = "__Host-auth_session" // the store prefixes a Secure host-only cookie
+)
+
+var errBackendDown = errors.New("backend down")
+
+// switchableBackend is a memory backend whose Get, writes (Put, CompareAndSwap) and Revoke can be made to
+// fail, and whose CompareAndSwap can be preceded by another request's write. Get honours the context like
+// the Redis backend does.
+type switchableBackend struct {
+	*session.MemoryBackend
+	failGet    atomic.Bool
+	failPut    atomic.Bool // fails Put and CompareAndSwap
+	failPutKey string      // Put of this key fails; set before the request, read by the handler's goroutine
+	failRevoke atomic.Bool
+	beforeSwap func() // runs before every CompareAndSwap; set before the request, read by the handler's goroutine
+}
+
+func (b *switchableBackend) Get(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	if b.failGet.Load() {
+		return nil, false, errBackendDown
+	}
+	return b.MemoryBackend.Get(ctx, sessionID, key)
+}
+
+func (b *switchableBackend) Put(ctx context.Context, sessionID, key string, value []byte, ttl time.Duration) error {
+	if b.failPut.Load() || key == b.failPutKey {
+		return errBackendDown
+	}
+	return b.MemoryBackend.Put(ctx, sessionID, key, value, ttl)
+}
+
+func (b *switchableBackend) CompareAndSwap(ctx context.Context, sessionID, key string, previous, value []byte) (bool, error) {
+	if b.failPut.Load() {
+		return false, errBackendDown
+	}
+	if b.beforeSwap != nil {
+		b.beforeSwap()
+	}
+	return b.MemoryBackend.CompareAndSwap(ctx, sessionID, key, previous, value)
+}
+
+func (b *switchableBackend) Revoke(ctx context.Context, sessionID string, ttl time.Duration) error {
+	if b.failRevoke.Load() {
+		return errBackendDown
+	}
+	return b.MemoryBackend.Revoke(ctx, sessionID, ttl)
+}
+
+// outcomeRecorder is an auth.Observer that keeps every outcome.
+type outcomeRecorder struct {
+	mutex    sync.Mutex
+	outcomes []auth.Outcome
+}
+
+func (r *outcomeRecorder) observe(_ context.Context, outcome auth.Outcome) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.outcomes = append(r.outcomes, outcome)
+}
+
+// last returns the latest outcome; the test fails without one.
+func (r *outcomeRecorder) last(t *testing.T) auth.Outcome {
+	t.Helper()
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	require.NotEmpty(t, r.outcomes)
+	return r.outcomes[len(r.outcomes)-1]
+}
+
+// testEnvironment is a provider wired to a fake GitHub and a memory session store.
+type testEnvironment struct {
+	fake     *fakeprovider.GitHubServer
+	backend  *switchableBackend
+	store    *session.Store
+	provider *Provider
+	outcomes *outcomeRecorder
+	serveMux *http.ServeMux
+}
+
+func defaultTestTeams() []fakeprovider.GitHubTeam {
+	return []fakeprovider.GitHubTeam{
+		{Organization: "Acme", Slug: "Developers"},
+		{Organization: "acme", Slug: "admins"},
+		{Organization: "acme", Slug: "ops"},
+		{Organization: "other", Slug: "unrelated"},
+	}
+}
+
+// newTestEnvironment starts a fake GitHub with teams and builds a provider for it; configure may change
+// the options before New.
+func newTestEnvironment(t *testing.T, teams []fakeprovider.GitHubTeam, configure func(options *Options)) *testEnvironment {
+	t.Helper()
+	fake := fakeprovider.StartGitHub(t, fakeprovider.GitHubOptions{
+		User:  fakeprovider.GitHubUser{ID: 42, Login: "Ada", Name: "Ada Lovelace", Email: "ada@example.com", AvatarURL: "https://avatars.example.com/42"},
+		Teams: teams,
+	})
+	memoryBackend, err := session.NewMemoryBackend(nil)
+	require.NoError(t, err)
+	backend := &switchableBackend{MemoryBackend: memoryBackend}
+	store, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: []byte("0123456789abcdef0123456789abcdef")})
+	require.NoError(t, err)
+	outcomes := &outcomeRecorder{}
+	options := testOptions(fake, store)
+	options.Observer = outcomes.observe
+	if configure != nil {
+		configure(options)
+	}
+	provider, err := New(options)
+	require.NoError(t, err)
+	serveMux := http.NewServeMux()
+	auth.RegisterRoutes(serveMux, provider.Routes())
+	return &testEnvironment{fake: fake, backend: backend, store: store, provider: provider, outcomes: outcomes, serveMux: serveMux}
+}
+
+func testOptions(fake *fakeprovider.GitHubServer, store *session.Store) *Options {
+	return &Options{
+		ClientID:      fake.ClientID(),
+		ClientSecret:  fake.ClientSecret(),
+		AuthorizeURL:  fake.AuthorizeURL(),
+		TokenURL:      fake.TokenURL(),
+		APIURL:        fake.APIURL(),
+		ExternalURL:   testExternalURL,
+		AllowedTeams:  []string{"acme/developers"},
+		AdminTeams:    []string{"Acme/Admins"},
+		RelevantTeams: []string{"acme/ops"},
+		Sessions:      store,
+	}
+}
+
+func newRequest(t *testing.T, method, target string) *http.Request {
+	t.Helper()
+	return httptest.NewRequestWithContext(t.Context(), method, target, nil)
+}
+
+// serve answers request with the provider's routes.
+func (e *testEnvironment) serve(request *http.Request) *httptest.ResponseRecorder {
+	return serveRecorder(e.serveMux, request)
+}
+
+func serveRecorder(handler http.Handler, request *http.Request) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+// withSessionCookie adds the session cookie that response set to request, as a browser would.
+func withSessionCookie(t *testing.T, request *http.Request, response *httptest.ResponseRecorder) *http.Request {
+	t.Helper()
+	request.AddCookie(sessionCookie(t, response))
+	return request
+}
+
+// sessionCookie returns the session cookie response set; the test fails without one.
+func sessionCookie(t *testing.T, response *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	for _, cookie := range response.Result().Cookies() {
+		if cookie.Name == testCookieName {
+			return cookie
+		}
+	}
+	require.Fail(t, "no session cookie set")
+	return nil
+}
+
+// startLogin calls the login route and returns its response, whose Location points at the fake GitHub.
+func (e *testEnvironment) startLogin(t *testing.T, returnTo string) *httptest.ResponseRecorder {
+	t.Helper()
+	target := testExternalURL + "/auth/github/login"
+	if returnTo != "" {
+		target += "?return_to=" + url.QueryEscape(returnTo)
+	}
+	response := e.serve(newRequest(t, http.MethodGet, target))
+	require.Equal(t, http.StatusFound, response.Code)
+	return response
+}
+
+// approve follows location to the fake GitHub's authorize endpoint and returns the callback URL it redirects to.
+func approve(t *testing.T, location string) string {
+	t.Helper()
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, location, nil)
+	require.NoError(t, err)
+	response, err := client.Do(request)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, http.StatusFound, response.StatusCode)
+	return response.Header.Get("Location")
+}
+
+// callback delivers callbackURL to the callback route with the login's session cookie.
+func (e *testEnvironment) callback(t *testing.T, login *httptest.ResponseRecorder, callbackURL string) *httptest.ResponseRecorder {
+	t.Helper()
+	return e.serve(withSessionCookie(t, newRequest(t, http.MethodGet, callbackURL), login))
+}
+
+// login runs the whole browser flow and returns the callback's response, which must succeed.
+func (e *testEnvironment) login(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	login := e.startLogin(t, "")
+	response := e.callback(t, login, approve(t, login.Header().Get("Location")))
+	require.Equal(t, http.StatusFound, response.Code, response.Body.String())
+	return response
+}
+
+// sessionOf opens the session whose cookie response set.
+func (e *testEnvironment) sessionOf(t *testing.T, response *httptest.ResponseRecorder) session.Session {
+	t.Helper()
+	current, err := e.store.Open(withSessionCookie(t, newRequest(t, http.MethodGet, testExternalURL+"/"), response))
+	require.NoError(t, err)
+	return current
+}
+
+// identityOf returns the identity of the session whose cookie response set.
+func (e *testEnvironment) identityOf(t *testing.T, response *httptest.ResponseRecorder) *auth.Identity {
+	t.Helper()
+	identity, err := e.sessionOf(t, response).Identity(t.Context())
+	require.NoError(t, err)
+	return identity
+}
+
+// redirectingAPI stands between the provider and the fake GitHub API (inFrontOf) and passes every request
+// on, except requests to the path set by redirect, which it answers with a redirect to a sink. The sink
+// forges what an attacker would: /user is another user, /user/teams adds acme/admins. It records the
+// Authorization header of every request it gets.
+type redirectingAPI struct {
+	url            string
+	sinkURL        string
+	mutex          sync.Mutex
+	proxy          http.Handler // to the fake GitHub API; set by inFrontOf
+	path           string       // redirected path; empty passes every request on
+	status         int
+	authorizations []string // of the sink's requests
+}
+
+func startRedirectingAPI(t *testing.T) *redirectingAPI {
+	t.Helper()
+	api := &redirectingAPI{}
+	sink := httptest.NewServer(http.HandlerFunc(api.forge))
+	t.Cleanup(sink.Close)
+	front := httptest.NewServer(http.HandlerFunc(api.serve))
+	t.Cleanup(front.Close)
+	api.url, api.sinkURL = front.URL, sink.URL
+	return api
+}
+
+// inFrontOf returns a newTestEnvironment configure function that makes the front the provider's APIURL.
+func (a *redirectingAPI) inFrontOf(t *testing.T) func(options *Options) {
+	return func(options *Options) {
+		target, err := url.Parse(options.APIURL)
+		require.NoError(t, err)
+		a.mutex.Lock()
+		defer a.mutex.Unlock()
+		a.proxy = httputil.NewSingleHostReverseProxy(target)
+		options.APIURL = a.url
+	}
+}
+
+// redirect answers every later request to path with a redirect of status to the sink.
+func (a *redirectingAPI) redirect(path string, status int) {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	a.path, a.status = path, status
+}
+
+// sinkAuthorizations returns the Authorization header of every request the sink got, oldest first.
+func (a *redirectingAPI) sinkAuthorizations() []string {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	return slices.Clone(a.authorizations)
+}
+
+func (a *redirectingAPI) serve(writer http.ResponseWriter, request *http.Request) {
+	a.mutex.Lock()
+	path, status, proxy := a.path, a.status, a.proxy
+	a.mutex.Unlock()
+	if request.URL.Path == path {
+		http.Redirect(writer, request, a.sinkURL+path, status) // one page: the forged teams list is not full
+		return
+	}
+	proxy.ServeHTTP(writer, request)
+}
+
+func (a *redirectingAPI) forge(writer http.ResponseWriter, request *http.Request) {
+	a.mutex.Lock()
+	a.authorizations = append(a.authorizations, request.Header.Get("Authorization"))
+	a.mutex.Unlock()
+	writer.Header().Set("Content-Type", "application/json")
+	body := `[]`
+	switch request.URL.Path {
+	case "/user":
+		body = `{"id":7,"login":"mallory"}`
+	case "/user/teams":
+		body = `[{"slug":"developers","organization":{"login":"acme"}},{"slug":"admins","organization":{"login":"acme"}}]`
+	}
+	_, _ = io.WriteString(writer, body) // a lost write fails the forged read, which the tests expect anyway
+}

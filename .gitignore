@@ -1,0 +1,11 @@
+# just recipes write test reports and builds here
+sandbox/
+
+# output of a plain `go build ./cmd/forwardauth` in the repo root
+/forwardauth
+
+# local configuration and keys
+.env
+.env.*
+*.pem
+*.key

@@ -1,0 +1,59 @@
+# End-to-end stack: Traefik (forwardAuth) -> the forwardauth image, with a fake OIDC issuer and whoami.
+#
+# Hostname strategy: every URL is http://127.0.0.1:<port>, with a port the justfile picks (E2E_APP_PORT for
+# Traefik, E2E_ISSUER_PORT for the issuer). The library accepts http only for loopback hosts (design D16),
+# and the issuer URL must be the same string in the browser's redirects, in the discovery document and in
+# forwardauth's configuration. So forwardauth runs in the network namespace of the issuer container:
+# there, 127.0.0.1:<issuer port> is the issuer, exactly as it is on the host through the published port.
+# No DNS, no /etc/hosts, no dialer tricks in the test client.
+name: auth-e2e
+services:
+  traefik:
+    image: traefik:v3.7.16
+    ports: ["127.0.0.1:${E2E_APP_PORT:?run just test-e2e}:8080"]
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+  whoami:
+    image: traefik/whoami:v1.12.0
+
+  # Owns the network namespace that forwardauth joins; Traefik reaches forwardauth through this service name.
+  issuer:
+    build: {context: ../../.., dockerfile: test/e2e/compose/docker/fakeissuer.Dockerfile}
+    ports: ["127.0.0.1:${E2E_ISSUER_PORT:?run just test-e2e}:${E2E_ISSUER_PORT}"]
+    environment:
+      LISTEN_ADDRESS: ":${E2E_ISSUER_PORT}"
+      ISSUER_URL: http://127.0.0.1:${E2E_ISSUER_PORT}
+      CLIENT_ID: forwardauth
+      CLIENT_SECRET: e2e-oidc-secret
+      REDIRECT_URIS: http://127.0.0.1:${E2E_APP_PORT}/auth/oidc/oidc/callback
+      POST_LOGOUT_REDIRECT_URIS: http://127.0.0.1:${E2E_APP_PORT}/
+    healthcheck: # distroless has no shell: the binary probes itself
+      test: ["CMD", "/fakeissuer", "healthcheck"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+  forwardauth:
+    build: {context: ../../.., dockerfile: docker/forwardauth.Dockerfile}
+    network_mode: service:issuer
+    environment: # design 6.2; the fixed values are test fixtures, not secrets
+      PROVIDER: oidc
+      EXTERNAL_URL: http://127.0.0.1:${E2E_APP_PORT}
+      OIDC_ISSUER: http://127.0.0.1:${E2E_ISSUER_PORT}
+      OIDC_CLIENT_ID: forwardauth
+      OIDC_CLIENT_SECRET: e2e-oidc-secret
+      SESSION_ENCRYPTION_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY= # base64 of 32 bytes
+      SESSION_INSECURE_COOKIE: "true" # the stack is plain HTTP
+      SHUTDOWN_DELAY_SECONDS: "0"
+      JWT_ENABLED: "true"
+      JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY:?export a PEM key, or run just test-e2e}
+    depends_on:
+      issuer: {condition: service_healthy} # forwardauth discovers the issuer at startup
+    restart: on-failure:5

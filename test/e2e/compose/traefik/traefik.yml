@@ -1,0 +1,16 @@
+entryPoints:
+  web:
+    address: ":8080" # the port in every e2e URL: the network aliases of this service target it
+    http:
+      aliasHeadersStrategy: delete # X_Auth_User and X.Auth.User must not alias a header forwardAuth sets
+  traefik:
+    address: ":8082" # ping only; its default :8080 would collide with web
+    http:
+      aliasHeadersStrategy: delete
+ping:
+  entryPoint: traefik
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yml
+log:
+  level: INFO

@@ -1,0 +1,13 @@
+.git
+.github
+docs
+sandbox
+**/*.md
+**/*_test.go
+.env
+.env.*
+**/*.env
+**/.env.*
+**/*.pem
+**/*.key
+/forwardauth
