@@ -68,7 +68,7 @@ Without Keycloak, `OIDCRoles` (`realm_access.roles`), `OIDCClientRoles` (`resour
 
 ## Keycloak enrichment
 
-`keycloak.New(&keycloak.Options{...})` returns a client whose `Enrich` is an `auth.Hook`; set it as `OnLogin` (or call it first inside your own hook). It replaces `OIDCRoles` (composite realm roles), `OIDCClientRoles` (of `ClientRolesClientID`), `Groups` (paths) and `Attributes` with the Admin API's answer and refuses the login with 403 when `RequiredRealmRoles`, `RequiredClientRoles` or `RequiredGroups` are missing. It authenticates with the client credentials grant of a service account (`ClientID`, `ClientSecret`), which needs the `realm-management` roles listed in the [README](../../README.md#oidc-with-keycloak). Tested excerpt: [oidc/keycloak/example_test.go](../../oidc/keycloak/example_test.go).
+`keycloak.New(&keycloak.Options{...})` returns a client whose `Enrich` is an `auth.Hook`; set it as `OnLogin` (or call it first inside your own hook). It replaces `OIDCRoles` (composite realm roles), `OIDCClientRoles` (of `ClientRolesClientID`), `Groups` (paths) and `Attributes` with the Admin API's answer and refuses the login with 403 when `RequiredRealmRoles`, `RequiredClientRoles` or `RequiredGroups` are missing. It authenticates with the client credentials grant of a service account (`ClientID`, `ClientSecret`), which needs the `realm-management` roles `view-users`, `query-users` and `query-groups`, plus `view-clients` and `query-clients` with `ClientRolesClientID` ([README](../../README.md#oidc-with-keycloak)). Tested excerpt: [oidc/keycloak/example_test.go](../../oidc/keycloak/example_test.go).
 
 ## Refusal codes
 

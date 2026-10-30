@@ -60,7 +60,7 @@ Prefix `PathPrefix`, default `/auth/password`. Bodies are JSON (`Content-Type: a
 | Option | Default | Note |
 |---|---|---|
 | `Sessions`, `Storage` | required | |
-| `PathPrefix` | `/auth/password` | segments of `A-Z a-z 0-9 . _ ~ -`, no trailing `/` |
+| `PathPrefix` | `/auth/password` | segments of `A-Z a-z 0-9 . _ ~ -`, no trailing `/`, no `.` or `..` segment |
 | `EnableRegistration` | off | off means the route is not registered at all |
 | `Policy.MinimumLength` | 12 characters | composition rules opt-in; maximum 128 bytes |
 | `TOTP.Enabled`, `TOTP.Issuer` | off | Issuer required when enabled |

@@ -39,7 +39,7 @@ func ExampleClient_Enrich() {
 	client, err := keycloak.New(&keycloak.Options{
 		URL:                server.URL, // e.g. https://sso.example.com
 		Realm:              "staff",
-		ClientID:           "app-admin", // service account with the realm-management roles view-users and query-groups
+		ClientID:           "app-admin", // service account with the realm-management roles view-users, query-users and query-groups (README)
 		ClientSecret:       "service-secret",
 		RequiredRealmRoles: []string{"admin"},
 	})
