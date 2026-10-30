@@ -6,3 +6,6 @@ sandbox/
 
 # local configuration and keys
 .env
+.env.*
+*.pem
+*.key

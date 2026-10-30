@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# One run per ref at a time, the newest last: a slower run of an older commit cannot re-point :main (or a
+# version tag) after a newer one. A queued run is replaced by a newer one; a running one finishes.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   image:
     name: build and push ghcr.io/govengers/forwardauth
