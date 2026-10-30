@@ -27,6 +27,7 @@ import (
 const (
 	testLoginURL  = "https://app.example.com/auth/test/login"
 	testIssuer    = "https://app.example.com"
+	testAudience  = "app"
 	testAPIKey    = "ci-secret-0123456789"
 	testKeyName   = "ci"
 	testRoutePath = "/auth/test/callback"
@@ -79,6 +80,7 @@ type harnessOptions struct {
 	readinessCheck   func(ctx context.Context) error
 	emitter          wideevent.Emitter // replaces the event recorder
 	dependencies     *Dependencies     // records the session store's calls
+	trustedProxies   []string
 }
 
 func newHarness(t *testing.T, options harnessOptions) *harness {
@@ -106,6 +108,7 @@ func newHarness(t *testing.T, options harnessOptions) *harness {
 		SampleRate:       1,
 		MetricsRegistry:  registry,
 		ReadinessCheck:   options.readinessCheck,
+		TrustedProxies:   options.trustedProxies,
 	}
 	if options.emitter != nil {
 		serverOptions.Emitter = options.emitter
@@ -151,7 +154,7 @@ func newTestSigner(t *testing.T) *jwt.Signer {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
-	signer, err := jwt.NewSigner(&jwt.SignerOptions{PrivateKey: pemBytes, Issuer: testIssuer})
+	signer, err := jwt.NewSigner(&jwt.SignerOptions{PrivateKey: pemBytes, Issuer: testIssuer, Audience: []string{testAudience}})
 	require.NoError(t, err)
 	return signer
 }

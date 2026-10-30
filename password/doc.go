@@ -5,7 +5,8 @@
 //
 // Users live in the application's database behind Storage; MemoryStorage serves tests and examples. A
 // successful login stores an auth.Identity in a session.Store session, which a session.Guard then
-// authenticates; the Provider is also the session.Refresher that ends the sessions of deleted users.
+// authenticates; the Provider is also the session.Refresher that ends the sessions of deleted users and the
+// sessions opened before a user's password or second factor changed.
 //
 // Login answers 200 with the identity, or 202 {"challenge":"totp"} when the user has TOTP (verify the code
 // at POST {prefix}/totp/verify) and 202 {"challenge":"totp_setup"} when TOTPOptions.Required makes a user

@@ -10,7 +10,7 @@ From [examples/password/main.go](../../examples/password/main.go) (tested by its
 	provider, err := password.New(&password.Options{
 		Sessions:           store,
 		Storage:            options.Storage,
-		EnableRegistration: true,                                                   // POST /auth/password/register
+		EnableRegistration: true,                                                   // POST /auth/password/register: open sign-up for the demo
 		TOTP:               password.TOTPOptions{Enabled: true, Issuer: "Example"}, // optional second factor
 		OnLogin:            grantRoles(options.AdministratorID),
 	})
@@ -62,7 +62,7 @@ Prefix `PathPrefix`, default `/auth/password`. The provider reads sessions itsel
 - Limits: `TOTP.Digits` 6 or 8, `Period` at most 3600 s, `Skew` at most 10, `BackupCodeCount` at most 20; backup codes are at most 128 bytes and the alphabet and length must give at least 1,000,000 distinct codes.
 - Every TOTP code is accepted once (`Storage.ConsumeTOTPStep`). `MaximumAttempts` (default 5, no "unlimited") counts wrong codes in a row across logins; then the second factor stays locked until a code is verified or your application calls `Storage.ResetTOTPAttempts`.
 - `Policy.MinimumLength` counts characters; passwords are 1-128 bytes. Stable client codes replace translated messages.
-- Existing Argon2id hashes verify unchanged; `LegacyVerifier: password.VerifyBcrypt` upgrades bcrypt hashes at the next login, and Argon2id hashes on other parameters than `HashParameters` are rehashed too (only login rehashes, not the password checks of the TOTP routes). A stored hash nothing can verify answers like a wrong password (401 `invalid_credentials`, same cost); unknown users cost the same Argon2id verification as real ones.
+- Existing Argon2id hashes verify unchanged; `LegacyVerifier: password.VerifyBcrypt` upgrades bcrypt hashes at the next login, and Argon2id hashes on other parameters than `HashParameters` are rehashed too (only login rehashes, not the password checks of the TOTP routes). A stored hash nothing can verify answers like a wrong password (401 `invalid_credentials`, same cost); unknown users cost the same Argon2id verification as real ones, except users whose hash is still a legacy one: they cost the legacy verification until their first login ([Security](Security.md#known-limits)).
 
 ## Options that matter
 
@@ -78,16 +78,20 @@ Prefix `PathPrefix`, default `/auth/password`. The provider reads sessions itsel
 | `LegacyVerifier` | none | `password.VerifyBcrypt` upgrades bcrypt hashes at the next login |
 | `OnLogin` | none | must keep `UserID` |
 
+## Changing a password
+
+The provider has no password-change or reset route; your application does it: confirm the current password (`password.Verify` against the stored hash, or a fresh login), check the new one with `Policy.Validate` (the provider's `Options.Policy`), then `Storage.UpdatePasswordHash(ctx, id, currentHash, password.Hash(newPassword, parameters))`. Every session of the user, including the one that asked for the change, ends within `RefreshInterval` (default 1 minute), and the TOTP routes refuse them at once; let the user log in again with the new password.
+
 ## Refusal codes
 
-`invalid_credentials` (401: login, TOTP enable and disable), `no_pending_login` and `invalid_totp_code` (401: verify, enable), `totp_setup_missing` (400), `totp_already_enabled`, `totp_not_enabled` (409), `user_exists` (409), `weak_password`, `invalid_username`, `invalid_email` (400: register), `forbidden` (403: cross-site logout). Shape and mapping: [Errors-and-Observability](Errors-and-Observability.md).
+`invalid_credentials` (401: login, TOTP enable and disable), `no_pending_login` and `invalid_totp_code` (401: verify, enable), `totp_setup_missing` (400), `totp_already_enabled`, `totp_not_enabled` (409), `user_exists` (409), `weak_password`, `invalid_username`, `invalid_email` (400: register), `forbidden` (403: cross-site logout; the TOTP routes for an impersonating or inactive identity). Shape and mapping: [Errors-and-Observability](Errors-and-Observability.md).
 
 ## Gotchas
 
 - `OnLogin` must keep `identity.UserID` (the `Storage` user ID); return `identity.Clone()` with changes. A replaced `UserID` fails the login with 500.
-- The provider as `Refresher` re-reads the user every minute and updates only `Username` and `Email`; a deleted user loses the session. Roles added by `OnLogin` stay until the session ends.
+- The provider as `Refresher` re-reads the user every minute and updates only `Username` and `Email`; a deleted user loses the session, and so does a session opened before the user's password hash or second factor changed (`UpdatePasswordHash`, a login's rehash, TOTP enable or disable in another session); the TOTP routes refuse such a session at once. The session that enabled or disabled TOTP, or whose login rehashed the password, stays. Sessions from before this check (no credential stamp) end at their first refresh: users log in once more after the upgrade. Roles added by `OnLogin` stay until the session ends.
 - `TOTP.Enabled` off while users have TOTP enrolled: their logins fail with 500. Clear their TOTP first.
-- Anyone with the password can lock the second factor (`MaximumAttempts`); rate-limit `/login` and `/totp/verify` at the edge. There is no in-process rate limit.
+- Anyone with the password can lock the second factor (`MaximumAttempts`); rate-limit `/login` and `/totp/verify` at the edge, and `/register` too (each costs an anonymous Argon2id). There is no in-process rate limit.
 - With `TOTP.Required`, enrollment is trust-on-first-use.
 - Usernames are 3-50 of `[a-zA-Z0-9_]` and never contain `@`; the one `identifier` field is an email when it contains `@`.
 

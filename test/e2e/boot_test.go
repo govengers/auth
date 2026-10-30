@@ -73,6 +73,18 @@ func TestBootFailsListingEveryMissingOrInvalidVariable(t *testing.T) {
 			}),
 			problems: []string{"SESSION_REDIS_ADDRESS: ping Redis at 127.0.0.1:1"},
 		},
+		{
+			name: "redis sentinel and tls values that do not fit, and a trusted proxy that is no address",
+			environment: merged(oidcEnvironment("http://127.0.0.1:1"), map[string]string{
+				"EXTERNAL_URL": "http://127.0.0.1:8080", "SESSION_REDIS_ENABLED": "true", "SESSION_REDIS_ADDRESS": "127.0.0.1:6379",
+				"SESSION_REDIS_SENTINEL_MASTER": "sessions", "SESSION_REDIS_SENTINEL_PASSWORD": "ci-secret-0123456789",
+				"SESSION_REDIS_TLS_CA_FILE": "/does/not/exist.pem", "TRUSTED_PROXIES": "10.0.0.0/8,traefik",
+			}),
+			problems: []string{
+				"SESSION_REDIS_ADDRESS must be empty with SESSION_REDIS_SENTINEL_MASTER", "SESSION_REDIS_SENTINEL_ADDRESSES needs at least one host:port",
+				"SESSION_REDIS_TLS_CA_FILE is set but SESSION_REDIS_TLS_ENABLED=false", `TRUSTED_PROXIES: \"traefik\" is neither an IP address nor a CIDR`,
+			},
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

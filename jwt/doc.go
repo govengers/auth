@@ -13,7 +13,8 @@
 //	preferred_username, name, email, picture         Identity.Username, Name, Email, Picture
 //	roles, realm_roles, client_roles, groups, teams  Identity.Roles, OIDCRoles, OIDCClientRoles, Groups, Teams (JSON arrays)
 //	permissions                                      Identity.Permissions as text forms (["builds:write","*:read"])
-//	any other key of Identity.Claims                 copied, except nonce, at_hash, c_hash, auth_time, sid, azp
+//	any other key of Identity.Claims                 copied, except nonce, at_hash, c_hash, auth_time, sid, azp,
+//	                                                 realm_access, resource_access
 //
 // Sign fails on an invalid permission. Verify reads the same claims back, sets Active and puts all claims
 // of the token into Identity.Claims; permission entries that are not strings or do not parse are dropped.

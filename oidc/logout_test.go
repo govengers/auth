@@ -123,8 +123,8 @@ func TestLogoutWhileImpersonatingUsesTheRealLogin(t *testing.T) {
 	application := newApplication(t, issuer, nil)
 	person := newBrowser(t)
 	require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
-	person.replaceIdentity(application.store, func(real *auth.Identity) *auth.Identity {
-		return &auth.Identity{Provider: "password", Subject: "user-9", Active: true, Impersonator: real}
+	person.replaceIdentity(application.store, func(impersonator *auth.Identity) *auth.Identity {
+		return &auth.Identity{Provider: "password", Subject: "user-9", Active: true, Impersonator: impersonator}
 	})
 
 	response := person.get(application.handler, prefix+"/logout", nil)
@@ -302,6 +302,57 @@ func TestLogoutIgnoresAClientDisconnect(t *testing.T) {
 	}
 }
 
+func TestLogoutReleasesAHungBackendOrHookAfterTheTimeout(t *testing.T) {
+	oidc.ShortenLogoutTimeout(t, 50*time.Millisecond)
+	issuer := startIssuer(t, nil)
+	frontChannel := prefix + "/frontchannel-logout?iss=" + url.QueryEscape(issuer.IssuerURL()) + "&sid=idp-session-1"
+	waitForCancel := func(ctx context.Context, _ *auth.Identity) { <-ctx.Done() }
+	testCases := []struct {
+		name       string
+		target     string
+		hangingKey string
+		onLogout   auth.LogoutHook
+		wantStatus int
+	}{
+		{name: "RP-initiated, session read", target: prefix + "/logout", hangingKey: "identity", wantStatus: http.StatusFound},
+		{name: "RP-initiated, OnLogout", target: prefix + "/logout", onLogout: waitForCancel, wantStatus: http.StatusFound},
+		{name: "front-channel, session read", target: frontChannel, hangingKey: "identity", wantStatus: http.StatusOK},
+		{name: "front-channel, OnLogout", target: frontChannel, onLogout: waitForCancel, wantStatus: http.StatusOK},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			backend := &failingBackend{}
+			application := newApplicationOn(t, newStoreOn(t, backend), issuer, func(options *oidc.Options) { options.OnLogout = testCase.onLogout })
+			person := newBrowser(t)
+			require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
+			signedIn := maps.Clone(person.cookies)
+			backend.hangKey(testCase.hangingKey)
+
+			response := serveWithin(t, application.handler, person, testCase.target, 5*time.Second)
+
+			require.Equal(t, testCase.wantStatus, response.Code)
+			backend.hangKey("")
+			person.cookies = signedIn
+			require.Equal(t, http.StatusUnauthorized, person.me(application), "the session ended all the same")
+		})
+	}
+}
+
+// serveWithin sends GET target with the browser's cookies to handler and fails the test when the
+// handler does not answer within limit.
+func serveWithin(t *testing.T, handler http.Handler, person *browser, target string, limit time.Duration) *httptest.ResponseRecorder {
+	t.Helper()
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() { answered <- person.get(handler, target, nil) }()
+	select {
+	case response := <-answered:
+		return response
+	case <-time.After(limit):
+		t.Fatalf("GET %s did not answer within %s", target, limit)
+		return nil
+	}
+}
+
 func TestLogoutDegradesWhenTheSessionCannotBeRead(t *testing.T) {
 	issuer := startIssuer(t, nil)
 	frontChannel := prefix + "/frontchannel-logout?iss=" + url.QueryEscape(issuer.IssuerURL()) + "&sid=idp-session-1"
@@ -383,12 +434,14 @@ func withoutErrorAndIdentity(outcome auth.Outcome) auth.Outcome {
 }
 
 // failingBackend is a memory backend whose Revoke fails once failRevoke was called, whose Put and Get of
-// the key set by failKey fail, and whose Get fails on a done context.
+// the key set by failKey fail, whose Get of the key set by hangKey waits for the context to end, and whose
+// Get fails on a done context.
 type failingBackend struct {
 	session.Backend
 	mutex      sync.Mutex
 	failing    bool
 	failingKey string
+	hangingKey string
 }
 
 var (
@@ -406,6 +459,18 @@ func (b *failingBackend) failKey(key string) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 	b.failingKey = key
+}
+
+func (b *failingBackend) hangKey(key string) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	b.hangingKey = key
+}
+
+func (b *failingBackend) hangs(key string) bool {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return key != "" && key == b.hangingKey
 }
 
 func (b *failingBackend) fails(key string) bool {
@@ -435,6 +500,10 @@ func (b *failingBackend) Put(ctx context.Context, sessionID, key string, value [
 func (b *failingBackend) Get(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
+	}
+	if b.hangs(key) {
+		<-ctx.Done()
+		return nil, false, ctx.Err()
 	}
 	if b.fails(key) {
 		return nil, false, errBackendDown

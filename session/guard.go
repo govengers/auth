@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -26,12 +27,23 @@ const (
 // Refresher re-validates identities of one provider. The Guard calls it for identities whose last
 // refresh is older than RefreshInterval, always with the real identity (identity.Real()).
 // Return a copy with provider-owned fields updated; keep every other field (roles set by OnLogin etc.).
-// ErrUnauthenticated or ErrForbidden end the session; any other error keeps the identity (degraded) until
+// ErrUnauthenticated or ErrForbidden end the session (a Refresher that is also a Revoker is called first); any other error keeps the identity (degraded) until
 // the last successful verification is older than GuardOptions.MaximumUnverifiedAge. Refresh runs without the request's cancellation, bounded by 30 s. Implementations must be safe for
 // concurrent use.
 type Refresher interface {
 	Name() string // the Identity.Provider it refreshes
 	Refresh(ctx context.Context, current Session, identity *auth.Identity) (*auth.Identity, error)
+}
+
+// Revoker is optionally implemented by a Refresher whose provider holds state for a session at the
+// identity provider, such as GitHub's OAuth token. Before the Guard ends a session whose refresh it
+// refused (a refusal of the Refresher, or a failure lasting longer than MaximumUnverifiedAge), it calls
+// RevokeSession with the session, which still holds the provider's values, on a context without the
+// request's cancellation and with its own 10 s timeout. An error only degrades the outcome: the session
+// ends either way. A session that expires (MaximumAge) or ends otherwise is not seen by the Guard, so it is
+// not called then. Implementations must be safe for concurrent use.
+type Revoker interface {
+	RevokeSession(ctx context.Context, current Session) error
 }
 
 // GuardOptions configures NewGuard.
@@ -189,33 +201,33 @@ func (g *Guard) refreshDue(stored identityEnvelope) bool {
 // a failure is a refusal as well. The save swaps against the claim: when another request saved the session
 // meanwhile, that save wins and the request continues with it. The claim, the Refresher and everything
 // after them run without the request's cancellation: a client aborting each due refresh would otherwise
-// keep a refused identity alive with the claim taken. A claim the backend failed may have committed with
-// its reply lost, so the refresh runs anyway (degraded); when it did not commit, the save loses its swap.
+// keep a refused identity alive with the claim taken. A claim the backend failed is read back: when the
+// stored value is the claim, it committed with its reply lost and the refresh runs (degraded); otherwise
+// the request fails without calling the provider, so a backend failing writes costs no provider call.
 func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, current Session, stored identityEnvelope) (*auth.Identity, error) {
 	ctx := request.Context()
 	refreshContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
 	defer cancel()
 	realIdentity := stored.Identity.Real()
 	outcome := auth.Outcome{Provider: realIdentity.Provider, Action: auth.ActionRefresh, Identity: stored.Identity}
-	readAt := stored.RefreshedAt
-	stored.RefreshedAt = g.now()
-	claimed, swapped, err := current.swapEnvelope(refreshContext, stored)
+	claimed, owned, err := g.claim(refreshContext, current, stored)
 	switch {
-	case err != nil && claimed.sealed == nil: // nothing was sent: the session expired or could not be sealed
+	case !owned && err != nil:
 		outcome.Err = err
 		return nil, g.reportFailure(ctx, outcome)
-	case err == nil && !swapped:
+	case !owned:
 		return stored.Identity, nil
 	}
-	outcome.Err = err // a failed claim that may have committed: refreshed anyway
+	outcome.Err = err // a claim that committed although the backend failed it: refreshed, degraded
 	refreshed, err := g.refreshers[realIdentity.Provider].Refresh(refreshContext, current, realIdentity.Clone())
 	err = g.refreshError(claimed, realIdentity.Provider, refreshed, err)
 	switch {
 	case isRefusal(err):
-		outcome.Err = err
-		if endError := g.endRefusedSession(writer, request.WithContext(refreshContext), current, claimed, readAt); endError != nil {
+		revokeError := g.revokeAtProvider(ctx, realIdentity.Provider, current) // before End, which deletes what it reads
+		outcome.Err = errors.Join(err, revokeError)
+		if endError := g.endRefusedSession(writer, request.WithContext(refreshContext), current, claimed, stored.RefreshedAt); endError != nil {
 			// The session stays usable: a 500, not the refusal (kept as text only, so it cannot decide the answer).
-			outcome.Err = fmt.Errorf("end session refused by its refresh (%s): %w", err.Error(), endError)
+			outcome.Err = errors.Join(fmt.Errorf("end session refused by its refresh (%s): %w", err.Error(), endError), revokeError)
 		}
 		return nil, g.reportFailure(ctx, outcome)
 	case err != nil:
@@ -238,6 +250,23 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 	return saved.Identity, nil
 }
 
+// claim takes the due refresh by swapping in stored with refreshedAt moved to now and returns the claimed
+// envelope. owned reports whether this request runs the refresh: with err, the backend failed the claim but
+// it committed (read back: sealed values never repeat, so only its reply was lost); err without owned is the
+// failure to answer with; neither means another request claimed or saved first.
+func (g *Guard) claim(ctx context.Context, current Session, stored identityEnvelope) (claimed identityEnvelope, owned bool, err error) {
+	stored.RefreshedAt = g.now()
+	claimed, swapped, err := current.swapEnvelope(ctx, stored)
+	if err == nil || claimed.sealed == nil { // answered, or nothing sent (an expired session, a sealing failure)
+		return claimed, swapped, err
+	}
+	readBack, readError := current.envelope(ctx)
+	if readError == nil && bytes.Equal(readBack.sealed, claimed.sealed) {
+		return claimed, true, err
+	}
+	return claimed, false, errors.Join(err, readError)
+}
+
 // refreshError is the error of a refresh that returned refreshed and err: nil on success, a missing
 // identity, err, or, when the identity was last verified longer than MaximumUnverifiedAge ago, a refusal
 // with err as its cause, so a lasting failure cannot keep stale teams and roles until MaximumAge.
@@ -254,6 +283,22 @@ func (g *Guard) refreshError(claimed identityEnvelope, provider string, refreshe
 // isRefusal reports whether a Refresher refused the identity, which ends the session.
 func isRefusal(err error) bool {
 	return errors.Is(err, auth.ErrUnauthenticated) || errors.Is(err, auth.ErrForbidden)
+}
+
+// revokeAtProvider lets provider's Refresher, when it is a Revoker, revoke what it holds for the session
+// at the identity provider. It runs detached and bounded on its own, so neither a disconnecting client nor
+// a refresh that used up its timeout skips it.
+func (g *Guard) revokeAtProvider(ctx context.Context, provider string, current Session) error {
+	revoker, isRevoker := g.refreshers[provider].(Revoker)
+	if !isRevoker {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revokeTimeout)
+	defer cancel()
+	if err := revoker.RevokeSession(ctx, current); err != nil {
+		return fmt.Errorf("revoke session at provider %q: %w", provider, err)
+	}
+	return nil
 }
 
 // endRefusedSession ends the session whose refresh was refused and returns the error of ending it. When

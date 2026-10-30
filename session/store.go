@@ -22,14 +22,15 @@ const (
 	securePrefix      = "__Secure-"
 	defaultMaximumAge = 24 * time.Hour
 	cookieValueBytes  = 32
-	// revokeTimeout bounds End's revocation, which a disconnecting client cannot cancel.
+	// revokeTimeout bounds End's revocation and the Guard's call of a Revoker, which a disconnecting client
+	// cannot cancel.
 	revokeTimeout = 10 * time.Second
 )
 
 // StoreOptions configures NewStore.
 type StoreOptions struct {
 	Backend        Backend       // required
-	EncryptionKey  []byte        // required, exactly 32 bytes (AES-256-GCM); see ParseKey
+	EncryptionKey  []byte        // required, exactly 32 bytes (AES-256-GCM), not one byte repeated; see ParseKey
 	CookieName     string        // default "auth_session"; "__Host-" is prepended when Secure, host-only and on "/" (see NewStore)
 	CookieDomain   string        // default "" (host-only cookie)
 	CookiePath     string        // default "/"
@@ -56,6 +57,9 @@ func NewStore(options *StoreOptions) (*Store, error) {
 	}
 	if len(options.EncryptionKey) != encryptionKeyLength {
 		return nil, fmt.Errorf("session store: EncryptionKey has %d bytes, want %d", len(options.EncryptionKey), encryptionKeyLength)
+	}
+	if repeatsOneByte(options.EncryptionKey) {
+		return nil, errors.New("session store: EncryptionKey " + repeatedKeyProblem)
 	}
 	resolved := withStoreDefaults(*options)
 	if err := validateStoreOptions(resolved); err != nil {

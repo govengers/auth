@@ -34,6 +34,7 @@ services:
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
       JWT_ENABLED: "true"
       JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY}                 # export JWT_PRIVATE_KEY="$(cat jwt.pem)"
+      JWT_AUDIENCE: app                                   # the backend's verifier Audience
     labels:
       - traefik.enable=true
       # login, callback, logout, jwks; never the checks or the probes. No forwardAuth middleware; its longer rule wins
@@ -131,19 +132,19 @@ Set `GOMEMLIMIT` 5-10 % below the container memory limit in your manifests (limi
 | `GET {prefix}/ui` | forward-auth check for browsers: 302 to the login when unauthenticated |
 | `GET {prefix}/api` | forward-auth check for APIs: 401 JSON when unauthenticated |
 | `GET {prefix}/jwks` | public keys of the JWT signer (`JWT_ENABLED`), `Cache-Control: public, max-age=300` |
-| `GET {prefix}/me` | the caller's identity as JSON (`IDENTITY_ENDPOINT_ENABLED`; sessions only, not API keys) |
+| `GET {prefix}/me` | the caller's identity as JSON (`IDENTITY_ENDPOINT_ENABLED`; sessions only, not API keys); an inactive identity gets 403 like on the checks |
 | `GET {prefix}/health` | liveness, 200 `{"status":"ok"}` |
 | `GET {prefix}/ready` | readiness: 200 `{"status":"ok"}`, or 503 `{"code":"unavailable","message":"not ready"}` during shutdown or when the Redis ping (2 s) fails; a failed ping is kept as a wide event, successful probes are sampled |
 | `GET {prefix}/oidc/<OIDC_NAME>/{login,callback,logout,frontchannel-logout}` | OIDC provider |
 | `GET {prefix}/github/{login,callback,logout}`, `POST {prefix}/github/refresh-teams` | GitHub provider |
-| any other path | 404 `{"code":"not_found","message":"not found"}`, also a known route with a trailing `/` (no redirect) |
+| any other path | 404 `{"code":"not_found","message":"not found"}`, also a known route with a trailing `/` (no redirect) or with a percent-encoded character (`{prefix}/%75i`): routes match the path as sent, not the decoded one |
 | `GET /metrics` on `METRICS_PORT` | Prometheus, the only route of that listener; keep this port off Traefik |
 
 Route `{prefix}` to the service with its own Traefik router, minus the checks and probes, as in the labels above: the check endpoints do not dispatch login routes by `X-Forwarded-Uri`. Link users to `{prefix}/oidc/<name>/logout` or `{prefix}/github/logout` to log out; both are plain `GET` links, same-site only: a link from another site (`Sec-Fetch-Site: cross-site`, e.g. a portal on another domain) is refused with 403.
 
 ## Environment variables
 
-Values without a default are required. *not empty* marks values with a default that refuse an explicitly empty value. Lists are comma-separated. The process exits non-zero before it serves anything and lists every problem it can find: missing or invalid values, an `EXTERNAL_URL` with a path, a plain `http` `EXTERNAL_URL` off loopback without `SESSION_INSECURE_COOKIE=true` (browsers would drop the `Secure` cookie and loop every login), an unparsable `SESSION_ENCRYPTION_KEY`, `PORT` equal to `METRICS_PORT`, values the selected provider, Keycloak or JWT needs, `KEYCLOAK_ENABLED` without `PROVIDER=oidc`, `API_KEYS_ENABLED` without keys, a malformed `API_KEYS` entry (reported by position, never echoed), a secret that is too short or used twice, a bad `API_KEY_PERMISSIONS` entry. Then the components fail the boot on what only they can judge (team format, `GITHUB_SCOPES`, URLs, the JWT key, the issuer's discovery) and, with `SESSION_REDIS_ENABLED`, on a Redis that does not answer a `PING` within 5 s. Sensitive values are masked in the startup table. A `.env` file in the working directory is read if present (development only; the image has none).
+Values without a default are required. *not empty* marks values with a default that refuse an explicitly empty value. Lists are comma-separated. The process exits non-zero before it serves anything and lists every problem it can find: missing or invalid values, an `EXTERNAL_URL` with a path, a plain `http` `EXTERNAL_URL` off loopback without `SESSION_INSECURE_COOKIE=true` (browsers would drop the `Secure` cookie and loop every login), an unparsable or placeholder (one repeated byte) `SESSION_ENCRYPTION_KEY`, `PORT` equal to `METRICS_PORT`, values the selected provider, Keycloak or JWT needs, `KEYCLOAK_ENABLED` without `PROVIDER=oidc`, `API_KEYS_ENABLED` without keys, a malformed `API_KEYS` entry (reported by position, never echoed), a secret that is too short or used twice, a bad `API_KEY_PERMISSIONS` entry, a `TRUSTED_PROXIES` entry that is neither an IP nor a CIDR, with `SESSION_REDIS_ENABLED` an address that is not `host:port`, both or neither of `SESSION_REDIS_ADDRESS` and `SESSION_REDIS_SENTINEL_MASTER`, sentinel values without a master, `SESSION_REDIS_TLS_*` values without `SESSION_REDIS_TLS_ENABLED`, a username without its password, an unreadable or invalid CA, certificate or key file, a certificate without its key. Then the components fail the boot on what only they can judge (team format, `GITHUB_SCOPES`, URLs, the JWT key, the issuer's discovery) and, with `SESSION_REDIS_ENABLED`, on a Redis that does not answer a `PING` within 5 s. Sensitive values are masked in the startup table. A `.env` file in the working directory is read if present (development only; the image has none).
 
 ### General
 
@@ -161,12 +162,13 @@ Values without a default are required. *not empty* marks values with a default t
 | `API_KEYS_ENABLED` | `false` | | | accept the keys of `API_KEYS` on both checks; while `false`, `API_KEYS` and `API_KEY_PERMISSIONS` are ignored |
 | `API_KEYS` | empty | when enabled (at least one) | yes | `name:secret` entries (split at the first `:`); names and secrets unique, secrets at least 16 bytes and without `,` |
 | `API_KEY_PERMISSIONS` | empty | | | `name=permission+permission` entries, e.g. `ci=builds:write+deployments:read,reader=*:read`; each name is a key of `API_KEYS` and appears once; a key without an entry has no permissions |
+| `TRUSTED_PROXIES` | empty | | | IPs and CIDRs, e.g. Traefik's pod network `10.42.0.0/16`; only a request from one of them may name the client in `X-Forwarded-For` or `X-Real-IP`; empty trusts no proxy, so `request.client_ip` on the wide event is the peer address (Traefik's) and a client cannot forge it |
 
 ### Session
 
 | Variable | Default | Required | Sensitive | Notes |
 |---|---|---|---|---|
-| `SESSION_ENCRYPTION_KEY` | - | yes | yes | base64 of 32 bytes: `openssl rand -base64 32` |
+| `SESSION_ENCRYPTION_KEY` | - | yes | yes | base64 of 32 bytes: `openssl rand -base64 32`; a key that repeats one byte (all zero included) is refused |
 | `SESSION_COOKIE_NAME` | `forwardauth_session` | not empty | | sent as `__Host-forwardauth_session` unless `SESSION_COOKIE_DOMAIN` or `SESSION_INSECURE_COOKIE` is set (a `__Host-` or `__Secure-` name of your own is kept and must fit its prefix) |
 | `SESSION_COOKIE_DOMAIN` | empty | | | empty is a host-only cookie |
 | `SESSION_INSECURE_COOKIE` | `false` | | | drops `Secure`; local HTTP development only; required for an `http` `EXTERNAL_URL` whose host is not loopback (`app.localhost` is not); refused with an `https` `EXTERNAL_URL` |
@@ -174,11 +176,20 @@ Values without a default are required. *not empty* marks values with a default t
 | `SESSION_MAXIMUM_AGE_SECONDS` | `86400` | | | absolute lifetime, at least 1; refreshes never extend it |
 | `SESSION_REFRESH_INTERVAL_SECONDS` | `60` | | | how often the GitHub provider re-checks teams; at least 1 |
 | `SESSION_MAXIMUM_UNVERIFIED_AGE_SECONDS` | `3600` | | | a team re-check failing (GitHub outage, rate limit) for longer than this since the last successful one ends the session; at least `SESSION_REFRESH_INTERVAL_SECONDS` |
-| `SESSION_REDIS_ENABLED` | `false` | | | otherwise in-memory: exactly one replica |
-| `SESSION_REDIS_ADDRESS` | empty | with Redis | | `host:port`; pinged at boot (5 s) |
+| `SESSION_REDIS_ENABLED` | `false` | | | otherwise in-memory: exactly one replica, not built for anonymous login floods (each start stores a session; a full backend evicts the soonest expiring): rate-limit `{prefix}/login` or use Redis |
+| `SESSION_REDIS_ADDRESS` | empty | with Redis, without a sentinel master | | `host:port`; pinged at boot (5 s); must be empty with `SESSION_REDIS_SENTINEL_MASTER` |
+| `SESSION_REDIS_USERNAME` | empty | | | ACL user; requires `SESSION_REDIS_PASSWORD` |
 | `SESSION_REDIS_PASSWORD` | empty | | yes | |
 | `SESSION_REDIS_DATABASE` | `0` | | | at least 0 |
 | `SESSION_REDIS_KEY_PREFIX` | `forwardauth` | not empty | | |
+| `SESSION_REDIS_SENTINEL_MASTER` | empty | | | Sentinel mode: the master name; the client asks the sentinels for the master and follows a failover; username, password and database are the master's |
+| `SESSION_REDIS_SENTINEL_ADDRESSES` | empty | with a sentinel master (at least one) | | `host:port` of each sentinel; refused without `SESSION_REDIS_SENTINEL_MASTER` |
+| `SESSION_REDIS_SENTINEL_USERNAME` | empty | | | the sentinels' ACL user; requires `SESSION_REDIS_SENTINEL_PASSWORD`; refused without a sentinel master |
+| `SESSION_REDIS_SENTINEL_PASSWORD` | empty | | yes | the sentinels' `requirepass` or ACL password; refused without a sentinel master |
+| `SESSION_REDIS_TLS_ENABLED` | `false` | | | TLS 1.2 or later to Redis and to the sentinels; the server certificate is always verified, there is no skip option |
+| `SESSION_REDIS_TLS_CA_FILE` | empty | | | PEM bundle that replaces the system CAs (only these are trusted); empty uses the system CAs |
+| `SESSION_REDIS_TLS_SERVER_NAME` | empty | | | name the certificates must carry, for every connection (master and sentinels); empty is the host of each address |
+| `SESSION_REDIS_TLS_CERTIFICATE_FILE`, `SESSION_REDIS_TLS_KEY_FILE` | empty | both or neither | key | PEM client certificate and key for mutual TLS |
 
 ### OIDC (`PROVIDER=oidc`)
 
@@ -190,7 +201,8 @@ Values without a default are required. *not empty* marks values with a default t
 | `OIDC_CLIENT_SECRET` | empty | with `oidc` | yes | |
 | `OIDC_SCOPES` | `openid,profile,email` | not empty | | |
 | `OIDC_CLAIM_MAPPER` | `default` | not empty | | `default` or `google` |
-| `OIDC_ALLOWED_EMAIL_DOMAINS` | empty | | | requires `email_verified`; strongly recommended with Google |
+| `OIDC_ALLOWED_EMAIL_DOMAINS` | empty | with Google (or below) | | requires `email_verified`; with Google's issuer a domain other than `gmail.com`/`googlemail.com` also requires the `hd` claim (Workspace accounts only). Google (`OIDC_ISSUER=https://accounts.google.com` or `OIDC_CLAIM_MAPPER=google`) refuses to boot without this, a `KEYCLOAK_REQUIRED_*` list or `OIDC_ALLOW_ANY_ACCOUNT=true` |
+| `OIDC_ALLOW_ANY_ACCOUNT` | `false` | | | admit every Google account on purpose |
 | `OIDC_POST_LOGOUT_URL` | empty | | | empty means `EXTERNAL_URL/`; a path or an absolute URL without fragment |
 | `OIDC_DISABLE_IFRAME_LOGOUT_DETECTION` | `false` | | | stop treating `Sec-Fetch-Dest: iframe` on `/logout` as front-channel logout; a cross-site iframe load of `/logout` is then refused (403) |
 
@@ -228,17 +240,17 @@ Values without a default are required. *not empty* marks values with a default t
 | `JWT_ENABLED` | `false` | | | sign an identity token per allowed request |
 | `JWT_PRIVATE_KEY` | empty | when enabled | yes | PEM RSA key, at least 2048 bits; no generated fallback, so every replica signs with the same key |
 | `JWT_ISSUER` | empty | | | what backends configure as `Issuer`; empty means `EXTERNAL_URL` |
-| `JWT_AUDIENCE` | empty | | | |
+| `JWT_AUDIENCE` | empty | when enabled (at least one) | | `aud` of every token, e.g. `app`; backends configure one of the values as the verifier's `Audience`, so a token minted for this app passes nowhere else |
 | `JWT_LIFETIME_SECONDS` | `300` | | | 1 to 86400 |
 | `JWT_HEADER` | `Authorization` | not empty | | value `Bearer <jwt>`; list the header in `authResponseHeaders`; a header name, not `Cache-Control`, `Set-Cookie`, `Connection`, `Content-Length`, `Transfer-Encoding`, `Cookie` or `Host` |
 
-The token carries `iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`, `provider`, `user_id`, `preferred_username`, `name`, `email`, `picture`, `roles`, `realm_roles`, `client_roles`, `groups`, `teams`, `permissions` (empty ones omitted) and every other claim of the OIDC ID token; ID token claims with these names (and `nonce`, `at_hash`, `c_hash`, `auth_time`, `sid`, `azp`) are never copied, in any letter case, so an IdP `roles` or `Roles` claim cannot become application roles. For GitHub, `sub` is the numeric user ID and the login is `preferred_username`. Verify it in your backend as shown in [JWT](JWT.md).
+The token carries `iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`, `provider`, `user_id`, `preferred_username`, `name`, `email`, `picture`, `roles`, `realm_roles`, `client_roles`, `groups`, `teams`, `permissions` (empty ones omitted) and every other claim of the OIDC ID token; ID token claims with these names (and `nonce`, `at_hash`, `c_hash`, `auth_time`, `sid`, `azp`, and Keycloak's raw `realm_access` and `resource_access`, which the token carries as `realm_roles` and `client_roles`) are never copied, in any letter case, so an IdP `roles` or `Roles` claim cannot become application roles. For GitHub, `sub` is the numeric user ID and the login is `preferred_username`. Verify it in your backend as shown in [JWT](JWT.md).
 
 ## Operations
 
 - Logs are wide events: one JSON line per request on stdout, none for health. Readiness requests are sampled like any other (`WIDE_EVENT_SAMPLE_RATE`); a failed readiness check is always kept with its cause. Query values are redacted (callbacks carry `code` and `state`), also by the `DEV_MODE` emitter; every field a client controls (method, path, query names, host, user agent, request ID, the `X-Forwarded-*` values) is cut to 512 bytes, and request line plus headers are limited to 64 KiB (431 above). Each event sums the request's outbound calls per dependency: `cache.calls`, `.failures`, `.duration_ms`, `.error` for Redis and `http.<oidc|keycloak|github>.calls`, `.failures`, `.duration_ms`, `.status`, `.error` for the provider (a transport error is recorded as cancellation, a dial error or its type, never with the URL or bytes the server sent). Unknown paths are recorded as failures (`no route`) and always kept by the sampler. Startup, shutdown and net/http's own error lines go through `log/slog` JSON.
 - Metrics on `METRICS_PORT`: `forwardauth_http_requests_total{route,method,status}`, `forwardauth_http_request_duration_seconds{route,method}`, `forwardauth_http_requests_in_flight`, `forwardauth_auth_outcomes_total{provider,action,result}`, `forwardauth_dependency_request_duration_seconds{dependency,operation,outcome}` (Redis and the provider's HTTP calls), Go, process and build-info collectors.
-- With `SESSION_REDIS_ENABLED` the boot fails when Redis does not answer within 5 s; the Redis client never retries a command.
+- With `SESSION_REDIS_ENABLED` the boot fails when Redis does not answer within 5 s, with the address (or the master name and the sentinels) in the error, never a password; the Redis client never retries a command. Redis Cluster is not supported; use one Redis or Sentinel.
 - With `API_KEYS_ENABLED=true` the keys in `API_KEYS` are accepted on both check endpoints (not on `{prefix}/me`). Their identity carries the permissions from `API_KEY_PERMISSIONS` and no roles, so `authorization.IsAdmin` refuses them: check permissions in the backend (`HasPermission`, `RequireMethodPermission`). With API keys enabled, a request whose `Authorization: Bearer` value is not a configured key is refused with 401 `invalid_api_key` on both checks, even with a valid session cookie: an SPA that sends its own bearer tokens through the proxy cannot use API keys.
 - An inactive identity is answered 403 `forbidden` on both checks, with or without `JWT_ENABLED` (a token would come back active).
 - Failures answer the one JSON shape (a panic is 500 `internal`); check answers carry `Cache-Control: no-store`.

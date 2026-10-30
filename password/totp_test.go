@@ -484,6 +484,22 @@ func TestRequiredTOTPEnrollsDuringLogin(t *testing.T) {
 	require.JSONEq(t, `{"challenge":"totp"}`, recorder.Body.String())
 }
 
+func TestEnableWithoutSetupVerifiesNoPassword(t *testing.T) {
+	fixture := newFixture(t, totpOptions())
+	fixture.createUser(t, "ada", "")
+	browser := loggedInClient(t, fixture)
+	verifications := 0
+	fixture.provider.verifyHash = func(password, encodedHash string) (bool, Parameters, error) {
+		verifications++
+		return verifyHash(password, encodedHash)
+	}
+
+	recorder := browser.post(enablePath, map[string]any{"code": "000000", "password": "wrong password"})
+
+	requireRefusal(t, recorder, http.StatusBadRequest, "totp_setup_missing")
+	require.Zero(t, verifications)
+}
+
 func TestTOTPManagement(t *testing.T) {
 	fixture := newFixture(t, totpOptions())
 	user := fixture.createUser(t, "ada", "ada@example.com")
@@ -609,18 +625,19 @@ func TestEnrollmentChangesNothingWhenTheLoginFails(t *testing.T) {
 	}
 }
 
-func TestEnableOnAFullSessionWritesNoSession(t *testing.T) {
+func TestEnableOnAFullSessionStampsTheSessionFirst(t *testing.T) {
 	fixture := newFixture(t, totpOptions())
 	user := fixture.createUser(t, "ada", "")
 	browser := loggedInClient(t, fixture)
 	secret := decodeBody[setupResponse](t, browser.post(setupPath, map[string]any{})).Secret
+	fixture.outcomes.take()
 	fixture.failSessions(t, "Put")
 
 	recorder := browser.post(enablePath, map[string]any{"code": fixture.code(t, secret, 0), "password": testPassword})
 
-	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
-	require.Len(t, decodeBody[enableResponse](t, recorder).BackupCodes, 10)
-	require.True(t, fixture.storedUser(t, user.ID).TOTPEnabled)
+	requireRefusal(t, recorder, http.StatusInternalServerError, "internal")
+	require.ErrorContains(t, fixture.outcomes.last(t).Err, "stamp session of user")
+	require.False(t, fixture.storedUser(t, user.ID).TOTPEnabled, "a session that cannot follow the change makes none")
 }
 
 // pausingStorage runs pause, once, after the next GetUserByID read the user and before it returns it: the reading
@@ -725,6 +742,8 @@ func TestTOTPRoutesRefuseForeignSessions(t *testing.T) {
 	user := fixture.createUser(t, "ada", "")
 	impersonated := identityOf(user)
 	impersonated.Impersonator = &auth.Identity{Provider: "password", Subject: uuid.NewString(), Active: true}
+	inactive := identityOf(user)
+	inactive.Active = false
 
 	testCases := []struct {
 		name       string
@@ -733,6 +752,7 @@ func TestTOTPRoutesRefuseForeignSessions(t *testing.T) {
 		wantCode   string
 	}{
 		{name: "impersonating", identity: impersonated, wantStatus: http.StatusForbidden, wantCode: "forbidden"},
+		{name: "inactive", identity: inactive, wantStatus: http.StatusForbidden, wantCode: "forbidden"},
 		{name: "another provider", identity: &auth.Identity{Provider: "github", Subject: "42", UserID: user.ID, Active: true}, wantStatus: http.StatusUnauthorized, wantCode: "unauthenticated"},
 		{name: "deleted user", identity: identityOf(&User{ID: uuid.New()}), wantStatus: http.StatusUnauthorized, wantCode: "unauthenticated"},
 		{name: "no session", wantStatus: http.StatusUnauthorized, wantCode: "unauthenticated"},
@@ -806,7 +826,7 @@ func TestSessionBackendFailures(t *testing.T) {
 		body     any
 		wantStep string // the step the error names
 	}{
-		{name: "login", prepare: func(t *testing.T, fixture *fixture) *client { return fixture.newClient(t) }, path: "/auth/password/login", body: map[string]any{"identifier": "ada", "password": testPassword}, wantStep: "save session identity of user"},
+		{name: "login", prepare: func(t *testing.T, fixture *fixture) *client { return fixture.newClient(t) }, path: "/auth/password/login", body: map[string]any{"identifier": "ada", "password": testPassword}, wantStep: "stamp session of user"},
 		{name: "login with a TOTP challenge", options: totpOptions(), prepare: func(t *testing.T, fixture *fixture) *client {
 			requireSetTOTP(t, fixture.storage, mustUserID(t, fixture, "ada"), testSecret, nil)
 			return fixture.newClient(t)

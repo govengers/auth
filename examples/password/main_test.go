@@ -43,6 +43,26 @@ func TestServer(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, send(t, administrator, http.MethodGet, server.URL+"/api/notes", "").status)
 }
 
+func TestCreateUserRefusesAWeakPassword(t *testing.T) {
+	storage := password.NewMemoryStorage()
+
+	_, err := createUser(t.Context(), storage, "admin", "x")
+
+	require.ErrorContains(t, err, "shorter than 12 characters")
+	_, err = storage.GetUserByUsername(t.Context(), "admin")
+	require.ErrorIs(t, err, password.ErrUserNotFound)
+}
+
+func TestHTTPServerHasTimeouts(t *testing.T) {
+	server := newHTTPServer(":8080", http.NotFoundHandler())
+
+	require.Positive(t, server.ReadHeaderTimeout)
+	require.Positive(t, server.ReadTimeout)
+	require.Positive(t, server.WriteTimeout)
+	require.Positive(t, server.IdleTimeout)
+	require.Positive(t, server.MaxHeaderBytes)
+}
+
 // newClient returns a client of server with its own cookie jar, like one browser.
 func newClient(t *testing.T, server *httptest.Server) *http.Client {
 	t.Helper()

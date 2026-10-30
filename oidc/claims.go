@@ -92,10 +92,16 @@ func firstNonEmpty(candidates ...[]string) []string {
 	return nil
 }
 
+// googleConsumerDomains are the domains of consumer Google accounts: Google is authoritative for them, hd is never set.
+var googleConsumerDomains = []string{"gmail.com", "googlemail.com"}
+
 // checkEmailDomain allows any login when allowedDomains is empty. Otherwise the ID token must carry
 // email_verified true and an email whose domain (ASCII lower-cased; a non-ASCII domain never matches) is
-// one of allowedDomains (lower-case ASCII).
-func checkEmailDomain(claims map[string]any, allowedDomains []string) error {
+// one of allowedDomains (lower-case ASCII). With requireHostedDomain (Google), a domain other than the
+// googleConsumerDomains must also be the hd claim: Google sets hd only for Workspace accounts, and a consumer Google
+// account may carry a verified address of any domain, e.g. one a former employee created with the
+// company address and keeps after leaving the Workspace.
+func checkEmailDomain(claims map[string]any, allowedDomains []string, requireHostedDomain bool) error {
 	if len(allowedDomains) == 0 {
 		return nil
 	}
@@ -107,7 +113,15 @@ func checkEmailDomain(claims map[string]any, allowedDomains []string) error {
 	if !found || !ascii || !slices.Contains(allowedDomains, domain) {
 		return &auth.Error{Kind: auth.ErrForbidden, Reason: "email domain not allowed"}
 	}
+	if requireHostedDomain && !slices.Contains(googleConsumerDomains, domain) && !isHostedDomain(claims, domain) {
+		return &auth.Error{Kind: auth.ErrForbidden, Reason: "hosted domain mismatch"}
+	}
 	return nil
+}
+
+func isHostedDomain(claims map[string]any, domain string) bool {
+	hostedDomain, ascii := asciiLower(stringClaim(claims, "hd"))
+	return ascii && hostedDomain == domain
 }
 
 // asciiLower lower-cases the ASCII letters of value; false when value has a non-ASCII byte. strings.ToLower

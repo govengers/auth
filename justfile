@@ -60,17 +60,25 @@ vulncheck:
 wiki:
     #!/usr/bin/env bash
     set -euo pipefail
-    target="$(mktemp -d)"
-    trap 'rm -rf "$target"' EXIT
+    # The footer names a commit of main, so publish exactly that tree: main checked out and pushed, docs/wiki clean
+    git fetch --quiet origin main
+    [ "$(git rev-parse --abbrev-ref HEAD)" = main ] || { echo "just wiki publishes main; check out main first" >&2; exit 1; }
+    [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "HEAD is not origin/main; pull or push first" >&2; exit 1; }
+    [ -z "$(git status --porcelain -- docs/wiki)" ] || { echo "docs/wiki has uncommitted changes" >&2; exit 1; }
+    commit="$(git rev-parse --short HEAD)"
+    target="$(mktemp -d)" pages="$(mktemp -d)"
+    trap 'rm -rf "$target" "$pages"' EXIT
+    git archive HEAD docs/wiki | tar -x -C "$pages"
     git clone --quiet https://github.com/govengers/auth.wiki.git "$target"
-    find "$target" -maxdepth 1 -name '*.md' -delete
+    # an exact mirror: every page and directory goes, only the wiki's .git stays
+    find "$target" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
     blob=https://github.com/govengers/auth/blob/main
-    for page in docs/wiki/*.md; do
+    for page in "$pages"/docs/wiki/*.md; do
         sed -E -e "s|\]\(\.\./\.\./([^)]*)\)|](${blob}/\1)|g" -e "s|\]\(\.\./([^)]*)\)|](${blob}/docs/\1)|g" -e 's|\]\(([A-Za-z-]+)\.md(#[^)]*)?\)|](\1\2)|g' "$page" > "$target/$(basename "$page")"
     done
-    printf 'Mirror of [docs/wiki](%s/docs/wiki) at %s. Edit the repository, not this wiki.\n' "$blob" "$(git rev-parse --short HEAD)" > "$target/_Footer.md"
+    printf 'Mirror of [docs/wiki](%s/docs/wiki) at %s. Edit the repository, not this wiki.\n' "$blob" "$commit" > "$target/_Footer.md"
     git -C "$target" add -A
-    git -C "$target" diff --cached --quiet || git -C "$target" commit --quiet -m "Mirror docs/wiki at $(git rev-parse --short HEAD)"
+    git -C "$target" diff --cached --quiet || git -C "$target" commit --quiet -m "Mirror docs/wiki at $commit"
     git -C "$target" push --quiet
 
 # Everything CI runs

@@ -62,6 +62,7 @@ func TestNewServerValidatesOptions(t *testing.T) {
 		{name: "shutdown delay beyond the grace period", change: func(options *ServerOptions) { options.ShutdownDelay = 11 * time.Second }},
 		{name: "jwt header with a space", change: func(options *ServerOptions) { options.JWTHeader = "X Auth" }},
 		{name: "jwt header the check answer sets", change: func(options *ServerOptions) { options.JWTHeader = "cache-control" }},
+		{name: "trusted proxy that is no address", change: func(options *ServerOptions) { options.TrustedProxies = []string{"10.0.0.0/8", "traefik"} }},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -121,7 +122,7 @@ func TestChecksPassASessionAndHandTheIdentityOnAsAVerifiableJWT(t *testing.T) {
 	cookie := testHarness.signIn(t, testIdentity())
 	jwksServer := httptest.NewServer(testHarness.server.engine)
 	t.Cleanup(jwksServer.Close)
-	verifier, err := jwt.NewVerifier(t.Context(), &jwt.VerifierOptions{JWKSURL: jwksServer.URL + "/auth/jwks", Issuer: testIssuer})
+	verifier, err := jwt.NewVerifier(t.Context(), &jwt.VerifierOptions{JWKSURL: jwksServer.URL + "/auth/jwks", Issuer: testIssuer, Audience: testAudience})
 	require.NoError(t, err)
 
 	for _, check := range []string{"/auth/ui", "/auth/api"} {
@@ -149,10 +150,10 @@ func TestChecksPassASessionAndHandTheIdentityOnAsAVerifiableJWT(t *testing.T) {
 func TestChecksRefuseAnInactiveIdentityWithAndWithoutJWT(t *testing.T) {
 	inactive := testIdentity()
 	inactive.Active = false
-	for name, options := range map[string]harnessOptions{"without JWT": {}, "with JWT": {signer: newTestSigner(t)}} {
+	for name, options := range map[string]harnessOptions{"without JWT": {identityEndpoint: true}, "with JWT": {signer: newTestSigner(t), identityEndpoint: true}} {
 		testHarness := newHarness(t, options)
 		cookie := testHarness.signIn(t, inactive)
-		for _, check := range []string{"/auth/ui", "/auth/api"} {
+		for _, check := range []string{"/auth/ui", "/auth/api", "/auth/me"} {
 			t.Run(name+" "+check, func(t *testing.T) {
 				response := testHarness.serve(t, http.MethodGet, check, nil, cookie)
 
@@ -196,7 +197,7 @@ func TestAnAPIKeyPassesTheChecksAndItsPermissionsReachTheJWT(t *testing.T) {
 	testHarness := newHarness(t, harnessOptions{signer: newTestSigner(t), apiKeys: true})
 	jwksServer := httptest.NewServer(testHarness.server.engine)
 	t.Cleanup(jwksServer.Close)
-	verifier, err := jwt.NewVerifier(t.Context(), &jwt.VerifierOptions{JWKSURL: jwksServer.URL + "/auth/jwks", Issuer: testIssuer})
+	verifier, err := jwt.NewVerifier(t.Context(), &jwt.VerifierOptions{JWKSURL: jwksServer.URL + "/auth/jwks", Issuer: testIssuer, Audience: testAudience})
 	require.NoError(t, err)
 	testCases := []struct {
 		name   string
@@ -341,6 +342,19 @@ func TestATrailingSlashIsAnUnmatchedRequestNotARedirect(t *testing.T) {
 	require.Equal(t, 3, testHarness.events.count(), "every request has its event")
 	require.Equal(t, "code=redacted&state=redacted", testHarness.events.last(t)["request"].(map[string]any)["query"])
 	require.Equal(t, 3.0, requestCount(t, testHarness.registry, map[string]string{"route": "unmatched", "method": http.MethodGet, "status": "404"}))
+}
+
+func TestPercentEncodedVariantsOfARouteAreUnmatched(t *testing.T) {
+	testHarness := newHarness(t, harnessOptions{})
+	cookie := testHarness.signIn(t, testIdentity())
+
+	for _, target := range []string{"/auth/%75i", "/auth/%72eady", "/auth%2Fui", "/%61uth/api"} {
+		response := testHarness.serve(t, http.MethodGet, target, nil, cookie)
+
+		require.Equal(t, http.StatusNotFound, response.Code, target)
+	}
+	require.Equal(t, http.StatusOK, testHarness.serve(t, http.MethodGet, "/auth/ui", nil, cookie).Code)
+	require.Equal(t, http.StatusOK, testHarness.serve(t, http.MethodGet, "/auth/ready", nil).Code)
 }
 
 // requestCount returns the forwardauth_http_requests_total sample with exactly labels, or fails.
@@ -629,6 +643,40 @@ func TestClientControlledEventFieldsAreCut(t *testing.T) {
 	for _, field := range []string{"method", "host", "path"} {
 		require.Len(t, event["forward"].(map[string]any)[field], 512, "forward."+field)
 	}
+}
+
+// httptest requests come from 192.0.2.1.
+func TestTheClientIPComesFromTheForwardingHeadersOnlyBehindATrustedProxy(t *testing.T) {
+	testCases := []struct {
+		name           string
+		trustedProxies []string
+		want           string
+	}{
+		{name: "no trusted proxy", want: "192.0.2.1"},
+		{name: "another proxy", trustedProxies: []string{"10.0.0.0/8"}, want: "192.0.2.1"},
+		{name: "trusted address", trustedProxies: []string{"192.0.2.1"}, want: "203.0.113.7"},
+		{name: "trusted network", trustedProxies: []string{"10.0.0.0/8", "192.0.2.0/24"}, want: "203.0.113.7"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			testHarness := newHarness(t, harnessOptions{trustedProxies: testCase.trustedProxies})
+
+			testHarness.serve(t, http.MethodGet, "/auth/health/unknown", http.Header{"X-Forwarded-For": {"203.0.113.7"}, "X-Real-Ip": {"203.0.113.8"}})
+
+			require.Equal(t, testCase.want, testHarness.events.last(t)["request"].(map[string]any)["client_ip"])
+		})
+	}
+}
+
+func TestValidateTrustedProxiesNamesEveryBadEntry(t *testing.T) {
+	require.NoError(t, ValidateTrustedProxies([]string{"10.0.0.1", "10.0.0.0/8", "fd00::/8", "::1"}))
+	require.NoError(t, ValidateTrustedProxies(nil))
+
+	err := ValidateTrustedProxies([]string{"traefik", "10.0.0.0/33", "10.0.0.1"})
+
+	require.ErrorContains(t, err, `"traefik" is neither an IP address nor a CIDR`)
+	require.ErrorContains(t, err, `"10.0.0.0/33" is neither`)
+	require.NotContains(t, err.Error(), `"10.0.0.1"`)
 }
 
 func TestNeitherEmitterPrintsAnUncutMethod(t *testing.T) {

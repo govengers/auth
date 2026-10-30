@@ -66,12 +66,13 @@ type OIDCOptions struct {
 	PostLogoutRedirectURIs []string // registered post-logout redirect URIs; empty accepts any
 	User                   OIDCUser
 
-	OmitEndSessionEndpoint bool // discovery without end_session_endpoint
-	OmitIDToken            bool // token response without id_token
-	OpaqueAccessToken      bool // a random access token instead of a JWT, as Google issues
-	WrongNonce             bool // the ID token carries another nonce than the authorize request
-	BadSignature           bool // ID and access token signatures do not verify
-	ExpiredIDToken         bool // the ID token expired a minute ago
+	OmitEndSessionEndpoint bool   // discovery without end_session_endpoint
+	OmitIDToken            bool   // token response without id_token
+	OpaqueAccessToken      bool   // a random access token instead of a JWT, as Google issues
+	AccessTokenSubject     string // sub of the JWT access token in place of User.Subject: a token issued to another user
+	WrongNonce             bool   // the ID token carries another nonce than the authorize request
+	BadSignature           bool   // ID and access token signatures do not verify
+	ExpiredIDToken         bool   // the ID token expired a minute ago
 
 	TokenAnswer http.Handler // when set, answers every /token request in place of the fake: an IdP's error or broken answers
 	JWKSAnswer  http.Handler // when set, answers every /jwks request in place of the fake: a key set outage or a broken key set
@@ -384,8 +385,12 @@ func (h *OIDCHandler) accessToken(now time.Time) (string, error) {
 		return rand.Text(), nil
 	}
 	user := h.options.User
+	subject := user.Subject
+	if h.options.AccessTokenSubject != "" {
+		subject = h.options.AccessTokenSubject
+	}
 	return h.sign(map[string]any{
-		"iss": h.options.IssuerURL, "sub": user.Subject, "aud": "account", "azp": h.options.ClientID,
+		"iss": h.options.IssuerURL, "sub": subject, "aud": "account", "azp": h.options.ClientID,
 		"iat": now.Unix(), "exp": now.Add(tokenLifetime).Unix(), "scope": "openid profile email",
 		"realm_access":    map[string]any{"roles": nonNil(user.RealmRoles)},
 		"resource_access": map[string]any{h.options.ClientID: map[string]any{"roles": nonNil(user.ClientRoles)}},

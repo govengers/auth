@@ -296,76 +296,15 @@ sandbox
 
 (Patterns without `**/` only match the context root, hence `**/*.md`. Do not ignore `test/`: the fake-issuer image builds from the same context. Remove `**/*.md` if anything is `go:embed`ded from Markdown.)
 
-### 4.3 Release workflow `.github/workflows/release.yml`
+### 4.3 Release: the `image` job in `.github/workflows/ci.yml`
 
-Builds `ghcr.io/govengers/forwardauth` for `linux/amd64,linux/arm64` on pushes to `main` (`:main`, `:sha-<7>`) and on `v*` tags (`:1.2.3`, `:1.2`, `:1`, `:latest` for non-prerelease tags, `:sha-<7>`). Action versions are the current releases (checked 29.10.2026: checkout v7.0.1, setup-buildx v4.4.1, login v4.7.0, metadata v6.2.0, build-push v7.4.0), pinned by major tag like the org workflow.
+The image is published by the `image` job of `ci.yml` (formerly a separate `release.yml`), which runs only on a push to `main` or a `v*` tag and `needs` the reusable `go-library` job, so lint, unit tests, e2e and govulncheck gate every publication.
 
-
-`.github/workflows/release.yml`
-
-```yaml
-name: Release image
-
-# Publishes ghcr.io/govengers/forwardauth: :main on every push to main, :1.2.3, :1.2, :1 and :latest on a v1.2.3 tag.
-on:
-  push:
-    branches: [main]
-    tags: ["v*"]
-
-permissions:
-  contents: read
-
-jobs:
-  image:
-    name: build and push ghcr.io/govengers/forwardauth
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write # push to ghcr.io with the workflow token
-    steps:
-      - uses: actions/checkout@v7
-
-      # The builder stage cross-compiles (--platform=$BUILDPLATFORM) and the runtime stage only copies a file,
-      # so the arm64 image needs no QEMU.
-      - uses: docker/setup-buildx-action@v4
-
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/govengers/forwardauth
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha
-
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: docker/forwardauth.Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-```
-
-Gating: this workflow does not wait for CI. On `main` the PR checks already ran; a tag is cut from a green `main`, and the e2e job builds the same image anyway. If a hard gate is wanted: add a job `ci: uses: govengers/.github/.github/workflows/go-library.yml@v1` (with `badges: false`, `permissions: contents: read`), `needs: ci` on `image`, and let `ci.yml` run on pull requests only (otherwise the suite runs twice on a tag).
-
-**GHCR facts (checked with `gh`, 29.10.2026)**
-
-- `gh api 'orgs/govengers/packages?package_type=container'` returns `[]`: no container package exists yet, so the first release creates `ghcr.io/govengers/forwardauth`.
-- Org `govengers`: plan `free`, repo `govengers/auth` is public, default branch `main`. GHCR is available to free orgs and public images are free. The org-level Actions policies (allowed actions, default workflow permissions) are not readable without `admin:org` (403), so not verified; the release workflow sets `permissions` explicitly and uses only GitHub-owned and verified-creator actions (`actions/*`, `docker/*`).
-- Expected one-time manual step (no REST API for it): after the first push, open the package settings and make the package **public**, and check it is linked to the repo (the `org.opencontainers.image.source` label that metadata-action sets does the linking) so `GITHUB_TOKEN` of later runs may push.
+- Tags: `:main` on main, `:<version>` and `:sha-<commit>` on every tag. `:<major>.<minor>`, `:<major>` and `:latest` move only when the tag is the highest stable version they cover (computed from the repository's tags), so a backport such as `v1.0.5` after `v1.1.0` moves only `:1.0`; prereleases move none.
+- Concurrency: one run per ref, the newest last, never cancelling a running publication.
+- Provenance: `actions/attest-build-provenance` signs a SLSA build provenance attestation (Sigstore, keyless, `id-token: write`, `attestations: write`) and pushes it next to the image. Verify with `gh attestation verify oci://ghcr.io/govengers/forwardauth@<digest> --repo govengers/auth`.
+- Pinning: third-party actions by commit SHA, GitHub's own by major tag (as in `govengers/.github`); Dockerfile base images by digest. `.github/dependabot.yml` proposes weekly bumps for Go modules, actions and base images.
+- Owner checks outside the repository: the GHCR package's Actions access lists only `govengers/auth` with write, and a tag ruleset limits `v*` tags to maintainers.
 
 ## 5. End-to-end with docker compose
 

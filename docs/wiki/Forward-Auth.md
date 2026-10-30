@@ -30,7 +30,7 @@ Copy from [Forward-Auth-Configuration](Forward-Auth-Configuration.md#quick-start
 ## Gotchas
 
 - `EXTERNAL_URL` on plain `http` off loopback needs `SESSION_INSECURE_COOKIE=true` (local only); `app.localhost` is not loopback.
-- `JWT_PRIVATE_KEY` is required with `JWT_ENABLED`; no generated key, so every replica signs with the same one.
+- `JWT_PRIVATE_KEY` and `JWT_AUDIENCE` are required with `JWT_ENABLED`; no generated key, so every replica signs with the same one.
 - With `API_KEYS_ENABLED`, a bearer token that is not a configured key is 401 on both checks, even with a session cookie.
 - An inactive identity is 403 on both checks.
 - Logout links (`{prefix}/oidc/<name>/logout`, `{prefix}/github/logout`) must be on the app's own site.

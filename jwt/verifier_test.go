@@ -114,19 +114,27 @@ func requireInvalidToken(t *testing.T, err error, wantReason string) {
 }
 
 func TestNewVerifierRejectsInvalidOptions(t *testing.T) {
+	const wantInsecureURL = "must be an https URL, or http on a loopback host or with InsecureJWKSURL, without user info"
 	testCases := []struct {
 		name      string
 		options   *VerifierOptions
 		wantError string
 	}{
 		{name: "nil options", options: nil, wantError: "options are required"},
-		{name: "missing URL", options: &VerifierOptions{Issuer: testIssuer}, wantError: "absolute http or https URL"},
-		{name: "relative URL", options: &VerifierOptions{JWKSURL: "/auth/jwks", Issuer: testIssuer}, wantError: "absolute http or https URL"},
-		{name: "other scheme", options: &VerifierOptions{JWKSURL: "ftp://auth.example.com/jwks", Issuer: testIssuer}, wantError: "absolute http or https URL"},
-		{name: "unparsable URL", options: &VerifierOptions{JWKSURL: "http://auth example.com/%zz", Issuer: testIssuer}, wantError: "JWKSURL is no URL"},
-		{name: "missing issuer", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks"}, wantError: "Issuer is required"},
-		{name: "refresh interval in nanoseconds", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks", Issuer: testIssuer, RefreshInterval: 300}, wantError: "RefreshInterval 300ns is below 1m0s"},
-		{name: "negative refresh interval", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks", Issuer: testIssuer, RefreshInterval: -time.Hour}, wantError: "is below 1m0s"},
+		{name: "missing URL", options: &VerifierOptions{Issuer: testIssuer, Audience: "backend"}, wantError: wantInsecureURL},
+		{name: "relative URL", options: &VerifierOptions{JWKSURL: "/auth/jwks", Issuer: testIssuer, Audience: "backend"}, wantError: wantInsecureURL},
+		{name: "other scheme", options: &VerifierOptions{JWKSURL: "ftp://auth.example.com/jwks", Issuer: testIssuer, Audience: "backend"}, wantError: wantInsecureURL},
+		{name: "plain http on another host", options: &VerifierOptions{JWKSURL: "http://forwardauth:8080/auth/jwks", Issuer: testIssuer, Audience: "backend"}, wantError: wantInsecureURL},
+		{name: "insecure JWKS URL keeps refusing user info", options: &VerifierOptions{JWKSURL: "http://user:password@forwardauth:8080/auth/jwks", InsecureJWKSURL: true, Issuer: testIssuer, Audience: "backend"}, wantError: wantInsecureURL},
+		{name: "insecure JWKS URL keeps refusing other schemes", options: &VerifierOptions{JWKSURL: "ftp://forwardauth/jwks", InsecureJWKSURL: true, Issuer: testIssuer, Audience: "backend"}, wantError: wantInsecureURL},
+		{name: "user info", options: &VerifierOptions{JWKSURL: "https://user:password@auth.example.com/jwks", Issuer: testIssuer, Audience: "backend"}, wantError: wantInsecureURL},
+		{name: "unparsable URL", options: &VerifierOptions{JWKSURL: "http://auth example.com/%zz", Issuer: testIssuer, Audience: "backend"}, wantError: "JWKSURL is no URL"},
+		{name: "missing issuer", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks", Audience: "backend"}, wantError: "Issuer is required"},
+		{name: "missing audience", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks", Issuer: testIssuer}, wantError: "Audience is required"},
+		{name: "refresh interval in nanoseconds", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks", Issuer: testIssuer, Audience: "backend", RefreshInterval: 300}, wantError: "RefreshInterval 300ns is below 1m0s"},
+		{name: "negative refresh interval", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks", Issuer: testIssuer, Audience: "backend", RefreshInterval: -time.Hour}, wantError: "is below 1m0s"},
+		{name: "maximum key age below refresh interval", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks", Issuer: testIssuer, Audience: "backend", RefreshInterval: 2 * time.Hour, MaximumKeyAge: time.Hour}, wantError: "MaximumKeyAge 1h0m0s is below RefreshInterval 2h0m0s"},
+		{name: "refresh interval above the default maximum key age", options: &VerifierOptions{JWKSURL: "https://auth.example.com/jwks", Issuer: testIssuer, Audience: "backend", RefreshInterval: 25 * time.Hour}, wantError: "MaximumKeyAge 24h0m0s is below RefreshInterval 25h0m0s"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -140,16 +148,26 @@ func TestNewVerifierRejectsInvalidOptions(t *testing.T) {
 func TestNewVerifierAppliesDefaultsToACopy(t *testing.T) {
 	signer := newTestSigner(t, fixedClock(signedAt))
 	keySets := newKeySetServer(t, signer.JWKSHandler())
-	options := &VerifierOptions{JWKSURL: keySets.server.URL, Issuer: testIssuer}
+	options := testVerifierOptions(keySets.server.URL)
 
 	verifier, err := NewVerifier(t.Context(), options)
 	require.NoError(t, err)
 
-	require.Equal(t, &VerifierOptions{JWKSURL: keySets.server.URL, Issuer: testIssuer}, options)
+	require.Equal(t, testVerifierOptions(keySets.server.URL), options)
 	require.Equal(t, time.Hour, verifier.options.RefreshInterval)
+	require.Equal(t, 24*time.Hour, verifier.options.MaximumKeyAge)
 	require.Equal(t, 10*time.Second, verifier.options.HTTPClient.Timeout)
 	require.Equal(t, "Authorization", verifier.options.HeaderName)
 	require.Equal(t, int32(1), keySets.fetches.Load())
+}
+
+func TestInsecureJWKSURLAllowsPlainHTTPOnAnyHost(t *testing.T) {
+	options := &VerifierOptions{JWKSURL: "http://forwardauth:8080/auth/jwks", InsecureJWKSURL: true, Issuer: testIssuer, Audience: "backend"}
+
+	resolved, err := resolveVerifierOptions(options)
+
+	require.NoError(t, err)
+	require.Equal(t, "http://forwardauth:8080/auth/jwks", resolved.JWKSURL)
 }
 
 // truncatedKeySet serves a JWKS document that ends early.
@@ -293,7 +311,6 @@ func TestVerifierErrorsOmitCredentialsOfTheJWKSURL(t *testing.T) {
 	withCredentials := func(serverURL string) string {
 		location, err := url.Parse(serverURL)
 		require.NoError(t, err)
-		location.User = url.UserPassword("user", "secret-password")
 		location.RawQuery = "token=secret-query"
 		return location.String()
 	}
@@ -306,6 +323,7 @@ func TestVerifierErrorsOmitCredentialsOfTheJWKSURL(t *testing.T) {
 	}{
 		{name: "unparsable", jwksURL: "http://user:secret-password@auth example.com/%zz?token=secret-query", wantError: "JWKSURL is no URL"},
 		{name: "other scheme", jwksURL: "ftp://user:secret-password@auth.example.com/jwks?token=secret-query", wantError: "JWKSURL ftp://auth.example.com/jwks must be"},
+		{name: "user info", jwksURL: "https://user:secret-password@auth.example.com/jwks?token=secret-query", wantError: "JWKSURL https://auth.example.com/jwks must be"},
 		{name: "unreachable", jwksURL: withCredentials(closed.URL), wantError: "fetch JWKS: Get \"" + closed.URL + "\""},
 		{name: "server error", jwksURL: withCredentials(newKeySetServer(t, failingHandler).server.URL), wantError: "status 500"},
 		{name: "not a key set", jwksURL: withCredentials(newKeySetServer(t, truncatedKeySet).server.URL), wantError: "parse JWKS http://127.0.0.1"},
@@ -704,6 +722,44 @@ func TestVerifyKeepsTheKeysWhenARefreshFails(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, refreshError)
 	require.Equal(t, int32(3), keySets.fetches.Load())
+}
+
+// A key the signer rotated out must not stay trusted forever while its JWKS is unreachable.
+func TestVerifyStopsTrustingKeysOlderThanTheMaximumKeyAge(t *testing.T) {
+	clock := &testClock{instant: signedAt}
+	signer := newTestSigner(t, clock.now)
+	keySets := newKeySetServer(t, signer.JWKSHandler())
+	verifier := newTestVerifier(t, testVerifierOptions(keySets.server.URL), clock)
+	keySets.serve(failingHandler)
+	verify := func() (*auth.Identity, error, error) {
+		token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true})
+		require.NoError(t, err)
+		return verifier.verify(t.Context(), token)
+	}
+
+	clock.advance(24*time.Hour - time.Minute)
+	identity, refreshError, err := verify()
+	require.NoError(t, err)
+	require.Equal(t, "42", identity.Subject)
+	require.ErrorContains(t, refreshError, "status 500")
+
+	clock.advance(time.Minute)
+	identity, _, err = verify()
+	require.ErrorContains(t, err, "status 500")
+	require.NotErrorIs(t, err, auth.ErrUnauthenticated)
+	require.Nil(t, identity)
+
+	identity, _, err = verify()
+	require.EqualError(t, err, "JWKS keys are older than MaximumKeyAge 24h0m0s and the last refetch failed")
+	require.Nil(t, identity)
+	require.Equal(t, int32(3), keySets.fetches.Load(), "no new attempt within a minute")
+
+	clock.advance(time.Minute)
+	keySets.serve(signer.JWKSHandler())
+	identity, refreshError, err = verify()
+	require.NoError(t, err)
+	require.NoError(t, refreshError)
+	require.Equal(t, "42", identity.Subject)
 }
 
 func TestVerifyFailsWhenTheRefetchForAnUnknownKeyIDFails(t *testing.T) {

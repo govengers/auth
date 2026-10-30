@@ -292,6 +292,31 @@ func TestReal(t *testing.T) {
 	}
 }
 
+func TestInactiveImpersonatorIsRefused(t *testing.T) {
+	impersonator := &auth.Identity{Provider: "password", Subject: "admin", Active: false, Roles: []string{auth.RoleAdmin}}
+	impersonated := activeIdentity()
+	impersonated.Impersonator = impersonator
+
+	testCases := []struct {
+		name  string
+		check authorization.Check
+	}{
+		{name: "Not over Real", check: authorization.Not(authorization.Real(authorization.HasRole("banned")))},
+		{name: "Real over Not", check: authorization.Real(authorization.Not(authorization.HasRole("banned")))},
+		{name: "a primitive on the effective identity", check: authorization.IsActive()},
+		{name: "Real over a primitive", check: authorization.Real(authorization.IsAdmin())},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := testCase.check(withIdentity(t, impersonated))
+			requireRefusal(t, auth.ErrForbidden, err)
+			var refusal *auth.Error
+			require.ErrorAs(t, err, &refusal)
+			require.Equal(t, auth.ReasonInactive, refusal.Reason)
+		})
+	}
+}
+
 func TestHasPermission(t *testing.T) {
 	withPermissions := func(texts ...string) *auth.Identity {
 		identity := &auth.Identity{Provider: "apikey", Subject: "ci", Active: true}

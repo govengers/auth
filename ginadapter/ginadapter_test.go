@@ -363,7 +363,7 @@ func (failingRefresher) Refresh(context.Context, session.Session, *auth.Identity
 func TestObserveRecordsAGuardRefreshOnce(t *testing.T) {
 	backend, err := session.NewMemoryBackend(nil)
 	require.NoError(t, err)
-	store, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: make([]byte, 32)})
+	store, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: []byte("0123456789abcdef0123456789abcdef")})
 	require.NoError(t, err)
 	login := httptest.NewRecorder()
 	started, err := store.Start(t.Context(), login, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
