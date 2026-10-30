@@ -462,7 +462,7 @@ mux.Handle("GET /api/hello", keys.Middleware()(guard.RequireAPI()(hello)))
 
 ## Several replicas
 
-The memory backend is correct for exactly one replica, forgets sessions on restart and is meant for non-production scale: when full (`MaximumSessions`, default 100000, or `MaximumBytes` of session IDs, keys and values, default 64 MiB) it drops expired entries, then evicts the entries expiring soonest, revocation markers included; a single value larger than `MaximumBytes` is refused. In production, and for more than one replica, share one Redis and one `EncryptionKey`:
+The memory backend is correct for exactly one replica, forgets sessions on restart and is meant for non-production scale: when full (`MaximumSessions`, default 100000, or `MaximumBytes` of session IDs, keys and values, default 64 MiB; a replacement counts only what it adds) it drops expired entries, then evicts the entries expiring soonest, revocation markers included; a single value larger than `MaximumBytes` is refused. In production, and for more than one replica, share one Redis and one `EncryptionKey`:
 
 ```go
 client := redis.NewClient(&redis.Options{Addr: "redis:6379"}) // github.com/redis/go-redis/v9; you own and close it

@@ -182,6 +182,17 @@ func TestMemoryBackendByteBudget(t *testing.T) {
 			wantEvicted: []string{"soon"}, wantKept: []string{"late"},
 		},
 		{
+			name: "a session evicted for its own write comes back within the budget",
+			fill: func(t *testing.T, backend *MemoryBackend, _ *testClock) {
+				require.NoError(t, backend.Put(t.Context(), "o", "k", bytes.Repeat([]byte("o"), 60), 2*time.Hour))        // 62 bytes
+				require.NoError(t, backend.Put(t.Context(), "ssssssssss", "a", bytes.Repeat([]byte("a"), 10), time.Hour)) // 21, expires first
+			},
+			write: func(t *testing.T, backend *MemoryBackend) error {
+				return backend.Put(t.Context(), "ssssssssss", "b", bytes.Repeat([]byte("b"), 30), time.Hour) // 31 more, 41 as a new session
+			},
+			wantEvicted: []string{"o"}, wantKept: []string{"ssssssssss"},
+		},
+		{
 			name: "a value that cannot fit is refused and evicts nothing",
 			fill: func(t *testing.T, backend *MemoryBackend, _ *testClock) {
 				require.NoError(t, backend.Put(t.Context(), "live", "key", value, time.Hour))
@@ -215,6 +226,36 @@ func TestMemoryBackendByteBudget(t *testing.T) {
 			}
 			require.Equal(t, recountedBytes(backend), backend.storedBytes)
 			require.LessOrEqual(t, backend.storedBytes, 100)
+		})
+	}
+}
+
+func TestMemoryBackendBudgetsOnlyTheNetGrowthOfAReplacement(t *testing.T) {
+	testCases := []struct {
+		name  string
+		token []byte
+	}{
+		{name: "same size", token: bytes.Repeat([]byte("n"), 21)},
+		{name: "shrinking", token: []byte("short")},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			backend, err := NewMemoryBackend(&MemoryBackendOptions{MaximumBytes: 100})
+			require.NoError(t, err)
+			backend.now = newTestClock().now
+			ctx := t.Context()
+			require.NoError(t, backend.Put(ctx, "s", "identity", bytes.Repeat([]byte("i"), 40), time.Hour)) // 49 bytes
+			require.NoError(t, backend.Put(ctx, "s", "token", bytes.Repeat([]byte("t"), 21), time.Hour))    // 75
+			require.NoError(t, backend.Put(ctx, "o", "k", bytes.Repeat([]byte("o"), 20), 2*time.Hour))      // 97
+
+			require.NoError(t, backend.Put(ctx, "s", "token", testCase.token, time.Hour))
+
+			for _, stored := range []struct{ sessionID, key string }{{"s", "identity"}, {"s", "token"}, {"o", "k"}} {
+				_, found, err := backend.Get(ctx, stored.sessionID, stored.key)
+				require.NoError(t, err)
+				require.True(t, found, "%s/%s survives a replacement that fits", stored.sessionID, stored.key)
+			}
+			require.Equal(t, recountedBytes(backend), backend.storedBytes)
 		})
 	}
 }

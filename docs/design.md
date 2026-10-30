@@ -382,7 +382,7 @@ type Backend interface {
 
 type MemoryBackendOptions struct {
 	// MaximumSessions default 100000, MaximumBytes (session IDs, keys and values held) default 64 MiB; when a
-	// write would pass either: expired entries are dropped, then the entries expiring soonest are evicted, a
+	// write would pass either (a replacement counts only what it adds): expired entries are dropped, then the entries expiring soonest are evicted, a
 	// live revocation marker included (a full backend never fails a Put; only a value larger than MaximumBytes)
 	MaximumSessions int
 	MaximumBytes    int

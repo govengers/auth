@@ -17,7 +17,7 @@ const (
 // MemoryBackendOptions configures NewMemoryBackend.
 type MemoryBackendOptions struct {
 	// MaximumSessions defaults to 100000, MaximumBytes (session IDs, keys and values held) to 64 MiB. When a
-	// write would pass either, expired entries are dropped, then the entries expiring soonest are evicted, a
+	// write would pass either (a replacement counts only what it adds), expired entries are dropped, then the entries expiring soonest are evicted, a
 	// live revocation marker included. A single value that cannot fit is refused.
 	MaximumSessions int
 	MaximumBytes    int
@@ -79,12 +79,15 @@ func (b *MemoryBackend) Put(_ context.Context, sessionID, key string, value []by
 	if found && entry.revoked(now) {
 		return ErrRevoked
 	}
-	size := len(sessionID) + len(key) + len(value) // at most what the write adds
+	size := len(sessionID) + len(key) + len(value)
 	if size > b.options.MaximumBytes {
 		return fmt.Errorf("memory session backend: a value of %d bytes cannot fit in MaximumBytes %d", size, b.options.MaximumBytes)
 	}
-	b.makeRoom(now, !found, size)
-	entry, found = b.sessions[sessionID] // makeRoom may have evicted it
+	b.makeRoom(now, !found, growth(entry, key, len(value), size))
+	if _, kept := b.sessions[sessionID]; found && !kept { // evicted to make room: it comes back as a new session
+		b.makeRoom(now, true, size)
+	}
+	entry, found = b.sessions[sessionID]
 	if !found {
 		entry = b.addSession(sessionID, &memorySession{values: map[string]memoryValue{}})
 	}
@@ -203,6 +206,18 @@ func (b *MemoryBackend) fits(newSession bool, size int) bool {
 		sessions++
 	}
 	return sessions <= b.options.MaximumSessions && b.storedBytes+size <= b.options.MaximumBytes
+}
+
+// growth is the net number of bytes storing valueBytes under key adds to entry (nil: a new session of
+// size bytes); a replacement counts only its difference, so it never evicts what it does not need to.
+func growth(entry *memorySession, key string, valueBytes, size int) int {
+	if entry == nil {
+		return size
+	}
+	if previous, found := entry.values[key]; found {
+		return valueBytes - len(previous.value)
+	}
+	return len(key) + valueBytes
 }
 
 // addSession stores entry, a new or a revoked session without values, under sessionID. b.mutex must be held.
