@@ -33,7 +33,7 @@ func startOIDC(t *testing.T, options fakeprovider.OIDCOptions) *fakeprovider.OID
 
 func withJWT(t *testing.T, environment map[string]string) map[string]string {
 	t.Helper()
-	return merged(environment, map[string]string{"JWT_ENABLED": "true", "JWT_PRIVATE_KEY": privateKeyPEM(t)})
+	return merged(environment, map[string]string{"JWT_ENABLED": "true", "JWT_PRIVATE_KEY": privateKeyPEM(t), "JWT_AUDIENCE": jwtAudience})
 }
 
 func TestOIDCLoginReturnsToTheRequestedPageAndTheChecksHandOnAVerifiableJWT(t *testing.T) {

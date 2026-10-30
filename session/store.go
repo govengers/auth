@@ -22,7 +22,8 @@ const (
 	securePrefix      = "__Secure-"
 	defaultMaximumAge = 24 * time.Hour
 	cookieValueBytes  = 32
-	// revokeTimeout bounds End's revocation, which a disconnecting client cannot cancel.
+	// revokeTimeout bounds End's revocation and the Guard's call of a Revoker, which a disconnecting client
+	// cannot cancel.
 	revokeTimeout = 10 * time.Second
 )
 

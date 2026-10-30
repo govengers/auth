@@ -36,6 +36,7 @@ func gitHubEnvironment(t *testing.T, fake *fakeprovider.GitHubServer) map[string
 		"GITHUB_ADMIN_TEAMS":      "govengers/admins",
 		"JWT_ENABLED":             "true",
 		"JWT_PRIVATE_KEY":         privateKeyPEM(t),
+		"JWT_AUDIENCE":            jwtAudience,
 	}
 }
 

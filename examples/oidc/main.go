@@ -51,7 +51,7 @@ func run() error {
 		config.String("OIDC_ISSUER").NotEmpty().Into(&options.Issuer),
 		config.String("OIDC_CLIENT_ID").NotEmpty().Into(&options.ClientID),
 		config.String("OIDC_CLIENT_SECRET").NotEmpty().Sensitive().Into(&options.ClientSecret),
-		config.StringArray("OIDC_ALLOWED_EMAIL_DOMAINS").Default(nil).Into(&options.AllowedEmailDomains), // set it for Google, or any Google account gets in
+		config.StringArray("OIDC_ALLOWED_EMAIL_DOMAINS").Default(nil).Into(&options.AllowedEmailDomains), // Google needs it (or Keycloak), else oidc.New refuses to admit every Google account
 		config.String("KEYCLOAK_URL").Default("").Into(&keycloakOptions.URL),                             // empty: no enrichment
 		config.String("KEYCLOAK_REALM").Default("").Into(&keycloakOptions.Realm),
 		config.String("KEYCLOAK_CLIENT_ID").Default("").Into(&keycloakOptions.ClientID), // a service account client, not the login client

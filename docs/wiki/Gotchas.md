@@ -38,5 +38,5 @@ The rules agents and humans get wrong most often, one line each with the page th
 - No retries, no idle timeout, no key rotation list; changing `EncryptionKey` logs everyone out. [Sessions](Sessions.md#store)
 - `MemoryBackend` is for one replica at non-production scale; use `redisbackend` in production. [Sessions](Sessions.md#backends)
 - A stale `SaveIdentity` from your code can race a Guard refresh; use `Session.SwapIdentity`. [Sessions](Sessions.md#store)
-- Google login via `AllowedEmailDomains` does not check the `hd` claim. [OIDC](OIDC.md#gotchas)
+- Google needs an admission (`AllowedEmailDomains`, `OnLogin` or `AllowAnyAccount`), else `oidc.New` refuses; an allowed Workspace domain also requires `hd`, so a consumer Google account with a company address is 403. [OIDC](OIDC.md#gotchas)
 - Full list: [Security](Security.md).

@@ -122,7 +122,7 @@ func TestChecksPassASessionAndHandTheIdentityOnAsAVerifiableJWT(t *testing.T) {
 	cookie := testHarness.signIn(t, testIdentity())
 	jwksServer := httptest.NewServer(testHarness.server.engine)
 	t.Cleanup(jwksServer.Close)
-	verifier, err := jwt.NewVerifier(t.Context(), &jwt.VerifierOptions{JWKSURL: jwksServer.URL + "/auth/jwks", Issuer: testIssuer})
+	verifier, err := jwt.NewVerifier(t.Context(), &jwt.VerifierOptions{JWKSURL: jwksServer.URL + "/auth/jwks", Issuer: testIssuer, Audience: testAudience})
 	require.NoError(t, err)
 
 	for _, check := range []string{"/auth/ui", "/auth/api"} {
@@ -197,7 +197,7 @@ func TestAnAPIKeyPassesTheChecksAndItsPermissionsReachTheJWT(t *testing.T) {
 	testHarness := newHarness(t, harnessOptions{signer: newTestSigner(t), apiKeys: true})
 	jwksServer := httptest.NewServer(testHarness.server.engine)
 	t.Cleanup(jwksServer.Close)
-	verifier, err := jwt.NewVerifier(t.Context(), &jwt.VerifierOptions{JWKSURL: jwksServer.URL + "/auth/jwks", Issuer: testIssuer})
+	verifier, err := jwt.NewVerifier(t.Context(), &jwt.VerifierOptions{JWKSURL: jwksServer.URL + "/auth/jwks", Issuer: testIssuer, Audience: testAudience})
 	require.NoError(t, err)
 	testCases := []struct {
 		name   string

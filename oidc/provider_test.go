@@ -1,7 +1,9 @@
 package oidc_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -73,6 +75,49 @@ func TestNewValidatesOptions(t *testing.T) {
 	require.Error(t, err)
 	_, err = oidc.New(t.Context(), valid())
 	require.NoError(t, err)
+}
+
+// Anyone can create a Google account, so a Google login without an admission check is refused unless
+// the application opts in.
+func TestNewRefusesAGoogleIssuerThatAdmitsEveryAccount(t *testing.T) {
+	unreachable := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("no network in tests")
+	})}
+	testCases := []struct {
+		name          string
+		change        func(options *oidc.Options)
+		wantAdmission bool
+	}{
+		{name: "no admission", change: func(*oidc.Options) {}, wantAdmission: true},
+		{name: "allowed email domains", change: func(options *oidc.Options) { options.AllowedEmailDomains = []string{"example.com"} }},
+		{name: "login hook", change: func(options *oidc.Options) {
+			options.OnLogin = func(_ context.Context, identity *auth.Identity) (*auth.Identity, error) { return identity, nil }
+		}},
+		{name: "any account on purpose", change: func(options *oidc.Options) { options.AllowAnyAccount = true }},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			options := &oidc.Options{
+				Name: "google", Issuer: oidc.GoogleIssuer, ClientID: clientID, ClientSecret: clientSecret,
+				ExternalURL: externalURL, Sessions: newStore(t), HTTPClient: unreachable,
+			}
+			testCase.change(options)
+
+			_, err := oidc.New(t.Context(), options)
+
+			if testCase.wantAdmission {
+				require.ErrorContains(t, err, "the Google issuer admits every Google account")
+				return
+			}
+			require.ErrorContains(t, err, "discover issuer", "validation passed, discovery ran")
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
 
 func TestNewFailsWhenDiscoveryFails(t *testing.T) {

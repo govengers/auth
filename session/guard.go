@@ -27,12 +27,23 @@ const (
 // Refresher re-validates identities of one provider. The Guard calls it for identities whose last
 // refresh is older than RefreshInterval, always with the real identity (identity.Real()).
 // Return a copy with provider-owned fields updated; keep every other field (roles set by OnLogin etc.).
-// ErrUnauthenticated or ErrForbidden end the session; any other error keeps the identity (degraded) until
+// ErrUnauthenticated or ErrForbidden end the session (a Refresher that is also a Revoker is called first); any other error keeps the identity (degraded) until
 // the last successful verification is older than GuardOptions.MaximumUnverifiedAge. Refresh runs without the request's cancellation, bounded by 30 s. Implementations must be safe for
 // concurrent use.
 type Refresher interface {
 	Name() string // the Identity.Provider it refreshes
 	Refresh(ctx context.Context, current Session, identity *auth.Identity) (*auth.Identity, error)
+}
+
+// Revoker is optionally implemented by a Refresher whose provider holds state for a session at the
+// identity provider, such as GitHub's OAuth token. Before the Guard ends a session whose refresh it
+// refused (a refusal of the Refresher, or a failure lasting longer than MaximumUnverifiedAge), it calls
+// RevokeSession with the session, which still holds the provider's values, on a context without the
+// request's cancellation and with its own 10 s timeout. An error only degrades the outcome: the session
+// ends either way. A session that expires (MaximumAge) or ends otherwise is not seen by the Guard, so it is
+// not called then. Implementations must be safe for concurrent use.
+type Revoker interface {
+	RevokeSession(ctx context.Context, current Session) error
 }
 
 // GuardOptions configures NewGuard.
@@ -212,10 +223,11 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 	err = g.refreshError(claimed, realIdentity.Provider, refreshed, err)
 	switch {
 	case isRefusal(err):
-		outcome.Err = err
+		revokeError := g.revokeAtProvider(ctx, realIdentity.Provider, current) // before End, which deletes what it reads
+		outcome.Err = errors.Join(err, revokeError)
 		if endError := g.endRefusedSession(writer, request.WithContext(refreshContext), current, claimed, stored.RefreshedAt); endError != nil {
 			// The session stays usable: a 500, not the refusal (kept as text only, so it cannot decide the answer).
-			outcome.Err = fmt.Errorf("end session refused by its refresh (%s): %w", err.Error(), endError)
+			outcome.Err = errors.Join(fmt.Errorf("end session refused by its refresh (%s): %w", err.Error(), endError), revokeError)
 		}
 		return nil, g.reportFailure(ctx, outcome)
 	case err != nil:
@@ -271,6 +283,22 @@ func (g *Guard) refreshError(claimed identityEnvelope, provider string, refreshe
 // isRefusal reports whether a Refresher refused the identity, which ends the session.
 func isRefusal(err error) bool {
 	return errors.Is(err, auth.ErrUnauthenticated) || errors.Is(err, auth.ErrForbidden)
+}
+
+// revokeAtProvider lets provider's Refresher, when it is a Revoker, revoke what it holds for the session
+// at the identity provider. It runs detached and bounded on its own, so neither a disconnecting client nor
+// a refresh that used up its timeout skips it.
+func (g *Guard) revokeAtProvider(ctx context.Context, provider string, current Session) error {
+	revoker, isRevoker := g.refreshers[provider].(Revoker)
+	if !isRevoker {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revokeTimeout)
+	defer cancel()
+	if err := revoker.RevokeSession(ctx, current); err != nil {
+		return fmt.Errorf("revoke session at provider %q: %w", provider, err)
+	}
+	return nil
 }
 
 // endRefusedSession ends the session whose refresh was refused and returns the error of ending it. When

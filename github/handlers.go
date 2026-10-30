@@ -62,6 +62,17 @@ func (p *Provider) Refresh(ctx context.Context, current session.Session, identit
 	return withMembership(identity, userMembership), nil
 }
 
+// RevokeSession implements session.Revoker: it revokes the session's GitHub token at GitHub, so a
+// session the Guard ends (team removal, MaximumUnverifiedAge) leaves no valid token behind. A session
+// without a readable token has nothing to revoke.
+func (p *Provider) RevokeSession(ctx context.Context, current session.Session) error {
+	token, err := sessionToken(ctx, current)
+	if err != nil {
+		return failure.UnlessAbsent(err)
+	}
+	return p.revokeToken(ctx, token)
+}
+
 // sessionMembership refetches the team membership of the user whose GitHub token current holds; refusals
 // as Refresh.
 func (p *Provider) sessionMembership(ctx context.Context, current session.Session) (membership, error) {
@@ -93,7 +104,9 @@ func (p *Provider) login(writer http.ResponseWriter, request *http.Request) {
 	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionLogin, Result: auth.ResultSuccess})
 }
 
-// callback verifies the login, starts the authenticated session and redirects to the return path.
+// callback verifies the login, starts the authenticated session, revokes the GitHub token of the session
+// it replaced (a re-login) and redirects to the return path. Failing to read or revoke that token only
+// degrades the outcome.
 func (p *Provider) callback(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
 	completed, err := p.completeLogin(ctx, request)
@@ -101,12 +114,17 @@ func (p *Provider) callback(writer http.ResponseWriter, request *http.Request) {
 		p.reporter.RefuseCallback(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err, Identity: completed.identity})
 		return
 	}
+	_, previousToken, readError := p.sessionState(ctx, request) // read before Start ends the session that holds it
 	if err := p.startSession(ctx, writer, request, completed); err != nil {
 		p.reporter.RefuseCallback(ctx, writer, auth.Outcome{Action: auth.ActionCallback, Err: err, Identity: completed.identity})
 		return
 	}
+	outcome := auth.Outcome{Action: auth.ActionCallback, Result: auth.ResultSuccess, Identity: completed.identity, Err: readError}
+	if previousToken != nil && previousToken.AccessToken != completed.token.AccessToken {
+		outcome.Err = errors.Join(outcome.Err, p.revokeToken(ctx, previousToken))
+	}
 	redirect.To(writer, p.options.ExternalURL+completed.returnPath)
-	p.reporter.Report(ctx, auth.Outcome{Action: auth.ActionCallback, Result: auth.ResultSuccess, Identity: completed.identity})
+	p.reporter.Report(ctx, outcome)
 }
 
 // completeLogin checks state and PKCE, reads the user and the teams and runs OnLogin. On a refusal
@@ -243,10 +261,11 @@ func (p *Provider) refreshSession(ctx context.Context, writer http.ResponseWrite
 	}
 	userMembership, err := p.sessionMembership(ctx, current)
 	if errors.Is(err, auth.ErrUnauthenticated) || errors.Is(err, auth.ErrForbidden) {
+		revokeError := p.RevokeSession(ctx, current) // before End, which deletes the token
 		if endError := p.options.Sessions.End(ctx, writer, request); endError != nil {
-			return stored, fmt.Errorf("github: end refused session: %w", endError)
+			return stored, errors.Join(fmt.Errorf("github: end refused session: %w", endError), revokeError)
 		}
-		return stored, err
+		return stored, errors.Join(err, revokeError)
 	}
 	if err != nil {
 		return stored, err

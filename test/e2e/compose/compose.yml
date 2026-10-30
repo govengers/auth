@@ -54,6 +54,7 @@ services:
       SHUTDOWN_DELAY_SECONDS: "0"
       JWT_ENABLED: "true"
       JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY:?export a PEM key, or run just test-e2e}
+      JWT_AUDIENCE: app
     depends_on:
       issuer: {condition: service_healthy} # forwardauth discovers the issuer at startup
     restart: on-failure:5

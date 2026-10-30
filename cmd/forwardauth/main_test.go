@@ -14,6 +14,7 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/apikey"
+	"github.com/govengers/auth/oidc"
 	"github.com/govengers/auth/oidc/keycloak"
 )
 
@@ -73,11 +74,30 @@ func TestValidateConfigurationAcceptsCompleteSetups(t *testing.T) {
 			configuration.KeycloakURL, configuration.KeycloakRealm = "https://keycloak.example.com", "company"
 			configuration.KeycloakClientID, configuration.KeycloakClientSecret = "forwardauth", "keycloak-secret"
 			configuration.SessionRedisEnabled, configuration.SessionRedisAddress = true, "redis:6379"
-			configuration.JWTEnabled, configuration.JWTPrivateKey = true, "-----BEGIN PRIVATE KEY-----"
+			configuration.JWTEnabled, configuration.JWTPrivateKey, configuration.JWTAudience = true, "-----BEGIN PRIVATE KEY-----", []string{"app"}
 			configuration.APIKeysEnabled, configuration.APIKeys = true, []string{"ci:" + testSecret}
 			configuration.APIKeyPermissions = []string{"ci=builds:write+*:read"}
 			configuration.SessionSameSite = "none"
 			configuration.TrustedProxies = []string{"10.0.0.0/8", "192.0.2.1"}
+			return configuration
+		}},
+		{name: "google with allowed email domains", configuration: func() *Configuration {
+			configuration := validOIDCConfiguration()
+			configuration.OIDCIssuer, configuration.OIDCClaimMapper = oidc.GoogleIssuer, claimMapperGoogle
+			configuration.OIDCAllowedEmailDomains = []string{"example.com"}
+			return configuration
+		}},
+		{name: "google with a keycloak requirement", configuration: func() *Configuration {
+			configuration := validOIDCConfiguration()
+			configuration.OIDCClaimMapper, configuration.KeycloakEnabled = claimMapperGoogle, true
+			configuration.KeycloakURL, configuration.KeycloakRealm = "https://keycloak.example.com", "company"
+			configuration.KeycloakClientID, configuration.KeycloakClientSecret = "forwardauth", "keycloak-secret"
+			configuration.KeycloakRequiredRealmRoles = []string{"staff"}
+			return configuration
+		}},
+		{name: "google admitting every account on purpose", configuration: func() *Configuration {
+			configuration := validOIDCConfiguration()
+			configuration.OIDCIssuer, configuration.OIDCClaimMapper, configuration.OIDCAllowAnyAccount = oidc.GoogleIssuer, claimMapperGoogle, true
 			return configuration
 		}},
 		{name: "keycloak with the password grant", configuration: func() *Configuration {
@@ -96,6 +116,7 @@ func TestValidateConfigurationAcceptsCompleteSetups(t *testing.T) {
 }
 
 func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
+	const wantGoogleAdmission = "OIDC_ALLOWED_EMAIL_DOMAINS or KEYCLOAK_REQUIRED_* is required with Google"
 	testCases := []struct {
 		name          string
 		configuration func() *Configuration
@@ -136,6 +157,14 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		{name: "oidc without issuer and client", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.OIDCIssuer, configuration.OIDCClientID, configuration.OIDCClientSecret = "", "", " "
 		}, problems: []string{"OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET"}},
+		{name: "google mapper that admits every account", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.OIDCClaimMapper = claimMapperGoogle }, problems: []string{wantGoogleAdmission}},
+		{name: "google issuer that admits every account", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.OIDCIssuer = oidc.GoogleIssuer }, problems: []string{wantGoogleAdmission}},
+		{name: "google with keycloak but no requirement", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
+			configuration.OIDCClaimMapper, configuration.KeycloakEnabled = claimMapperGoogle, true
+			configuration.KeycloakURL, configuration.KeycloakRealm = "https://keycloak.example.com", "company"
+			configuration.KeycloakClientID, configuration.KeycloakClientSecret = "forwardauth", "keycloak-secret"
+			configuration.KeycloakRequiredGroups = []string{" "}
+		}, problems: []string{wantGoogleAdmission}},
 		{name: "unknown claim mapper", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.OIDCClaimMapper = "azure" }, problems: []string{"OIDC_CLAIM_MAPPER"}},
 		{name: "github without client and teams", configuration: validGitHubConfiguration, change: func(configuration *Configuration) {
 			configuration.GitHubClientID, configuration.GitHubClientSecret, configuration.GitHubAllowedTeams = "", "", nil
@@ -162,7 +191,10 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 			configuration.SessionInsecureCookie, configuration.ExternalURL = true, "HtTpS://app.example.com"
 		}, problems: []string{"SESSION_INSECURE_COOKIE=true with an https EXTERNAL_URL"}},
 		{name: "jwt lifetime beyond a day", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTLifetimeSeconds = 86401 }, problems: []string{"JWT_LIFETIME_SECONDS 86401 must be between 1 and 86400"}},
-		{name: "jwt without key", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTEnabled = true }, problems: []string{"JWT_PRIVATE_KEY"}},
+		{name: "jwt without key and audience", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTEnabled = true }, problems: []string{"JWT_PRIVATE_KEY is required", "JWT_AUDIENCE is required when JWT_ENABLED=true"}},
+		{name: "jwt with a blank audience", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
+			configuration.JWTEnabled, configuration.JWTPrivateKey, configuration.JWTAudience = true, "-----BEGIN PRIVATE KEY-----", []string{" "}
+		}, problems: []string{"JWT_AUDIENCE is required when JWT_ENABLED=true"}},
 		{name: "jwt header that is no header name", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "X Auth" }, problems: []string{"JWT_HEADER \"X Auth\" is not an HTTP header name"}},
 		{name: "jwt header of the upstream request", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "cookie" }, problems: []string{"JWT_HEADER \"cookie\" would replace the upstream request's own header"}},
 		{name: "jwt header the check answer sets", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "Cache-Control" }, problems: []string{"JWT_HEADER \"Cache-Control\" is set by the check answer"}},

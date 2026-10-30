@@ -20,6 +20,7 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/fakeprovider"
+	"github.com/govengers/auth/session"
 )
 
 func TestLoginRedirectsToGitHubWithPKCE(t *testing.T) {
@@ -438,6 +439,90 @@ func TestLogoutEndsTheSessionAndRevokesTheToken(t *testing.T) {
 	require.Equal(t, auth.Outcome{Provider: "github", Action: auth.ActionLogout, Result: auth.ResultSuccess, Identity: loggedOut[0]}, outcome)
 }
 
+// A re-login replaces the session; the token of the replaced one must not stay valid at GitHub.
+func TestCallbackRevokesTheTokenOfTheSessionItReplaces(t *testing.T) {
+	testCases := []struct {
+		name           string
+		failRevocation bool
+	}{
+		{name: "revoked"},
+		{name: "revocation fails: degraded success", failRevocation: true},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			environment := newTestEnvironment(t, defaultTestTeams(), nil)
+			first := environment.login(t)
+			previous, err := sessionToken(t.Context(), environment.sessionOf(t, first))
+			require.NoError(t, err)
+			login := environment.serve(withSessionCookie(t, newRequest(t, http.MethodGet, testExternalURL+"/auth/github/login"), first))
+			require.Equal(t, http.StatusFound, login.Code)
+			if testCase.failRevocation {
+				environment.fake.FailWith(fakeprovider.GitHubEndpointRevoke, http.StatusBadGateway)
+			}
+
+			// the login kept the session, which holds an identity, so the callback carries the first cookie
+			response := environment.serve(withSessionCookie(t, newRequest(t, http.MethodGet, approve(t, login.Header().Get("Location"))), first))
+
+			require.Equal(t, http.StatusFound, response.Code, response.Body.String())
+			current, err := sessionToken(t.Context(), environment.sessionOf(t, response))
+			require.NoError(t, err)
+			require.NotEqual(t, previous.AccessToken, current.AccessToken)
+			outcome := environment.outcomes.last(t)
+			require.Equal(t, auth.ResultSuccess, outcome.Result)
+			if testCase.failRevocation {
+				require.Empty(t, environment.fake.RevokedTokens())
+				require.ErrorContains(t, outcome.Err, "github: revoke token: GitHub answered 502")
+				return
+			}
+			require.Equal(t, []string{previous.AccessToken}, environment.fake.RevokedTokens())
+			require.NoError(t, outcome.Err)
+		})
+	}
+}
+
+// The Guard ends a session whose refresh it refuses; the session's token must not stay valid at GitHub.
+func TestGuardRevokesTheTokenOfASessionItEnds(t *testing.T) {
+	testCases := []struct {
+		name       string
+		prepare    func(environment *testEnvironment)
+		wantStatus int
+	}{
+		{
+			name: "removed from the allowed team",
+			prepare: func(environment *testEnvironment) {
+				environment.fake.SetTeams([]fakeprovider.GitHubTeam{{Organization: "acme", Slug: "ops"}})
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "teams unreadable beyond the maximum unverified age",
+			prepare:    failing(fakeprovider.GitHubEndpointTeams, http.StatusBadGateway),
+			wantStatus: http.StatusUnauthorized,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			environment := newTestEnvironment(t, defaultTestTeams(), nil)
+			guard, err := session.NewGuard(&session.GuardOptions{
+				Store: environment.store, Refreshers: []session.Refresher{environment.provider},
+				RefreshInterval: time.Nanosecond, MaximumUnverifiedAge: time.Nanosecond,
+			})
+			require.NoError(t, err)
+			login := environment.login(t)
+			token, err := sessionToken(t.Context(), environment.sessionOf(t, login))
+			require.NoError(t, err)
+			testCase.prepare(environment)
+
+			response := serveRecorder(guard.RequireAPI()(http.NotFoundHandler()), withSessionCookie(t, newRequest(t, http.MethodGet, testExternalURL+"/api"), login))
+
+			require.Equal(t, testCase.wantStatus, response.Code, response.Body.String())
+			require.Equal(t, []string{token.AccessToken}, environment.fake.RevokedTokens())
+			_, err = environment.sessionOf(t, login).Identity(t.Context())
+			require.ErrorIs(t, err, auth.ErrUnauthenticated, "session ended")
+		})
+	}
+}
+
 func TestLogoutRefusesACrossSiteRequest(t *testing.T) {
 	called := false
 	environment := newTestEnvironment(t, defaultTestTeams(), func(options *Options) {
@@ -663,20 +748,29 @@ func TestRefreshTeams(t *testing.T) {
 
 func TestRefreshTeamsRefusals(t *testing.T) {
 	testCases := []struct {
-		name       string
-		prepare    func(environment *testEnvironment)
-		wantStatus int
-		wantEnded  bool
-		wantResult auth.Result
-		wantError  error  // checked with ErrorIs when set
-		wantText   string // checked with ErrorContains
+		name        string
+		prepare     func(environment *testEnvironment)
+		wantStatus  int
+		wantEnded   bool
+		wantRevoked bool // the token was revoked at GitHub
+		wantResult  auth.Result
+		wantError   error  // checked with ErrorIs when set
+		wantText    string // checked with ErrorContains
 	}{
 		{
 			name: "removed from the allowed team",
 			prepare: func(environment *testEnvironment) {
 				environment.fake.SetTeams([]fakeprovider.GitHubTeam{{Organization: "acme", Slug: "ops"}})
 			},
-			wantStatus: http.StatusForbidden, wantEnded: true, wantResult: auth.ResultDenied,
+			wantStatus: http.StatusForbidden, wantEnded: true, wantRevoked: true, wantResult: auth.ResultDenied,
+		},
+		{
+			name: "removed from the allowed team, revocation fails",
+			prepare: func(environment *testEnvironment) {
+				environment.fake.SetTeams([]fakeprovider.GitHubTeam{{Organization: "acme", Slug: "ops"}})
+				environment.fake.FailWith(fakeprovider.GitHubEndpointRevoke, http.StatusBadGateway)
+			},
+			wantStatus: http.StatusForbidden, wantEnded: true, wantResult: auth.ResultDenied, wantText: "github: revoke token: GitHub answered 502",
 		},
 		{
 			name: "removed from the allowed team, session cannot be ended",
@@ -684,12 +778,12 @@ func TestRefreshTeamsRefusals(t *testing.T) {
 				environment.fake.SetTeams([]fakeprovider.GitHubTeam{{Organization: "acme", Slug: "ops"}})
 				environment.backend.failRevoke.Store(true)
 			},
-			wantStatus: http.StatusInternalServerError, wantResult: auth.ResultError, wantError: errBackendDown, wantText: "github: end refused session",
+			wantStatus: http.StatusInternalServerError, wantRevoked: true, wantResult: auth.ResultError, wantError: errBackendDown, wantText: "github: end refused session",
 		},
 		{
 			name:       "token revoked at GitHub",
 			prepare:    failing(fakeprovider.GitHubEndpointTeams, http.StatusUnauthorized),
-			wantStatus: http.StatusUnauthorized, wantEnded: true, wantResult: auth.ResultDenied,
+			wantStatus: http.StatusUnauthorized, wantEnded: true, wantRevoked: true, wantResult: auth.ResultDenied,
 		},
 		{
 			name:       "GitHub down",
@@ -706,12 +800,19 @@ func TestRefreshTeamsRefusals(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			environment := newTestEnvironment(t, defaultTestTeams(), nil)
 			login := environment.login(t)
+			token, err := sessionToken(t.Context(), environment.sessionOf(t, login))
+			require.NoError(t, err)
 			testCase.prepare(environment)
 
 			response := environment.serve(withSessionCookie(t, newRequest(t, http.MethodPost, testExternalURL+"/auth/github/refresh-teams"), login))
 
 			require.Equal(t, testCase.wantStatus, response.Code, response.Body.String())
-			_, err := environment.sessionOf(t, login).Identity(t.Context())
+			if testCase.wantRevoked {
+				require.Equal(t, []string{token.AccessToken}, environment.fake.RevokedTokens())
+			} else {
+				require.Empty(t, environment.fake.RevokedTokens())
+			}
+			_, err = environment.sessionOf(t, login).Identity(t.Context())
 			if testCase.wantEnded {
 				require.ErrorIs(t, err, auth.ErrUnauthenticated)
 				require.Equal(t, -1, sessionCookie(t, response).MaxAge)

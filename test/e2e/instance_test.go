@@ -202,6 +202,9 @@ func (b *browser) do(method, target string, header http.Header) page {
 }
 
 // privateKeyPEM generates the RSA key a JWT-enabled instance signs with.
+// jwtAudience is the JWT_AUDIENCE of every instance with JWT_ENABLED.
+const jwtAudience = "app"
+
 func privateKeyPEM(t *testing.T) string {
 	t.Helper()
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -215,7 +218,7 @@ func (i *instance) bearerIdentity(t *testing.T, answer page) *auth.Identity {
 	t.Helper()
 	token, found := strings.CutPrefix(answer.header.Get("Authorization"), "Bearer ")
 	require.True(t, found, "no bearer token in %v", answer.header)
-	verifier, err := jwt.NewVerifier(t.Context(), &jwt.VerifierOptions{JWKSURL: i.baseURL + "/auth/jwks", Issuer: i.baseURL})
+	verifier, err := jwt.NewVerifier(t.Context(), &jwt.VerifierOptions{JWKSURL: i.baseURL + "/auth/jwks", Issuer: i.baseURL, Audience: jwtAudience})
 	require.NoError(t, err)
 	identity, err := verifier.Verify(t.Context(), token)
 	require.NoError(t, err)
