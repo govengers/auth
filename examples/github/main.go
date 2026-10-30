@@ -8,7 +8,6 @@ package main
 import (
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"time"
 
@@ -106,7 +105,7 @@ func newServer(options *serverOptions) (http.Handler, error) {
 	}
 
 	engine := gin.New()
-	engine.Use(gin.Recovery(), wideevent.Middleware(wideevent.WithPreEnricher(redactQuery)))
+	engine.Use(gin.Recovery(), wideevent.Middleware(wideevent.WithPreEnricher(ginadapter.RedactQuery)))
 	ginadapter.RegisterRoutes(engine, provider.Routes()) // on the engine root: GET /auth/github/{login,callback,logout}, POST /auth/github/refresh-teams
 	engine.GET("/auth/me", ginadapter.Middleware(guard.RequireAPI()), gin.WrapH(auth.IdentityHandler()))
 	api := engine.Group("/api", ginadapter.Middleware(guard.RequireAPI()))
@@ -114,16 +113,6 @@ func newServer(options *serverOptions) (http.Handler, error) {
 	api.DELETE("/notes", ginadapter.Require(authorization.IsAdmin()), deleteNotes)
 	engine.GET("/", ginadapter.Middleware(guard.RequireUI()), home)
 	return engine, nil
-}
-
-// redactQuery replaces the raw query the wide-event middleware records: the OAuth callback carries code
-// and state.
-func redactQuery(event *wideevent.Event, ginContext *gin.Context) {
-	redacted := url.Values{}
-	for name := range ginContext.Request.URL.Query() {
-		redacted.Set(name, "redacted")
-	}
-	event.Str("request.query", redacted.Encode())
 }
 
 func listNotes(ginContext *gin.Context) {

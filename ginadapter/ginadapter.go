@@ -4,14 +4,16 @@
 //
 // It is the only package of the library that imports gin and go-wide-event-logger. It records on the
 // wide event the wideevent.Middleware put into the request context and never emits one of its own; it
-// records IDs and decisions, never usernames, emails, names, tokens or codes. Everything in it is safe
-// for concurrent use.
+// records IDs and decisions, never usernames, emails, names, tokens or codes. Mount the wide-event
+// middleware with RedactQuery, or the code and state of every OAuth callback reach your logs. Everything
+// in it is safe for concurrent use.
 package ginadapter
 
 import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -88,6 +90,29 @@ func Observe(ctx context.Context, outcome auth.Outcome) {
 	recordOutcomeError(we, prefix, outcome)
 	recordIdentity(we, prefix, outcome.Identity)
 	recordRequestOutcome(we, outcome)
+}
+
+// maximumQueryBytes bounds the recorded query: the client chooses its parameter names, and samplers
+// usually keep every refused request.
+const maximumQueryBytes = 512
+
+// RedactQuery is a wide-event pre-enricher: mount it with
+// wideevent.Middleware(wideevent.WithPreEnricher(ginadapter.RedactQuery)), or the code and state of
+// every OAuth callback reach your logs. The middleware records the raw query as request.query; RedactQuery
+// sets it again with every parameter name kept and every value replaced by "redacted", cut to 512 bytes.
+// The JSON emitters print the latest value of a key; the dev emitters print every value, the raw query
+// included, so keep those to development or emit only the latest values. Call it first from your own
+// pre-enricher when you need one.
+func RedactQuery(we *wideevent.Event, ginContext *gin.Context) {
+	redacted := url.Values{}
+	for name := range ginContext.Request.URL.Query() {
+		redacted.Set(name, "redacted")
+	}
+	query := redacted.Encode() // ASCII only: a byte cut leaves valid UTF-8
+	if len(query) > maximumQueryBytes {
+		query = query[:maximumQueryBytes]
+	}
+	we.Str("request.query", query)
 }
 
 // The key prefixes of an outcome's fields.

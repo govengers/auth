@@ -22,7 +22,7 @@ Core packages never log and never start goroutines; they report outcomes to an o
 | `apikey` | static or application-issued API keys | [API-Keys](API-Keys.md) |
 | `jwt` | sign identities (forward auth) and verify them in a backend | [JWT](JWT.md) |
 | `authorization` | `Check` primitives and `All`, `Any`, `Not`, `Real` | [Authorization](Authorization.md) |
-| `ginadapter` | net/http middleware and provider routes on gin, `Require`, wide-event `Observe` | [Gin](Gin.md) |
+| `ginadapter` | net/http middleware and provider routes on gin, `Require`, wide-event `Observe` and `RedactQuery` | [Gin](Gin.md) |
 | `prometheusadapter` | `Observer` counting outcomes on your registry | [Gin](Gin.md#prometheus) |
 | `cmd/forwardauth` | the image `ghcr.io/govengers/forwardauth` for apps you do not change | [Forward-Auth](Forward-Auth.md) |
 

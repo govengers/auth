@@ -9,7 +9,7 @@ The rules agents and humans get wrong most often, one line each with the page th
 - `apikey` middleware goes before the Guard, never in front of a `jwt.Verifier` (both read `Authorization: Bearer`). [API-Keys](API-Keys.md#gotchas)
 - net/http has no built-in check middleware; wrap the check yourself (`authorize` in the examples) or use `ginadapter.Require`. [Authorization](Authorization.md#mounting-a-check)
 - `internal/fakeprovider` and `internal/backendtest` are not importable outside this module; write your own fakes for consumer tests.
-- The wide-event middleware logs `request.query` verbatim, OAuth callbacks included (`code`, `state`); redact it in a pre-enricher. [Gin](Gin.md#wide-events)
+- The wide-event middleware logs `request.query` verbatim, OAuth callbacks included (`code`, `state`); mount it with `wideevent.WithPreEnricher(ginadapter.RedactQuery)`. [Gin](Gin.md#wide-events)
 
 ## Identity and hooks
 

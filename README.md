@@ -33,7 +33,7 @@ One module, one package per provider. A program that imports `password` compiles
 | `apikey` | static hashed API keys with roles and permissions, and a resolver for keys you issue | - |
 | `jwt` | RS512 `Signer` with JWKS endpoint, JWKS `Verifier` with middleware | jwx v3 |
 | `authorization` | `Check` combinators (`All`, `Any`, `Not`, `Real`) and primitives (`IsAdmin`, `HasRole`, `HasPermission`, ...) | - |
-| `ginadapter` | `net/http` middleware and routes on gin, `Require` and `RequireMethodPermission`, wide-event `Observe` | gin, go-wide-event-logger |
+| `ginadapter` | `net/http` middleware and routes on gin, `Require` and `RequireMethodPermission`, wide-event `Observe` and `RedactQuery` | gin, go-wide-event-logger |
 | `prometheusadapter` | `Observer` that counts outcomes on your registry | client_golang |
 | `cmd/forwardauth` | the forward-auth binary, image `ghcr.io/govengers/forwardauth` | - |
 
@@ -382,6 +382,8 @@ api.GET("/profile", func(c *gin.Context) {
 })
 api.DELETE("/users/:id", ginadapter.Require(authorization.IsAdmin()), deleteUser)
 ```
+
+Mount the wide-event middleware as `wideevent.Middleware(wideevent.WithPreEnricher(ginadapter.RedactQuery))`, or the `code` and `state` of every OAuth callback reach your logs.
 
 After `ginadapter.Middleware(...)` calls its next handler, `c.Request` is the enriched request, so later gin handlers and middleware see the identity. If the wrapped middleware refuses, the chain is aborted. It wraps the middleware once, like a `net/http` chain, so state the middleware keeps across requests survives; pass the request on with a context derived from the one it got (`r.WithContext(context.WithValue(r.Context(), ...))`), else the request is answered 500. `ginadapter.Require(nil)` answers every request with 500 (a wiring mistake fails closed). `IdentityResponse` never exposes `Claims`, `Attributes` or `Data`.
 
