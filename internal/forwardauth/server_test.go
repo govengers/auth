@@ -146,6 +146,27 @@ func TestChecksPassASessionAndHandTheIdentityOnAsAVerifiableJWT(t *testing.T) {
 	}
 }
 
+func TestChecksRefuseAnInactiveIdentityWithAndWithoutJWT(t *testing.T) {
+	inactive := testIdentity()
+	inactive.Active = false
+	for name, options := range map[string]harnessOptions{"without JWT": {}, "with JWT": {signer: newTestSigner(t)}} {
+		testHarness := newHarness(t, options)
+		cookie := testHarness.signIn(t, inactive)
+		for _, check := range []string{"/auth/ui", "/auth/api"} {
+			t.Run(name+" "+check, func(t *testing.T) {
+				response := testHarness.serve(t, http.MethodGet, check, nil, cookie)
+
+				require.Equal(t, http.StatusForbidden, response.Code)
+				require.JSONEq(t, `{"code":"forbidden","message":"access denied"}`, response.Body.String())
+				require.Empty(t, response.Header().Get("Authorization"))
+				event := testHarness.events.last(t)
+				require.Equal(t, "failure", event["outcome"])
+				require.Contains(t, event["error"], auth.ReasonInactive)
+			})
+		}
+	}
+}
+
 func TestTheJWTHeaderIsConfigurable(t *testing.T) {
 	testHarness := newHarness(t, harnessOptions{signer: newTestSigner(t), jwtHeader: "X-Identity"})
 	cookie := testHarness.signIn(t, testIdentity())

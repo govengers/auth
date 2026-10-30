@@ -147,8 +147,14 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 		{name: "unknown keycloak grant", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
 			configuration.KeycloakEnabled, configuration.KeycloakGrantType = true, "implicit"
 		}, problems: []string{"KEYCLOAK_GRANT_TYPE \"implicit\""}},
+		{name: "keycloak requirements without keycloak", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
+			configuration.KeycloakRequiredRealmRoles, configuration.KeycloakRequiredGroups = []string{"reader"}, []string{"/engineering"}
+		}, problems: []string{"KEYCLOAK_REQUIRED_REALM_ROLES is set but KEYCLOAK_ENABLED=false", "KEYCLOAK_REQUIRED_GROUPS is set but KEYCLOAK_ENABLED=false"}},
+		{name: "insecure cookie on https", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionInsecureCookie = true }, problems: []string{"SESSION_INSECURE_COOKIE=true with an https EXTERNAL_URL"}},
+		{name: "jwt lifetime beyond a day", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTLifetimeSeconds = 86401 }, problems: []string{"JWT_LIFETIME_SECONDS 86401 must be between 1 and 86400"}},
 		{name: "jwt without key", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTEnabled = true }, problems: []string{"JWT_PRIVATE_KEY"}},
 		{name: "jwt header that is no header name", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "X Auth" }, problems: []string{"JWT_HEADER \"X Auth\" is not an HTTP header name"}},
+		{name: "jwt header of the upstream request", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "cookie" }, problems: []string{"JWT_HEADER \"cookie\" would replace the upstream request's own header"}},
 		{name: "jwt header the check answer sets", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "Cache-Control" }, problems: []string{"JWT_HEADER \"Cache-Control\" is set by the check answer"}},
 		{name: "api keys enabled without keys", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.APIKeysEnabled = true }, problems: []string{"API_KEYS needs at least one name:secret when API_KEYS_ENABLED=true"}},
 		{name: "api key secret too short", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {

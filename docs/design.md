@@ -1182,8 +1182,9 @@ Every failure of steps 1-8 (refusals and 500s) is answered by the ErrorURL redir
 1. wide event, metrics, panic recovery.
 2. apikey middleware (with `API_KEYS_ENABLED`).
 3. Guard RequireUI with `ReturnPathHeader = "X-Forwarded-Uri"`, `LoginURL` = provider `LoginURL()` (absolute, so Traefik passes it to the browser unchanged: a relative Location reaches the browser as `http://forwardauth:8080/...`).
-4. JWT enabled: `Signer.Sign(identity)` (an inactive identity: 403 `forbidden`; other failures: 500); response header `<JWT_HEADER>: Bearer <token>`.
-5. 200 empty body with `Cache-Control: no-store`. Traefik copies `authResponseHeaders` into the upstream request; non-2xx answers (302, 401, 403, Set-Cookie) go to the client.
+4. An inactive identity: 403 `forbidden` (Reason `auth.ReasonInactive`), with or without JWT.
+5. JWT enabled: `Signer.Sign(identity)` (failures: 500); response header `<JWT_HEADER>: Bearer <token>`.
+6. 200 empty body with `Cache-Control: no-store`. Traefik copies `authResponseHeaders` into the upstream request; non-2xx answers (302, 401, 403, Set-Cookie) go to the client.
 
 ### F13 Forward-auth API check (`GET {prefix}/api`)
 As F12 with `RequireAPI` (401 JSON instead of the redirect).
@@ -1289,7 +1290,7 @@ Values without a default are required: `LoadConfig` fails and the process exits 
 | `SESSION_ENCRYPTION_KEY` | string | - | yes | yes | base64 of 32 bytes (`session.ParseKey`) |
 | `SESSION_COOKIE_NAME` | string | `forwardauth_session` | not empty | | sent as `__Host-forwardauth_session` unless a domain or an insecure cookie is configured |
 | `SESSION_COOKIE_DOMAIN` | string | `""` | | | host-only by default |
-| `SESSION_INSECURE_COOKIE` | bool | `false` | | | |
+| `SESSION_INSECURE_COOKIE` | bool | `false` | | | required for a plain `http` EXTERNAL_URL off loopback, refused with an `https` one |
 | `SESSION_SAME_SITE` | string | `lax` | not empty | | `lax` or `none` (none for front-channel logout; not with an insecure cookie). `strict` is refused: every login returns from the provider's site, and the browser withholds a strict cookie, the login state with it, on that redirect |
 | `SESSION_MAXIMUM_AGE_SECONDS` | int | `86400` | | | >= 1 |
 | `SESSION_REFRESH_INTERVAL_SECONDS` | int | `60` | | | >= 1; Guard RefreshInterval (GitHub teams) |
@@ -1315,7 +1316,7 @@ Values without a default are required: `LoadConfig` fails and the process exits 
 | `KEYCLOAK_CLIENT_ID` / `KEYCLOAK_CLIENT_SECRET` | string | `""` | client credentials | secret | |
 | `KEYCLOAK_USERNAME` / `KEYCLOAK_PASSWORD` | string | `""` | password grant | password | |
 | `KEYCLOAK_CLIENT_ROLES_CLIENT_ID` | string | `""` | | | |
-| `KEYCLOAK_REQUIRED_REALM_ROLES`, `KEYCLOAK_REQUIRED_CLIENT_ROLES`, `KEYCLOAK_REQUIRED_GROUPS` | string array | `[]` | | | required client roles need KEYCLOAK_CLIENT_ROLES_CLIENT_ID |
+| `KEYCLOAK_REQUIRED_REALM_ROLES`, `KEYCLOAK_REQUIRED_CLIENT_ROLES`, `KEYCLOAK_REQUIRED_GROUPS` | string array | `[]` | | | required client roles need KEYCLOAK_CLIENT_ROLES_CLIENT_ID; refused without KEYCLOAK_ENABLED=true |
 | `GITHUB_CLIENT_ID` | string | `""` | when github | | |
 | `GITHUB_CLIENT_SECRET` | string | `""` | when github | yes | |
 | `GITHUB_SCOPES` | string array | `read:org` | not empty | | must include `read:org`, `write:org`, `admin:org`, `user` or `repo` (a scope that lists teams; `github.New` refuses otherwise) |
@@ -1326,10 +1327,10 @@ Values without a default are required: `LoadConfig` fails and the process exits 
 | `JWT_PRIVATE_KEY` | string | `""` | when JWT | yes | PEM; no generated fallback (it broke multi-replica and restarts) |
 | `JWT_ISSUER` | string | `""` | | | default EXTERNAL_URL (without a trailing "/") |
 | `JWT_AUDIENCE` | string array | `[]` | | | |
-| `JWT_LIFETIME_SECONDS` | int | `300` | | | >= 1 |
-| `JWT_HEADER` | string | `Authorization` | not empty | | value `Bearer <jwt>`; an HTTP header name (RFC 9110 token), not `Cache-Control`, `Set-Cookie`, `Connection`, `Content-Length` or `Transfer-Encoding` (`forwardauth.ValidateJWTHeader`) |
+| `JWT_LIFETIME_SECONDS` | int | `300` | | | 1..86400 |
+| `JWT_HEADER` | string | `Authorization` | not empty | | value `Bearer <jwt>`; an HTTP header name (RFC 9110 token), not `Cache-Control`, `Set-Cookie`, `Connection`, `Content-Length`, `Transfer-Encoding`, `Cookie` or `Host` (`forwardauth.ValidateJWTHeader`) |
 
-`validateConfiguration` checks: EXTERNAL_URL via `redirect.ExternalURL` and that it is an origin without a path (the routes live at PATH_PREFIX from the root); PATH_PREFIX via `forwardauth.ValidatePathPrefix`; SESSION_ENCRYPTION_KEY parses (`session.ParseKey`); SESSION_SAME_SITE value (`strict` refused with its reason) and `none` with an insecure cookie; a plain http EXTERNAL_URL whose host is not loopback (`redirect.IsSecureURL`; `app.localhost` is not loopback) requires SESSION_INSECURE_COOKIE=true, since browsers drop the Secure cookie there and every login would loop; the ranges and minimums in the table (ports 1..`forwardauth.MaximumPort`, SHUTDOWN_DELAY_SECONDS 0..10); PORT != METRICS_PORT; PROVIDER value and the values it requires; OIDC_CLAIM_MAPPER value; at least one GITHUB_ALLOWED_TEAMS entry; KEYCLOAK_ENABLED requires PROVIDER=oidc, KEYCLOAK_URL, KEYCLOAK_REALM, a valid grant type and its credentials; JWT_PRIVATE_KEY when JWT is enabled; JWT_HEADER via `forwardauth.ValidateJWTHeader`; with API_KEYS_ENABLED at least one API_KEYS entry, every entry has ":" and a name, and the parsed keys pass `apikey.New` (secret length, duplicate names or secrets; no message contains a secret); every API_KEY_PERMISSIONS entry names a key from API_KEYS, appears once, has at least one permission and every permission parses. What only the components can judge (team format, GITHUB_SCOPES, URLs, the PEM key, the Redis ping, the issuer's discovery) fails their constructors right after, still before anything is served.
+`validateConfiguration` checks: EXTERNAL_URL via `redirect.ExternalURL` and that it is an origin without a path (the routes live at PATH_PREFIX from the root); PATH_PREFIX via `forwardauth.ValidatePathPrefix`; SESSION_ENCRYPTION_KEY parses (`session.ParseKey`); SESSION_SAME_SITE value (`strict` refused with its reason) and `none` with an insecure cookie; a plain http EXTERNAL_URL whose host is not loopback (`redirect.IsSecureURL`; `app.localhost` is not loopback) requires SESSION_INSECURE_COOKIE=true, since browsers drop the Secure cookie there and every login would loop, and an https EXTERNAL_URL refuses it (Secure cookies work there); the ranges and minimums in the table (ports 1..`forwardauth.MaximumPort`, SHUTDOWN_DELAY_SECONDS 0..10); PORT != METRICS_PORT; PROVIDER value and the values it requires; OIDC_CLAIM_MAPPER value; at least one GITHUB_ALLOWED_TEAMS entry; KEYCLOAK_ENABLED requires PROVIDER=oidc, KEYCLOAK_URL, KEYCLOAK_REALM, a valid grant type and its credentials, and a KEYCLOAK_REQUIRED_* list without it is refused (nothing would enforce it); JWT_LIFETIME_SECONDS 1..86400; JWT_PRIVATE_KEY when JWT is enabled; JWT_HEADER via `forwardauth.ValidateJWTHeader`; with API_KEYS_ENABLED at least one API_KEYS entry, every entry has ":" and a name, and the parsed keys pass `apikey.New` (secret length, duplicate names or secrets; no message contains a secret); every API_KEY_PERMISSIONS entry names a key from API_KEYS, appears once, has at least one permission and every permission parses. What only the components can judge (team format, GITHUB_SCOPES, URLs, the PEM key, the Redis ping, the issuer's discovery) fails their constructors right after, still before anything is served.
 
 ### 6.3 Routes (`{prefix}` = PATH_PREFIX)
 

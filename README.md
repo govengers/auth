@@ -635,7 +635,7 @@ Values without a default are required. *not empty* marks values with a default t
 | `SESSION_ENCRYPTION_KEY` | - | yes | yes | base64 of 32 bytes: `openssl rand -base64 32` |
 | `SESSION_COOKIE_NAME` | `forwardauth_session` | not empty | | sent as `__Host-forwardauth_session` unless `SESSION_COOKIE_DOMAIN` or `SESSION_INSECURE_COOKIE` is set (a `__Host-` or `__Secure-` name of your own is kept and must fit its prefix) |
 | `SESSION_COOKIE_DOMAIN` | empty | | | empty is a host-only cookie |
-| `SESSION_INSECURE_COOKIE` | `false` | | | drops `Secure`; local HTTP development only; required for an `http` `EXTERNAL_URL` whose host is not loopback (`app.localhost` is not) |
+| `SESSION_INSECURE_COOKIE` | `false` | | | drops `Secure`; local HTTP development only; required for an `http` `EXTERNAL_URL` whose host is not loopback (`app.localhost` is not); refused with an `https` `EXTERNAL_URL` |
 | `SESSION_SAME_SITE` | `lax` | not empty | | `lax` or `none` (`none` for front-channel logout; not with an insecure cookie). `strict` is refused: the browser would withhold the cookie, and the login state with it, on the redirect back from the provider |
 | `SESSION_MAXIMUM_AGE_SECONDS` | `86400` | | | absolute lifetime, at least 1; refreshes never extend it |
 | `SESSION_REFRESH_INTERVAL_SECONDS` | `60` | | | how often the GitHub provider re-checks teams; at least 1 |
@@ -671,7 +671,7 @@ Values without a default are required. *not empty* marks values with a default t
 | `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_CLIENT_SECRET` | empty | client credentials | secret | |
 | `KEYCLOAK_USERNAME`, `KEYCLOAK_PASSWORD` | empty | password grant | password | |
 | `KEYCLOAK_CLIENT_ROLES_CLIENT_ID` | empty | | | client whose roles become client roles |
-| `KEYCLOAK_REQUIRED_REALM_ROLES`, `KEYCLOAK_REQUIRED_CLIENT_ROLES`, `KEYCLOAK_REQUIRED_GROUPS` | empty | | | login is refused (403) when one is missing; groups are paths; required client roles need `KEYCLOAK_CLIENT_ROLES_CLIENT_ID` |
+| `KEYCLOAK_REQUIRED_REALM_ROLES`, `KEYCLOAK_REQUIRED_CLIENT_ROLES`, `KEYCLOAK_REQUIRED_GROUPS` | empty | | | login is refused (403) when one is missing; groups are paths; required client roles need `KEYCLOAK_CLIENT_ROLES_CLIENT_ID`; refused without `KEYCLOAK_ENABLED=true` |
 
 **GitHub (`PROVIDER=github`)**
 
@@ -695,8 +695,8 @@ Values without a default are required. *not empty* marks values with a default t
 | `JWT_PRIVATE_KEY` | empty | when enabled | yes | PEM RSA key, at least 2048 bits; no generated fallback, so every replica signs with the same key |
 | `JWT_ISSUER` | empty | | | what backends configure as `Issuer`; empty means `EXTERNAL_URL` |
 | `JWT_AUDIENCE` | empty | | | |
-| `JWT_LIFETIME_SECONDS` | `300` | | | at least 1 |
-| `JWT_HEADER` | `Authorization` | not empty | | value `Bearer <jwt>`; list the header in `authResponseHeaders`; a header name, not `Cache-Control`, `Set-Cookie`, `Connection`, `Content-Length` or `Transfer-Encoding` |
+| `JWT_LIFETIME_SECONDS` | `300` | | | 1 to 86400 |
+| `JWT_HEADER` | `Authorization` | not empty | | value `Bearer <jwt>`; list the header in `authResponseHeaders`; a header name, not `Cache-Control`, `Set-Cookie`, `Connection`, `Content-Length`, `Transfer-Encoding`, `Cookie` or `Host` |
 
 The token carries `iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`, `provider`, `user_id`, `preferred_username`, `name`, `email`, `picture`, `roles`, `realm_roles`, `client_roles`, `groups`, `teams`, `permissions` (empty ones omitted) and every other claim of the OIDC ID token; ID token claims with these names (and `nonce`, `at_hash`, `c_hash`, `auth_time`, `sid`, `azp`) are never copied, so an IdP `roles` claim cannot become application roles. For GitHub, `sub` is the numeric user ID and the login is `preferred_username`. Verify it in your backend as shown in [Backend JWT verification](#backend-jwt-verification).
 
@@ -706,7 +706,7 @@ The token carries `iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`, `provider`, `
 - Metrics on `METRICS_PORT`: `forwardauth_http_requests_total{route,method,status}`, `forwardauth_http_request_duration_seconds{route,method}`, `forwardauth_http_requests_in_flight`, `forwardauth_auth_outcomes_total{provider,action,result}`, `forwardauth_dependency_request_duration_seconds{dependency,operation,outcome}` (Redis and the provider's HTTP calls), Go, process and build-info collectors.
 - With `SESSION_REDIS_ENABLED` the boot fails when Redis does not answer within 5 s; the Redis client never retries a command.
 - With `API_KEYS_ENABLED=true` the keys in `API_KEYS` are accepted on both check endpoints (not on `{prefix}/me`). Their identity carries the permissions from `API_KEY_PERMISSIONS` and no roles, so `authorization.IsAdmin` refuses them: check permissions in the backend (`HasPermission`, `RequireMethodPermission`). With API keys enabled, a request whose `Authorization: Bearer` value is not a configured key is refused with 401 `invalid_api_key` on both checks, even with a valid session cookie: an SPA that sends its own bearer tokens through the proxy cannot use API keys.
-- With `JWT_ENABLED` an inactive identity is answered 403 (the token would come back active).
+- An inactive identity is answered 403 `forbidden` on both checks, with or without `JWT_ENABLED` (a token would come back active).
 - Failures answer the one JSON shape (a panic is 500 `internal`); check answers carry `Cache-Control: no-store`.
 - Both listeners bound every connection phase (read header 10 s, read 30 s, write 60 s, idle 120 s).
 

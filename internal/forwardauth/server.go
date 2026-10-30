@@ -169,7 +169,8 @@ func ValidatePathPrefix(prefix string) error {
 }
 
 // ValidateJWTHeader reports why name cannot carry the JWT of a check answer: it must be a header name,
-// and not one the check answer or net/http sets itself, which would overwrite or drop the token.
+// and not one the check answer or net/http sets itself, which would overwrite or drop the token, nor
+// Cookie or Host, which Traefik would overwrite in the upstream request.
 func ValidateJWTHeader(name string) error {
 	if !headerNamePattern.MatchString(name) {
 		return fmt.Errorf("%q is not an HTTP header name", name)
@@ -177,6 +178,8 @@ func ValidateJWTHeader(name string) error {
 	switch http.CanonicalHeaderKey(name) {
 	case "Cache-Control", "Set-Cookie", "Connection", "Content-Length", "Transfer-Encoding":
 		return fmt.Errorf("%q is set by the check answer itself", name)
+	case "Cookie", "Host":
+		return fmt.Errorf("%q would replace the upstream request's own header", name)
 	}
 	return nil
 }
@@ -223,17 +226,31 @@ func (s *Server) registerRoutes(engine *gin.Engine) {
 }
 
 // checkChain is the chain of a forward-auth check: API keys (when configured), the Guard variant, the
-// JWT (when enabled), the answer.
+// refusal of an inactive identity, the JWT (when enabled), the answer.
 func (s *Server) checkChain(guard func(http.Handler) http.Handler) []gin.HandlerFunc {
 	var chain []gin.HandlerFunc
 	if s.options.APIKeys != nil {
 		chain = append(chain, ginadapter.Middleware(s.options.APIKeys.Middleware()))
 	}
-	chain = append(chain, ginadapter.Middleware(guard))
+	chain = append(chain, ginadapter.Middleware(guard), requireActive)
 	if s.options.Signer != nil {
 		chain = append(chain, s.issueToken)
 	}
 	return append(chain, forward)
+}
+
+// requireActive refuses an inactive identity with 403, with or without JWT: the Guard and the API keys pass
+// any identity they find, and a check answering 200 lets Traefik forward the request.
+func requireActive(ginContext *gin.Context) {
+	if identity := auth.IdentityFrom(ginContext.Request.Context()); identity != nil && identity.Active {
+		return
+	}
+	err := &auth.Error{Kind: auth.ErrForbidden, Reason: auth.ReasonInactive}
+	if we := wideevent.FromGin(ginContext); we != nil {
+		we.Failure(err)
+	}
+	auth.WriteError(ginContext.Writer, err)
+	ginContext.Abort()
 }
 
 // issueToken puts the identity as a bearer token into the JWT header, which Traefik copies into the

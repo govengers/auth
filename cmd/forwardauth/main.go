@@ -51,6 +51,8 @@ const (
 	claimMapperGoogle  = "google"
 
 	redisStartupTimeout = 5 * time.Second
+
+	maximumJWTLifetimeSeconds = 86400 // a token cannot be revoked; a day bounds a leaked one
 )
 
 // Configuration holds every value forwardauth reads, filled once at startup.
@@ -649,6 +651,9 @@ func validateSession(configuration *Configuration) error {
 	if !configuration.SessionInsecureCookie && !redirect.IsSecureURL(configuration.ExternalURL) {
 		problems = append(problems, errors.New("EXTERNAL_URL is plain http on a host that is not loopback: browsers drop the Secure session cookie; use https or set SESSION_INSECURE_COOKIE=true (development only)"))
 	}
+	if configuration.SessionInsecureCookie && strings.HasPrefix(configuration.ExternalURL, "https://") {
+		problems = append(problems, errors.New("SESSION_INSECURE_COOKIE=true with an https EXTERNAL_URL: Secure cookies work on https; unset SESSION_INSECURE_COOKIE"))
+	}
 	problems = append(problems,
 		minimumProblem("SESSION_MAXIMUM_AGE_SECONDS", configuration.SessionMaximumAgeSeconds, 1),
 		minimumProblem("SESSION_REFRESH_INTERVAL_SECONDS", configuration.SessionRefreshIntervalSeconds, 1),
@@ -718,7 +723,7 @@ func validateGitHub(configuration *Configuration) error {
 
 func validateKeycloak(configuration *Configuration) error {
 	if !configuration.KeycloakEnabled {
-		return nil
+		return keycloakRequirementsWithoutKeycloak(configuration)
 	}
 	var problems []error
 	if configuration.Provider != providerOIDC {
@@ -745,8 +750,27 @@ func validateKeycloak(configuration *Configuration) error {
 	return errors.Join(problems...)
 }
 
+// keycloakRequirementsWithoutKeycloak reports every KEYCLOAK_REQUIRED_* list set while KEYCLOAK_ENABLED is
+// false: nothing would check it, so every login would pass that the operator meant to refuse.
+func keycloakRequirementsWithoutKeycloak(configuration *Configuration) error {
+	var problems []error
+	for _, requirement := range []struct {
+		name   string
+		values []string
+	}{
+		{"KEYCLOAK_REQUIRED_REALM_ROLES", configuration.KeycloakRequiredRealmRoles},
+		{"KEYCLOAK_REQUIRED_CLIENT_ROLES", configuration.KeycloakRequiredClientRoles},
+		{"KEYCLOAK_REQUIRED_GROUPS", configuration.KeycloakRequiredGroups},
+	} {
+		if slices.ContainsFunc(requirement.values, func(value string) bool { return strings.TrimSpace(value) != "" }) {
+			problems = append(problems, fmt.Errorf("%s is set but KEYCLOAK_ENABLED=false: nothing would enforce it", requirement.name))
+		}
+	}
+	return errors.Join(problems...)
+}
+
 func validateJWT(configuration *Configuration) error {
-	problems := []error{minimumProblem("JWT_LIFETIME_SECONDS", configuration.JWTLifetimeSeconds, 1)}
+	problems := []error{rangeProblem("JWT_LIFETIME_SECONDS", configuration.JWTLifetimeSeconds, 1, maximumJWTLifetimeSeconds)}
 	if err := forwardauth.ValidateJWTHeader(configuration.JWTHeader); err != nil {
 		problems = append(problems, fmt.Errorf("JWT_HEADER %w", err))
 	}
