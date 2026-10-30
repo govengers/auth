@@ -132,3 +132,83 @@ func TestCredentialStamp(t *testing.T) {
 	shifted := &User{PasswordHash: "hashtrue"}
 	require.NotEqual(t, stamp, credentialStamp(shifted), "fields are length-prefixed")
 }
+
+// A pending login is bound to the credentials its password step verified: the second factor alone does not
+// complete it once the password or the second factor changed (a password reset to lock an attacker out).
+func TestPendingLoginEndsWhenTheCredentialsChange(t *testing.T) {
+	const otherSecret = "KRSXG5CTMVRXEZLUKRSXG5CTMVRXEZLU"
+	testCases := []struct {
+		name   string
+		change func(t *testing.T, fixture *fixture, user *User)
+		body   func(t *testing.T, fixture *fixture, backupCodes []string) map[string]any
+	}{
+		{name: "password reset, TOTP code", change: resetPassword, body: func(t *testing.T, fixture *fixture, _ []string) map[string]any {
+			return map[string]any{"code": fixture.code(t, testSecret, 0)}
+		}},
+		{name: "password reset, backup code", change: resetPassword, body: func(_ *testing.T, _ *fixture, backupCodes []string) map[string]any {
+			return map[string]any{"code": backupCodes[0], "backupCode": true}
+		}},
+		{name: "second factor replaced", change: func(t *testing.T, fixture *fixture, user *User) {
+			require.NoError(t, fixture.storage.ClearTOTP(t.Context(), user.ID))
+			requireSetTOTP(t, fixture.storage, user.ID, otherSecret, nil)
+		}, body: func(t *testing.T, fixture *fixture, _ []string) map[string]any {
+			return map[string]any{"code": fixture.code(t, otherSecret, 0)}
+		}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newFixture(t, totpOptions())
+			user, backupCodes := fixture.createTOTPUser(t, "ada")
+			browser := fixture.pendingClient(t, "ada")
+			testCase.change(t, fixture, user)
+
+			recorder := browser.post(verifyPath, testCase.body(t, fixture, backupCodes))
+
+			requireRefusal(t, recorder, http.StatusUnauthorized, "no_pending_login")
+			require.False(t, browser.hasSession(), "the pending login ended")
+			if testCase.name == "password reset, backup code" {
+				require.Len(t, fixture.storedUser(t, user.ID).BackupCodeHashes, len(backupCodes), "no backup code spent")
+			}
+			outcome := fixture.outcomes.last(t)
+			require.Equal(t, auth.ActionTOTPVerify, outcome.Action)
+			require.Equal(t, auth.ResultDenied, outcome.Result)
+		})
+	}
+}
+
+func TestPendingEnrollmentEndsWhenThePasswordChanges(t *testing.T) {
+	options := totpOptions()
+	options.TOTP.Required = true
+	fixture := newFixture(t, options)
+	user := fixture.createUser(t, "ada", "")
+	browser := fixture.newClient(t)
+	require.Equal(t, http.StatusAccepted, browser.login("ada").Code)
+	resetPassword(t, fixture, user)
+
+	requireRefusal(t, browser.post(setupPath, map[string]any{}), http.StatusUnauthorized, "no_pending_login")
+	require.False(t, fixture.storedUser(t, user.ID).TOTPEnabled)
+}
+
+// The hash upgrade of the password step itself is part of the stamp the pending login holds.
+func TestPendingLoginSurvivesItsOwnHashUpgrade(t *testing.T) {
+	options := totpOptions()
+	options.LegacyVerifier = VerifyBcrypt
+	fixture := newFixture(t, options)
+	user := fixture.createLegacyUser(t, bcryptHash(t, testPassword))
+	requireSetTOTP(t, fixture.storage, user.ID, testSecret, nil)
+	browser := fixture.pendingClient(t, "ada")
+	require.NotEqual(t, user.PasswordHash, fixture.storedUser(t, user.ID).PasswordHash, "the login upgraded the hash")
+
+	recorder := browser.post(verifyPath, map[string]any{"code": fixture.code(t, testSecret, 0)})
+
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+}
+
+// resetPassword replaces the user's password, as an application's reset would.
+func resetPassword(t *testing.T, fixture *fixture, user *User) {
+	t.Helper()
+	hash, err := Hash("a completely new passphrase", testParameters)
+	require.NoError(t, err)
+	stored := fixture.storedUser(t, user.ID)
+	require.NoError(t, fixture.storage.UpdatePasswordHash(t.Context(), user.ID, stored.PasswordHash, hash))
+}

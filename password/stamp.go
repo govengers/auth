@@ -44,6 +44,19 @@ func (p *Provider) stampSession(ctx context.Context, current session.Session, us
 	return nil
 }
 
+// credentialsChangedReason is the Reason of refusing a pending login whose user's credentials changed.
+const credentialsChangedReason = "password or second factor changed since the password step"
+
+// checkPendingStamp refuses a pending login whose user changed the password or second factor since the password
+// step (code no_pending_login), so the second factor alone never completes a login with replaced credentials.
+// A pending login without a stamp (stored before stamps existed) is refused as well.
+func checkPendingStamp(pending pendingLogin, user *User) error {
+	if subtle.ConstantTimeCompare(pending.CredentialStamp, credentialStamp(user)) != 1 {
+		return noPendingLogin(credentialsChangedReason, nil)
+	}
+	return nil
+}
+
 // checkStamp refuses a session whose credential stamp is not the one of user's current credentials: they
 // changed since, or the session has none (opened before stamps existed, or not by the provider).
 func checkStamp(ctx context.Context, current session.Session, user *User) error {

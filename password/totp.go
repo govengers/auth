@@ -45,11 +45,14 @@ const (
 	purposeEnrollment pendingPurpose = "enrollment"
 )
 
-// pendingLogin is the session value between the password step and the second factor.
+// pendingLogin is the session value between the password step and the second factor. CredentialStamp is the
+// user's credential stamp the password step verified: a password or second-factor change before the second
+// step ends the pending login.
 type pendingLogin struct {
-	UserID    uuid.UUID      `json:"userId"`
-	Purpose   pendingPurpose `json:"purpose"`
-	ExpiresAt time.Time      `json:"expiresAt"`
+	UserID          uuid.UUID      `json:"userId"`
+	Purpose         pendingPurpose `json:"purpose"`
+	ExpiresAt       time.Time      `json:"expiresAt"`
+	CredentialStamp []byte         `json:"credentialStamp"`
 }
 
 type totpSetup struct {
@@ -81,7 +84,7 @@ func (p *Provider) startChallenge(writer http.ResponseWriter, request *http.Requ
 	if challenge == ChallengeTOTPSetup {
 		purpose = purposeEnrollment
 	}
-	pending := pendingLogin{UserID: user.ID, Purpose: purpose, ExpiresAt: p.now().Add(p.options.TOTP.PendingTTL)}
+	pending := pendingLogin{UserID: user.ID, Purpose: purpose, ExpiresAt: p.now().Add(p.options.TOTP.PendingTTL), CredentialStamp: credentialStamp(user)}
 	if err := p.startPendingSession(writer, request, pending); err != nil {
 		return refused(err)
 	}
@@ -331,6 +334,9 @@ func (p *Provider) enrollmentAccount(ctx context.Context, request *http.Request)
 	}
 	user, err := p.knownUser(ctx, pending.UserID, "enrolling user deleted")
 	if err != nil {
+		return totpAccount{}, err
+	}
+	if err := checkPendingStamp(pending, user); err != nil {
 		return totpAccount{}, err
 	}
 	return totpAccount{session: current, user: user}, nil
