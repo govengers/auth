@@ -685,3 +685,100 @@ func TestGuardRefreshRacingTheAbsoluteExpiry(t *testing.T) {
 	_, err = current.Identity(t.Context())
 	require.ErrorIs(t, err, auth.ErrUnauthenticated)
 }
+
+// cancellingRefresher cancels the request it refreshes for, as a client hanging up mid-refresh does, then
+// answers like a Refresher whose calls honour its context.
+type cancellingRefresher struct {
+	cancelRequest context.CancelFunc
+	answer        func(identity *auth.Identity) (*auth.Identity, error)
+}
+
+func (*cancellingRefresher) Name() string {
+	return "password"
+}
+
+func (r *cancellingRefresher) Refresh(ctx context.Context, _ Session, identity *auth.Identity) (*auth.Identity, error) {
+	r.cancelRequest()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return r.answer(identity)
+}
+
+// contextBackend fails every call on an ended context, as the Redis backend does.
+type contextBackend struct {
+	Backend
+}
+
+func (b contextBackend) Get(ctx context.Context, sessionID, key string) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return b.Backend.Get(ctx, sessionID, key)
+}
+
+func (b contextBackend) CompareAndSwap(ctx context.Context, sessionID, key string, previous, value []byte) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return b.Backend.CompareAndSwap(ctx, sessionID, key, previous, value)
+}
+
+func (b contextBackend) Revoke(ctx context.Context, sessionID string, ttl time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return b.Backend.Revoke(ctx, sessionID, ttl)
+}
+
+func TestGuardFinishesARefreshItsClientCancelled(t *testing.T) {
+	renamed := testIdentity()
+	renamed.Username = "ada-renamed"
+	testCases := []struct {
+		name         string
+		answer       func(identity *auth.Identity) (*auth.Identity, error)
+		wantStatus   int
+		wantIdentity *auth.Identity // stored afterwards; nil: the session ended
+	}{
+		{
+			name: "a refusal ends the session",
+			answer: func(*auth.Identity) (*auth.Identity, error) {
+				return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "user deleted"}
+			},
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name: "a refreshed identity is saved",
+			answer: func(identity *auth.Identity) (*auth.Identity, error) {
+				refreshed := identity.Clone()
+				refreshed.Username = "ada-renamed"
+				return refreshed, nil
+			},
+			wantStatus: http.StatusNoContent, wantIdentity: renamed,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			refresher := &cancellingRefresher{answer: testCase.answer}
+			fixture := newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
+			fixture.store.options.Backend = contextBackend{Backend: fixture.store.options.Backend}
+			request := login(t, fixture.store, testIdentity())
+			ctx, cancel := context.WithCancel(t.Context())
+			refresher.cancelRequest = cancel
+			fixture.clock.advance(2 * time.Minute)
+
+			result := serveGuarded(fixture.guard.RequireAPI(), request.WithContext(ctx))
+
+			require.Equal(t, testCase.wantStatus, result.recorder.Code)
+			current, err := fixture.store.Open(request)
+			require.NoError(t, err)
+			stored, err := current.Identity(t.Context())
+			if testCase.wantIdentity == nil {
+				require.ErrorIs(t, err, auth.ErrUnauthenticated, "the session ended")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, testCase.wantIdentity, stored)
+		})
+	}
+}

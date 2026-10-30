@@ -15,13 +15,17 @@ import (
 
 const (
 	defaultRefreshInterval = time.Minute
+	// refreshTimeout bounds a refresh, which runs without the request's cancellation (as ending a session
+	// does): a GitHub refresh may page through the teams.
+	refreshTimeout = 30 * time.Second
 )
 
 // Refresher re-validates identities of one provider. The Guard calls it for identities whose last
 // refresh is older than RefreshInterval, always with the real identity (identity.Real()).
 // Return a copy with provider-owned fields updated; keep every other field (roles set by OnLogin etc.).
 // ErrUnauthenticated or ErrForbidden end the session; any other error keeps the identity (degraded).
-// Implementations must be safe for concurrent use.
+// Refresh runs without the request's cancellation, bounded by 30 s. Implementations must be safe for
+// concurrent use.
 type Refresher interface {
 	Name() string // the Identity.Provider it refreshes
 	Refresh(ctx context.Context, current Session, identity *auth.Identity) (*auth.Identity, error)
@@ -169,7 +173,9 @@ func (g *Guard) refreshDue(stored identityEnvelope) bool {
 // stays usable); any other
 // failure keeps the identity and is reported as a degraded success (Result success with Err set): the
 // request is still answered. The save swaps against the claim: when another request saved the session
-// meanwhile, that save wins and the request continues with it.
+// meanwhile, that save wins and the request continues with it. The Refresher and everything after it run
+// without the request's cancellation: a client aborting each due refresh would otherwise keep a refused
+// identity alive with the claim taken.
 func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, current Session, stored identityEnvelope) (*auth.Identity, error) {
 	ctx := request.Context()
 	realIdentity := stored.Identity.Real()
@@ -184,11 +190,13 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 	if !swapped {
 		return stored.Identity, nil
 	}
-	refreshed, err := g.refreshers[realIdentity.Provider].Refresh(ctx, current, realIdentity.Clone())
+	refreshContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
+	defer cancel()
+	refreshed, err := g.refreshers[realIdentity.Provider].Refresh(refreshContext, current, realIdentity.Clone())
 	switch {
 	case errors.Is(err, auth.ErrUnauthenticated) || errors.Is(err, auth.ErrForbidden):
 		outcome.Err = err
-		if endError := g.endRefusedSession(writer, request, current, claimed, readAt); endError != nil {
+		if endError := g.endRefusedSession(writer, request.WithContext(refreshContext), current, claimed, readAt); endError != nil {
 			// The session stays usable: a 500, not the refusal (kept as text only, so it cannot decide the answer).
 			outcome.Err = fmt.Errorf("end session refused by its refresh (%s): %w", err.Error(), endError)
 		}
@@ -201,9 +209,9 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 		claimed.Identity = impersonation.WithReal(claimed.Identity, refreshed)
 	}
 	claimed.RefreshedAt = g.now()
-	saved, swapped, err := current.swapEnvelope(ctx, claimed)
+	saved, swapped, err := current.swapEnvelope(refreshContext, claimed)
 	if err == nil && !swapped {
-		saved, err = current.envelope(ctx)
+		saved, err = current.envelope(refreshContext)
 	}
 	if err != nil {
 		outcome.Err = errors.Join(outcome.Err, err)

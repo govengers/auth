@@ -461,6 +461,7 @@ Guard:
 // refresh is older than RefreshInterval, always with the real identity (identity.Real()).
 // Return a copy with provider-owned fields updated; keep every other field (roles set by OnLogin etc.).
 // ErrUnauthenticated or ErrForbidden end the session; any other error keeps the identity (degraded).
+// Refresh runs without the request's cancellation, bounded by 30 s.
 type Refresher interface {
 	Name() string // the Identity.Provider it refreshes
 	Refresh(ctx context.Context, current Session, identity *auth.Identity) (*auth.Identity, error)
@@ -1164,7 +1165,7 @@ Every failure of steps 1-8 (refusals and 500s) is answered by the ErrorURL redir
 ### F11 Guard (session authentication, both variants)
 1. Identity already in context (apikey ran): next, nothing reported.
 2. `Store.Open`, `Session.Identity`; missing, expired or revoked: refuse ErrUnauthenticated (Outcome Provider "session"): RequireAPI 401 JSON; RequireUI 302 `redirect.LoginLocation(LoginURL, SafeReturnPath(ReturnPathHeader value, or RequestURI without one))`. A backend failure: 500 `internal` JSON in both variants, outcome error.
-3. Real identity refreshed longer than RefreshInterval ago and a Refresher named `real.Provider` exists: claim the refresh by swapping (`Backend.CompareAndSwap`) the envelope read in step 2 for one with refreshedAt moved to now, then call the Refresher with a clone of the real identity. One call per interval per session: requests reading the session meanwhile find it fresh, and a request losing the claim (another one claimed or saved first) continues with the identity it read, without a call. A claim that fails (backend) is a 500.
+3. Real identity refreshed longer than RefreshInterval ago and a Refresher named `real.Provider` exists: claim the refresh by swapping (`Backend.CompareAndSwap`) the envelope read in step 2 for one with refreshedAt moved to now, then call the Refresher with a clone of the real identity. The Refresher and every save after it run on `context.WithTimeout(context.WithoutCancel(ctx), 30 s)`: a client aborting each due refresh would otherwise turn a refusal into a degraded result and keep the claim, so a revoked identity would live until MaximumAge. One call per interval per session: requests reading the session meanwhile find it fresh, and a request losing the claim (another one claimed or saved first) continues with the identity it read, without a call. A claim that fails (backend) is a 500.
    - ok: identity (or its Impersonator, when impersonating) replaced via `impersonation.WithReal`, saved; outcome success, Action refresh.
    - ErrUnauthenticated/ErrForbidden: `Store.End`; refuse (401 per variant, 403 JSON in both); only the refresh outcome is reported. When `Store.End` fails, the session stays usable: 500 `internal` in both variants, outcome error (the refusal kept as text only, so it cannot decide the answer), and the refresh claim is released (best effort: the claimed envelope is swapped back to the refreshedAt read in step 2), so the next request refreshes again and fails closed instead of passing for RefreshInterval.
    - other error, or a nil identity without error: keep the identity, save it unchanged (moves refreshedAt, so a GitHub outage costs one call per interval), outcome success with `Err` set (degraded) and Action refresh, continue.
