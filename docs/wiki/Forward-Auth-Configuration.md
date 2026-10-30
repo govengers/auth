@@ -131,12 +131,12 @@ Set `GOMEMLIMIT` 5-10 % below the container memory limit in your manifests (limi
 | `GET {prefix}/ui` | forward-auth check for browsers: 302 to the login when unauthenticated |
 | `GET {prefix}/api` | forward-auth check for APIs: 401 JSON when unauthenticated |
 | `GET {prefix}/jwks` | public keys of the JWT signer (`JWT_ENABLED`), `Cache-Control: public, max-age=300` |
-| `GET {prefix}/me` | the caller's identity as JSON (`IDENTITY_ENDPOINT_ENABLED`; sessions only, not API keys) |
+| `GET {prefix}/me` | the caller's identity as JSON (`IDENTITY_ENDPOINT_ENABLED`; sessions only, not API keys); an inactive identity gets 403 like on the checks |
 | `GET {prefix}/health` | liveness, 200 `{"status":"ok"}` |
 | `GET {prefix}/ready` | readiness: 200 `{"status":"ok"}`, or 503 `{"code":"unavailable","message":"not ready"}` during shutdown or when the Redis ping (2 s) fails; a failed ping is kept as a wide event, successful probes are sampled |
 | `GET {prefix}/oidc/<OIDC_NAME>/{login,callback,logout,frontchannel-logout}` | OIDC provider |
 | `GET {prefix}/github/{login,callback,logout}`, `POST {prefix}/github/refresh-teams` | GitHub provider |
-| any other path | 404 `{"code":"not_found","message":"not found"}`, also a known route with a trailing `/` (no redirect) |
+| any other path | 404 `{"code":"not_found","message":"not found"}`, also a known route with a trailing `/` (no redirect) or with a percent-encoded character (`{prefix}/%75i`): routes match the path as sent, not the decoded one |
 | `GET /metrics` on `METRICS_PORT` | Prometheus, the only route of that listener; keep this port off Traefik |
 
 Route `{prefix}` to the service with its own Traefik router, minus the checks and probes, as in the labels above: the check endpoints do not dispatch login routes by `X-Forwarded-Uri`. Link users to `{prefix}/oidc/<name>/logout` or `{prefix}/github/logout` to log out; both are plain `GET` links, same-site only: a link from another site (`Sec-Fetch-Site: cross-site`, e.g. a portal on another domain) is refused with 403.
@@ -232,7 +232,7 @@ Values without a default are required. *not empty* marks values with a default t
 | `JWT_LIFETIME_SECONDS` | `300` | | | 1 to 86400 |
 | `JWT_HEADER` | `Authorization` | not empty | | value `Bearer <jwt>`; list the header in `authResponseHeaders`; a header name, not `Cache-Control`, `Set-Cookie`, `Connection`, `Content-Length`, `Transfer-Encoding`, `Cookie` or `Host` |
 
-The token carries `iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`, `provider`, `user_id`, `preferred_username`, `name`, `email`, `picture`, `roles`, `realm_roles`, `client_roles`, `groups`, `teams`, `permissions` (empty ones omitted) and every other claim of the OIDC ID token; ID token claims with these names (and `nonce`, `at_hash`, `c_hash`, `auth_time`, `sid`, `azp`) are never copied, in any letter case, so an IdP `roles` or `Roles` claim cannot become application roles. For GitHub, `sub` is the numeric user ID and the login is `preferred_username`. Verify it in your backend as shown in [JWT](JWT.md).
+The token carries `iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`, `provider`, `user_id`, `preferred_username`, `name`, `email`, `picture`, `roles`, `realm_roles`, `client_roles`, `groups`, `teams`, `permissions` (empty ones omitted) and every other claim of the OIDC ID token; ID token claims with these names (and `nonce`, `at_hash`, `c_hash`, `auth_time`, `sid`, `azp`, and Keycloak's raw `realm_access` and `resource_access`, which the token carries as `realm_roles` and `client_roles`) are never copied, in any letter case, so an IdP `roles` or `Roles` claim cannot become application roles. For GitHub, `sub` is the numeric user ID and the login is `preferred_username`. Verify it in your backend as shown in [JWT](JWT.md).
 
 ## Operations
 

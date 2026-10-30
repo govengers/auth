@@ -47,6 +47,8 @@ Prefix `PathPrefix`, default `/auth/github`.
 
 `Provider` `github`, `Subject` the numeric GitHub user ID, `Username` the login, `Teams` only the teams named in `AllowedTeams`, `AdminTeams` or `RelevantTeams` (`org/team-slug`, lower-case, sorted), `Roles` `[admin]` for admin team members.
 
+Every refresh (the Guard's every minute, `POST /refresh-teams`) re-derives `auth.RoleAdmin` from `AdminTeams`: it adds the role for an admin team member and removes it otherwise, whatever `OnLogin` did. An `OnLogin` that strips `admin` is undone within a minute; gate your application on a role of its own that `OnLogin` grants (`HasRole("app-admin")`), not on removing `admin`.
+
 ## Options that matter
 
 | Option | Default | Note |

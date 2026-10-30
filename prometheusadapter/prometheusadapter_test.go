@@ -70,6 +70,18 @@ func TestObserveCountsPerProviderActionAndResult(t *testing.T) {
 	}, values)
 }
 
+func TestObserveDropsAnOutcomeWithAnInvalidLabelValueInsteadOfPanicking(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	counter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: registry, Namespace: "forwardauth"})
+	require.NoError(t, err)
+
+	require.NotPanics(t, func() {
+		counter.Observe(t.Context(), auth.Outcome{Provider: "\xff", Action: auth.ActionLogin, Result: auth.ResultSuccess})
+	})
+
+	require.Zero(t, testutil.CollectAndCount(registry))
+}
+
 func TestTheCounterPassesTheMetricLinter(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	counter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: registry, Namespace: "forwardauth"})

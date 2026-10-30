@@ -47,7 +47,13 @@ func New(options *Options) (*OutcomeCounter, error) {
 	return &OutcomeCounter{outcomes: outcomes}, nil
 }
 
-// Observe has the auth.Observer shape: it counts outcome under its provider, action and result.
+// Observe has the auth.Observer shape: it counts outcome under its provider, action and result. An
+// outcome with a label value Prometheus refuses (invalid UTF-8) is not counted: an Observer runs inside
+// the request and must not panic.
 func (c *OutcomeCounter) Observe(_ context.Context, outcome auth.Outcome) {
-	c.outcomes.WithLabelValues(outcome.Provider, string(outcome.Action), string(outcome.Result)).Inc()
+	counter, err := c.outcomes.GetMetricWithLabelValues(outcome.Provider, string(outcome.Action), string(outcome.Result))
+	if err != nil {
+		return
+	}
+	counter.Inc()
 }

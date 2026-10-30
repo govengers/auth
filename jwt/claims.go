@@ -46,10 +46,11 @@ var stringListClaims = []stringListClaim{
 }
 
 // uncopiedClaims are the keys of Identity.Claims that Sign never copies: registered and session-bound
-// claims of the original ID token. The identity's own claims are skipped by ownedClaim as well, so a
-// claim the identity left empty cannot come back from Claims (an IdP "roles" claim must not become
-// application roles).
-var uncopiedClaims = []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "nonce", "at_hash", "c_hash", "auth_time", "sid", "azp"}
+// claims of the original ID token, and Keycloak's raw role claims, which the identity carries enriched
+// as realm_roles and client_roles (a stale copy must not sit next to them). The identity's own claims
+// are skipped by ownedClaim as well, so a claim the identity left empty cannot come back from Claims
+// (an IdP "roles" claim must not become application roles).
+var uncopiedClaims = []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "nonce", "at_hash", "c_hash", "auth_time", "sid", "azp", "realm_access", "resource_access"}
 
 // identityClaims returns the claims Sign writes for identity, without the registered ones the Signer
 // adds (iss, aud, iat, nbf, exp, jti). An invalid permission is an error.

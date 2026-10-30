@@ -551,6 +551,45 @@ func TestLogoutIgnoresAClientDisconnect(t *testing.T) {
 	require.Equal(t, "42", outcome.Identity.Subject)
 }
 
+func TestLogoutReleasesAHungBackendOrHookAfterTheTimeout(t *testing.T) {
+	previousTimeout := logoutTimeout
+	logoutTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { logoutTimeout = previousTimeout })
+	testCases := []struct {
+		name       string
+		hangGet    bool
+		hangLogout bool
+	}{
+		{name: "session read", hangGet: true},
+		{name: "OnLogout", hangLogout: true},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			environment := newTestEnvironment(t, defaultTestTeams(), func(options *Options) {
+				if testCase.hangLogout {
+					options.OnLogout = func(ctx context.Context, _ *auth.Identity) { <-ctx.Done() }
+				}
+			})
+			login := environment.login(t)
+			environment.backend.hangGet.Store(testCase.hangGet)
+			request := withSessionCookie(t, newRequest(t, http.MethodGet, testExternalURL+"/auth/github/logout"), login)
+			answered := make(chan *httptest.ResponseRecorder, 1)
+
+			go func() { answered <- environment.serve(request) }()
+
+			select {
+			case response := <-answered:
+				require.Equal(t, http.StatusFound, response.Code)
+			case <-time.After(5 * time.Second):
+				t.Fatal("logout did not answer within 5s")
+			}
+			environment.backend.hangGet.Store(false)
+			_, err := environment.sessionOf(t, login).Identity(t.Context())
+			require.ErrorIs(t, err, auth.ErrUnauthenticated, "the session ended all the same")
+		})
+	}
+}
+
 func TestLogoutWithAnUnreadableSessionIsADegradedSuccess(t *testing.T) {
 	environment := newTestEnvironment(t, defaultTestTeams(), nil)
 	login := environment.login(t)

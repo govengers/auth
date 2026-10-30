@@ -11,13 +11,14 @@ import (
 )
 
 func TestIdentityClaimsCopiesOnlyForeignClaims(t *testing.T) {
-	foreignClaims := map[string]any{"locale": "de", "realm_access": map[string]any{"roles": []any{"x"}}}
+	foreignClaims := map[string]any{"locale": "de", "address": map[string]any{"country": "DE"}}
 	ownedClaims := map[string]any{
 		"iss": "i", "sub": "s", "aud": "a", "exp": 1, "nbf": 1, "iat": 1, "jti": "j", "nonce": "n", "at_hash": "h",
 		"c_hash": "h", "auth_time": 1, "sid": "s", "azp": "a", "provider": "p", "user_id": "u", "preferred_username": "u",
 		"name": "n", "email": "e", "picture": "p", "roles": []any{auth.RoleAdmin}, "realm_roles": []any{"r"},
 		"client_roles": []any{"c"}, "groups": []any{"g"}, "teams": []any{"t"}, "permissions": []any{"*:write"},
 		"Roles": []any{auth.RoleAdmin}, "PERMISSIONS": []any{"*:write"}, "Sub": "s", "User_ID": "u",
+		"realm_access": map[string]any{"roles": []any{"x"}}, "Resource_Access": map[string]any{"app": map[string]any{"roles": []any{"y"}}},
 	}
 	allClaims := maps.Clone(ownedClaims)
 	maps.Copy(allClaims, foreignClaims)

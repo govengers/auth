@@ -369,6 +369,21 @@ func TestGoogleStyleLoginWithAnOpaqueAccessToken(t *testing.T) {
 	require.Empty(t, identity.OIDCRoles, "an opaque access token carries no roles")
 }
 
+func TestAccessTokenOfAnotherSubjectAddsNoRoles(t *testing.T) {
+	issuer := startIssuer(t, func(options *fakeprovider.OIDCOptions) { options.AccessTokenSubject = "user-2" })
+	application := newApplication(t, issuer, nil)
+	person := newBrowser(t)
+
+	require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
+
+	var identity auth.IdentityResponse
+	require.NoError(t, json.Unmarshal(person.get(application.handler, "/me", nil).Body.Bytes(), &identity))
+	require.Equal(t, "user-1", identity.Subject)
+	require.Empty(t, identity.OIDCRoles, "realm roles of another subject's access token")
+	require.Empty(t, identity.OIDCClientRoles, "client roles of another subject's access token")
+	require.Empty(t, identity.Groups, "groups of another subject's access token")
+}
+
 func TestTwoProvidersShareOneStore(t *testing.T) {
 	store := newStore(t)
 	first := newApplicationOn(t, store, startIssuer(t, nil), nil)

@@ -18,6 +18,7 @@ The rules agents and humans get wrong most often, one line each with the page th
 - `UserID` is `uuid.Nil` for OIDC, GitHub and API keys until your `OnLogin` (or `Resolver`) sets it; `HasUserID` never matches `uuid.Nil`. [Authorization](Authorization.md#identity-fields-and-who-fills-them)
 - Inactive identities (`Active: false`) pass only `IsAuthenticated`; a `Resolver` must set `Active: true`. [API-Keys](API-Keys.md#behaviour)
 - Roles from `OnLogin` and OIDC roles are fixed for the session's lifetime; only the password (user deleted) and GitHub (teams) refreshers change a running session. [Sessions](Sessions.md#refresh)
+- The GitHub refresher re-derives `auth.RoleAdmin` from `AdminTeams` on every refresh, so an `OnLogin` that strips `admin` is undone; gate on a role of your own instead. [GitHub](GitHub.md#identity)
 - Browser sessions carry no `Permissions` unless a hook grants them; `HasPermission` alone locks interactive users out. [Authorization](Authorization.md#permissions)
 
 ## Redirects and cookies

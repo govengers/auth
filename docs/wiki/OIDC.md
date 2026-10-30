@@ -64,7 +64,7 @@ Prefix `PathPrefix`, default `/auth/oidc/<Name>`. All `GET`.
 | `ErrorURL` | none (JSON answers) | every callback failure redirects to `ErrorURL?code=<code>` (`code=internal` for a server-side failure); same URL rules as `PostLogoutURL` |
 | `OnLogin`, `OnLogout` | none | `OnLogin` is where you provision your application user and set `UserID` |
 
-Without Keycloak, `OIDCRoles` (`realm_access.roles`), `OIDCClientRoles` (`resource_access.<client>.roles`) and `Groups` (`groups`) come from the access token, per claim from the ID token when the access token lacks it.
+Without Keycloak, `OIDCRoles` (`realm_access.roles`), `OIDCClientRoles` (`resource_access.<client>.roles`) and `Groups` (`groups`) come from the access token, per claim from the ID token when the access token lacks it. Only a JWT access token signed by the issuer whose `sub` equals the verified ID token's `sub` counts; an opaque token, one that does not verify or one issued to another subject is ignored, and the claims come from the ID token alone.
 
 ## Keycloak enrichment
 
