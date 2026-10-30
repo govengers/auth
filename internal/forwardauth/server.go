@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"regexp"
 	"runtime/debug"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -72,6 +74,7 @@ type ServerOptions struct {
 	MetricsRegistry   *prometheus.Registry            // required; runtime collectors registered by main [MET-002]
 	ReadinessCheck    func(ctx context.Context) error // optional (Redis ping)
 	ShutdownDelay     time.Duration                   // 0..MaximumShutdownDelay; readiness answers 503 this long before the listeners drain
+	TrustedProxies    []string                        // optional; see ValidateTrustedProxies; empty trusts no proxy
 }
 
 // Server serves the forward-auth routes and the metrics endpoint. Build it with NewServer and call Run once.
@@ -97,7 +100,9 @@ func NewServer(options *ServerOptions) (*Server, error) {
 	}
 	server := &Server{options: resolved, delay: time.Sleep}
 	server.ready.Store(true)
-	server.engine = server.newEngine(metrics)
+	if server.engine, err = server.newEngine(metrics); err != nil {
+		return nil, err
+	}
 	errorLog := slog.NewLogLogger(resolved.Logger.Handler(), slog.LevelError)
 	server.httpServer = newHTTPServer(resolved.Port, server.engine, errorLog)
 	server.metricsServer = newMetricsServer(resolved.MetricsPort, resolved.MetricsRegistry, errorLog)
@@ -134,6 +139,7 @@ func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
 	}
 	resolved := *options
 	resolved.Routes = slices.Clone(options.Routes)
+	resolved.TrustedProxies = slices.Clone(options.TrustedProxies)
 	if resolved.JWTHeader == "" {
 		resolved.JWTHeader = defaultJWTHeader
 	}
@@ -143,6 +149,9 @@ func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
 	}
 	if err := ValidateJWTHeader(resolved.JWTHeader); err != nil {
 		problems = append(problems, fmt.Errorf("JWTHeader %w", err))
+	}
+	if err := ValidateTrustedProxies(resolved.TrustedProxies); err != nil {
+		problems = append(problems, fmt.Errorf("TrustedProxies: %w", err))
 	}
 	if !validPort(resolved.Port) || !validPort(resolved.MetricsPort) {
 		problems = append(problems, fmt.Errorf("ports %d and %d must be between 0 and %d", resolved.Port, resolved.MetricsPort, MaximumPort))
@@ -184,6 +193,27 @@ func ValidateJWTHeader(name string) error {
 	return nil
 }
 
+// ValidateTrustedProxies reports every entry that is neither an IP address nor a CIDR. Only a request
+// whose peer is one of them may name the client in X-Forwarded-For or X-Real-IP; for every other
+// request, request.client_ip is the peer address, so a client cannot forge it.
+func ValidateTrustedProxies(entries []string) error {
+	var problems []error
+	for _, entry := range entries {
+		if !isAddressOrNetwork(entry) {
+			problems = append(problems, fmt.Errorf("%q is neither an IP address nor a CIDR", entry))
+		}
+	}
+	return errors.Join(problems...)
+}
+
+func isAddressOrNetwork(entry string) bool {
+	if strings.Contains(entry, "/") {
+		_, _, err := net.ParseCIDR(entry)
+		return err == nil
+	}
+	return net.ParseIP(entry) != nil
+}
+
 func validPort(port int) bool {
 	return port >= 0 && port <= MaximumPort
 }
@@ -193,11 +223,15 @@ func validPort(port int) bool {
 // "/" is an unmatched route: gin's redirect would answer before the middleware, without event or
 // metric, and print the raw query in debug mode [LOG-009]. Routes match the path as sent (UseRawPath),
 // so a percent-encoded variant such as /auth/%75i is unmatched: a proxy matching the encoded path must
-// not reach a check or the probe it did not route there.
-func (s *Server) newEngine(metrics *httpMetrics) *gin.Engine {
+// not reach a check or the probe it did not route there. The client IP comes from the forwarding headers
+// only behind TrustedProxies; gin.New trusts every peer.
+func (s *Server) newEngine(metrics *httpMetrics) (*gin.Engine, error) {
 	engine := gin.New()
 	engine.RedirectTrailingSlash = false
 	engine.UseRawPath = true
+	if err := engine.SetTrustedProxies(s.options.TrustedProxies); err != nil {
+		return nil, fmt.Errorf("forwardauth server: trusted proxies: %w", err)
+	}
 	engine.Use(
 		wideevent.Middleware(
 			wideevent.WithEmitter(latestValues(s.options.Emitter)),
@@ -211,7 +245,7 @@ func (s *Server) newEngine(metrics *httpMetrics) *gin.Engine {
 	)
 	engine.NoRoute(routeNotFound)
 	s.registerRoutes(engine)
-	return engine
+	return engine, nil
 }
 
 func (s *Server) registerRoutes(engine *gin.Engine) {

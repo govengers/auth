@@ -29,7 +29,6 @@ import (
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/apikey"
 	"github.com/govengers/auth/github"
-	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/internal/forwardauth"
 	"github.com/govengers/auth/internal/redirect"
 	"github.com/govengers/auth/jwt"
@@ -37,7 +36,6 @@ import (
 	"github.com/govengers/auth/oidc/keycloak"
 	"github.com/govengers/auth/prometheusadapter"
 	"github.com/govengers/auth/session"
-	"github.com/govengers/auth/session/redisbackend"
 )
 
 // version is set at build time with -ldflags "-X main.version=<version>".
@@ -49,8 +47,6 @@ const (
 
 	claimMapperDefault = "default"
 	claimMapperGoogle  = "google"
-
-	redisStartupTimeout = 5 * time.Second
 
 	maximumJWTLifetimeSeconds = 86400 // a token cannot be revoked; a day bounds a leaked one
 )
@@ -69,6 +65,7 @@ type Configuration struct {
 	APIKeysEnabled          bool
 	APIKeys                 []string
 	APIKeyPermissions       []string
+	TrustedProxies          []string
 
 	SessionEncryptionKey               string
 	SessionCookieName                  string
@@ -80,9 +77,19 @@ type Configuration struct {
 	SessionMaximumUnverifiedAgeSeconds int
 	SessionRedisEnabled                bool
 	SessionRedisAddress                string
+	SessionRedisUsername               string
 	SessionRedisPassword               string
 	SessionRedisDatabase               int
 	SessionRedisKeyPrefix              string
+	SessionRedisSentinelMaster         string
+	SessionRedisSentinelAddresses      []string
+	SessionRedisSentinelUsername       string
+	SessionRedisSentinelPassword       string
+	SessionRedisTLSEnabled             bool
+	SessionRedisTLSCAFile              string
+	SessionRedisTLSServerName          string
+	SessionRedisTLSCertificateFile     string
+	SessionRedisTLSKeyFile             string
 
 	OIDCName                         string
 	OIDCIssuer                       string
@@ -241,6 +248,7 @@ func newServer(ctx context.Context, configuration *Configuration, sessions *sess
 		MetricsRegistry:  telemetry.registry,
 		ReadinessCheck:   sessions.readinessCheck(telemetry.dependencies),
 		ShutdownDelay:    seconds(configuration.ShutdownDelaySeconds),
+		TrustedProxies:   configuration.TrustedProxies,
 	})
 }
 
@@ -296,37 +304,6 @@ func newSessionStore(ctx context.Context, configuration *Configuration, dependen
 		return nil, errors.Join(err, created.closeRedis())
 	}
 	return created, nil
-}
-
-// newBackend opens the Redis client when SESSION_REDIS_ENABLED, fails when Redis does not answer
-// [RES-007] and records its calls; otherwise it returns the in-memory backend (exactly one replica).
-func (s *sessionStore) newBackend(ctx context.Context, configuration *Configuration, dependencies *forwardauth.Dependencies) (session.Backend, error) {
-	if !configuration.SessionRedisEnabled {
-		return session.NewMemoryBackend(nil)
-	}
-	s.redis = newRedisClient(configuration)
-	pingContext, cancel := context.WithTimeout(ctx, redisStartupTimeout)
-	defer cancel()
-	if err := s.redis.Ping(pingContext).Err(); err != nil {
-		return nil, errors.Join(dependency.Error("SESSION_REDIS_ADDRESS: ping Redis at "+configuration.SessionRedisAddress, err), s.closeRedis())
-	}
-	backend, err := redisbackend.New(&redisbackend.Options{Client: s.redis, KeyPrefix: configuration.SessionRedisKeyPrefix})
-	if err != nil {
-		return nil, errors.Join(err, s.closeRedis())
-	}
-	return dependencies.Backend(backend), nil
-}
-
-// newRedisClient never retries, so a session Pop whose answer was lost is not run twice [RES-004], and
-// honours context deadlines, so the 2 s readiness check and a request's own deadline bound each command.
-func newRedisClient(configuration *Configuration) *redis.Client {
-	return redis.NewClient(&redis.Options{
-		Addr:                  configuration.SessionRedisAddress,
-		Password:              configuration.SessionRedisPassword,
-		DB:                    configuration.SessionRedisDatabase,
-		MaxRetries:            -1,
-		ContextTimeoutEnabled: true,
-	})
 }
 
 // readinessCheck pings Redis and records the ping as a Redis call; the in-memory backend needs no check.
@@ -515,6 +492,7 @@ func serverValues(configuration *Configuration) []config.Value {
 		config.Bool("API_KEYS_ENABLED").Default(false).Into(&configuration.APIKeysEnabled),
 		config.StringArray("API_KEYS").Default(nil).Sensitive().Into(&configuration.APIKeys),
 		config.StringArray("API_KEY_PERMISSIONS").Default(nil).Into(&configuration.APIKeyPermissions),
+		config.StringArray("TRUSTED_PROXIES").Default(nil).Into(&configuration.TrustedProxies),
 	}
 }
 
@@ -530,9 +508,19 @@ func sessionValues(configuration *Configuration) []config.Value {
 		config.Int("SESSION_MAXIMUM_UNVERIFIED_AGE_SECONDS").Default(3600).Into(&configuration.SessionMaximumUnverifiedAgeSeconds),
 		config.Bool("SESSION_REDIS_ENABLED").Default(false).Into(&configuration.SessionRedisEnabled),
 		config.String("SESSION_REDIS_ADDRESS").Default("").Into(&configuration.SessionRedisAddress),
+		config.String("SESSION_REDIS_USERNAME").Default("").Into(&configuration.SessionRedisUsername),
 		config.String("SESSION_REDIS_PASSWORD").Default("").Sensitive().Into(&configuration.SessionRedisPassword),
 		config.Int("SESSION_REDIS_DATABASE").Default(0).Into(&configuration.SessionRedisDatabase),
 		config.String("SESSION_REDIS_KEY_PREFIX").NotEmpty().Default("forwardauth").Into(&configuration.SessionRedisKeyPrefix),
+		config.String("SESSION_REDIS_SENTINEL_MASTER").Default("").Into(&configuration.SessionRedisSentinelMaster),
+		config.StringArray("SESSION_REDIS_SENTINEL_ADDRESSES").Default(nil).Into(&configuration.SessionRedisSentinelAddresses),
+		config.String("SESSION_REDIS_SENTINEL_USERNAME").Default("").Into(&configuration.SessionRedisSentinelUsername),
+		config.String("SESSION_REDIS_SENTINEL_PASSWORD").Default("").Sensitive().Into(&configuration.SessionRedisSentinelPassword),
+		config.Bool("SESSION_REDIS_TLS_ENABLED").Default(false).Into(&configuration.SessionRedisTLSEnabled),
+		config.String("SESSION_REDIS_TLS_CA_FILE").Default("").Into(&configuration.SessionRedisTLSCAFile),
+		config.String("SESSION_REDIS_TLS_SERVER_NAME").Default("").Into(&configuration.SessionRedisTLSServerName),
+		config.String("SESSION_REDIS_TLS_CERTIFICATE_FILE").Default("").Into(&configuration.SessionRedisTLSCertificateFile),
+		config.String("SESSION_REDIS_TLS_KEY_FILE").Default("").Into(&configuration.SessionRedisTLSKeyFile),
 	}
 }
 
@@ -616,6 +604,9 @@ func validateServer(configuration *Configuration) error {
 	if err := forwardauth.ValidatePathPrefix(configuration.PathPrefix); err != nil {
 		problems = append(problems, fmt.Errorf("PATH_PREFIX %w", err))
 	}
+	if err := forwardauth.ValidateTrustedProxies(configuration.TrustedProxies); err != nil {
+		problems = append(problems, fmt.Errorf("TRUSTED_PROXIES: %w", err))
+	}
 	problems = append(problems,
 		rangeProblem("PORT", configuration.Port, 1, forwardauth.MaximumPort),
 		rangeProblem("METRICS_PORT", configuration.MetricsPort, 1, forwardauth.MaximumPort),
@@ -660,9 +651,7 @@ func validateSession(configuration *Configuration) error {
 		minimumProblem("SESSION_MAXIMUM_UNVERIFIED_AGE_SECONDS", configuration.SessionMaximumUnverifiedAgeSeconds, max(1, configuration.SessionRefreshIntervalSeconds)),
 		minimumProblem("SESSION_REDIS_DATABASE", configuration.SessionRedisDatabase, 0),
 	)
-	if configuration.SessionRedisEnabled {
-		problems = append(problems, requireValues("SESSION_REDIS_ENABLED=true", namedValue{"SESSION_REDIS_ADDRESS", configuration.SessionRedisAddress}))
-	}
+	problems = append(problems, validateRedis(configuration))
 	return errors.Join(problems...)
 }
 

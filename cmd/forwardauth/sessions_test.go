@@ -57,10 +57,11 @@ func redisConfiguration(address string) *Configuration {
 
 func TestTheRedisClientNeverRetriesACommand(t *testing.T) {
 	address, accepted := fakeRedis(t, func(connection net.Conn) { _ = connection.Close() }) // every answer is lost
-	client := newRedisClient(redisConfiguration(address))
+	client, err := newRedisClient(redisConfiguration(address))
+	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() }) // nothing to flush
 
-	err := client.Ping(t.Context()).Err()
+	err = client.Ping(t.Context()).Err()
 
 	require.Error(t, err)
 	require.Equal(t, int32(1), accepted.Load(), "one connection, no retry")
@@ -70,13 +71,14 @@ func TestTheRedisClientHonoursTheContextDeadline(t *testing.T) {
 	address, _ := fakeRedis(t, func(connection net.Conn) {
 		_, _ = io.Copy(io.Discard, connection) // reads every command, answers none
 	})
-	client := newRedisClient(redisConfiguration(address))
+	client, err := newRedisClient(redisConfiguration(address))
+	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() }) // closes the stalled connections, which ends the fake's copies
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
 
-	err := client.Ping(ctx).Err()
+	err = client.Ping(ctx).Err()
 
 	require.Error(t, err)
 	require.Less(t, time.Since(start), 2*time.Second, "the 5 s read timeout of go-redis must not apply")

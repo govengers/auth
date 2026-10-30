@@ -79,6 +79,7 @@ type harnessOptions struct {
 	readinessCheck   func(ctx context.Context) error
 	emitter          wideevent.Emitter // replaces the event recorder
 	dependencies     *Dependencies     // records the session store's calls
+	trustedProxies   []string
 }
 
 func newHarness(t *testing.T, options harnessOptions) *harness {
@@ -106,6 +107,7 @@ func newHarness(t *testing.T, options harnessOptions) *harness {
 		SampleRate:       1,
 		MetricsRegistry:  registry,
 		ReadinessCheck:   options.readinessCheck,
+		TrustedProxies:   options.trustedProxies,
 	}
 	if options.emitter != nil {
 		serverOptions.Emitter = options.emitter
