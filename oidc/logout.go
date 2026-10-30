@@ -15,6 +15,10 @@ import (
 
 const loggedOutPage = "<!doctype html><html><head><title>Logged out</title></head><body></body></html>"
 
+// logoutTimeout bounds what a logout runs without the request's cancellation (session reads, OnLogout),
+// so a hung backend or hook cannot hold the request. A variable so tests can shorten it.
+var logoutTimeout = defaultHTTPTimeout
+
 // handleLogout is RP-initiated logout: end the session, then send the browser to the IdP's
 // end_session_endpoint with the ID token as hint, or to PostLogoutURL. A call that looks like the IdP's
 // front-channel iframe (iss or sid present, or Sec-Fetch-Dest: iframe unless disabled) is handled as
@@ -29,7 +33,8 @@ func (p *Provider) handleLogout(writer http.ResponseWriter, request *http.Reques
 		p.reporter.Refuse(request.Context(), writer, auth.Outcome{Action: auth.ActionLogout, Err: err})
 		return
 	}
-	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the hint or OnLogout
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), logoutTimeout) // a disconnecting client must not skip the hint or OnLogout
+	defer cancel()
 	current, identity, identityError := p.sessionIdentity(ctx, request)
 	rawIdentityToken, tokenError := p.ownIdentityToken(ctx, current, identity)
 	readError := errors.Join(identityError, tokenError)
@@ -50,7 +55,8 @@ func (p *Provider) handleLogout(writer http.ResponseWriter, request *http.Reques
 func (p *Provider) handleFrontChannelLogout(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Cache-Control", "no-store, must-revalidate")
 	writer.Header().Set("Pragma", "no-cache")
-	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the sid check or OnLogout
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), logoutTimeout) // a disconnecting client must not skip the sid check or OnLogout
+	defer cancel()
 	_, identity, readError := p.sessionIdentity(ctx, request)
 	if err := p.checkFrontChannelRequest(request.URL.Query(), identity); err != nil {
 		p.refuseFrontChannel(writer, request, errors.Join(err, readError))

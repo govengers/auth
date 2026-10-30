@@ -21,6 +21,11 @@ import (
 	"github.com/govengers/auth/session"
 )
 
+// logoutTimeout bounds what a logout runs without the request's cancellation (session reads, OnLogout),
+// so a hung backend or hook cannot hold the request; the revocation has its own. A variable so tests can
+// shorten it.
+var logoutTimeout = defaultTimeout
+
 // completedLogin is a verified callback: the identity to store, the GitHub token and the return path.
 type completedLogin struct {
 	identity   *auth.Identity
@@ -172,7 +177,8 @@ func (p *Provider) logout(writer http.ResponseWriter, request *http.Request) {
 		p.reporter.Refuse(request.Context(), writer, auth.Outcome{Action: auth.ActionLogout, Err: err})
 		return
 	}
-	ctx := context.WithoutCancel(request.Context()) // a disconnecting client must not skip the reads or OnLogout
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), logoutTimeout) // a disconnecting client must not skip the reads or OnLogout
+	defer cancel()
 	identity, token, readError := p.sessionState(ctx, request)
 	if err := p.options.Sessions.End(ctx, writer, request); err != nil {
 		p.reporter.Refuse(ctx, writer, auth.Outcome{Action: auth.ActionLogout, Err: errors.Join(fmt.Errorf("github: end session: %w", err), readError), Identity: identity})

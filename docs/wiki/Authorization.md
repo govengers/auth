@@ -110,6 +110,6 @@ The password provider sets `UserID` itself (the `Storage` user ID) and its `OnLo
 		provisioned.UserID = uuid.NewSHA1(uuid.NameSpaceURL, []byte(identity.Provider+"/"+identity.Subject))
 ```
 
-An `*auth.Error` from a hook answers with its status (403 refuses the login), anything else with 500; no session is created either way. `OnLogout` gets a context a disconnecting client cannot cancel (every provider); set your own deadline for slow work in it.
+An `*auth.Error` from a hook answers with its status (403 refuses the login), anything else with 500; no session is created either way. `OnLogout` gets a context a disconnecting client cannot cancel (every provider); OIDC and GitHub end it 10 s after the logout started (session reads included), so a hook that honours its context cannot hold the request. Set your own, shorter deadline for slow work in it.
 
 Source: [authorization/authorization.go](../../authorization/authorization.go), [identity.go](../../identity.go), [permission.go](../../permission.go).
