@@ -394,7 +394,6 @@ func NewMemoryBackend(options *MemoryBackendOptions) (*MemoryBackend, error)
 // no longer refuses a Put (a provider or application value may land in the revoked session), but nothing gives it an
 // identity again (SaveIdentity and the Guard swap against a live identity; only the first save of a Start handle
 // writes without one). Meant for one replica at non-production scale; use Redis in production.
-// ponytail: O(n) eviction scan when full; shard or use Redis if that ever shows in profiles.
 type MemoryBackend struct{ /* unexported */ }
 
 type StoreOptions struct {
@@ -1513,6 +1512,7 @@ Decisions taken during implementation (29.10.2026, settled by the lead):
 | D39 | The public listener reads at most 64 KiB of request line and headers; the wide event's client-controlled fields are cut to 512 bytes. | net/http's 1 MiB default let a client push up to 1 MiB of header bytes into every 401 or unmatched-path event, which the sampler always keeps. |
 | D40 | After the agent-docs pass (30.10.2026): the binary's query redaction moved into the library as `ginadapter.RedactQuery`, which the binary's pre-enricher calls. | Library consumers on gin mounted the wide-event middleware without redaction, so callback `code` and `state` reached their logs. |
 | D41 | After the agent-docs pass (30.10.2026): `session.Store.SameSite()`; `oidc.New` and `github.New` refuse a store whose cookie is SameSite Strict. Password-only stores may keep Strict. | A Strict cookie is withheld on the redirect back from the IdP or GitHub, so every callback failed with `login_expired` at runtime instead of at startup (the binary already refused `SESSION_SAME_SITE=strict`, D32). |
+| D42 | After security audit run 2: `MemoryBackend` keeps its sessions in a min-heap by expiry (`container/heap`), so a write into a full backend drops expired entries and evicts the soonest expiring in O(log n) each; eviction order is unchanged (exact soonest first, not sampled). The docs say the memory backend is not built for anonymous login floods. | Each eviction scanned every session twice under the one mutex every `Get` takes: about 100000 anonymous login starts filled the default backend, then every further start held the lock for about 60 ms and stalled all users. A heap keeps the documented eviction order and its tests truthful; sampled eviction would have changed both. |
 
 ---
 

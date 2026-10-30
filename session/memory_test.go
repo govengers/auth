@@ -2,6 +2,8 @@ package session
 
 import (
 	"bytes"
+	"fmt"
+	"math/bits"
 	"testing"
 	"time"
 
@@ -315,4 +317,21 @@ func TestMemoryBackendDropsEmptiedSessions(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Empty(t, backend.sessions)
+}
+
+func TestMemoryBackendEvictsFromAFullBackendInLogarithmicWork(t *testing.T) {
+	clock := newTestClock()
+	backend := newTestMemoryBackend(t, clock)
+	ctx := t.Context()
+	for index := range defaultMaximumSessions { // a flood of login starts filling the default backend
+		require.NoError(t, backend.Put(ctx, fmt.Sprintf("start-%d", index), "state", []byte("value"), time.Hour+time.Duration(index)*time.Millisecond))
+	}
+	backend.expiries.comparisons = 0
+
+	require.NoError(t, backend.Put(ctx, "new", "state", []byte("value"), 2*time.Hour))
+
+	require.Len(t, backend.sessions, defaultMaximumSessions)
+	require.NotContains(t, backend.sessions, "start-0", "the session expiring soonest is evicted")
+	require.Contains(t, backend.sessions, "new")
+	require.LessOrEqual(t, backend.expiries.comparisons, 6*bits.Len(defaultMaximumSessions), "a write into a full backend touches O(log n) entries, not every one")
 }

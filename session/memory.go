@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"container/heap"
 	"context"
 	"fmt"
 	"slices"
@@ -30,18 +31,21 @@ type MemoryBackendOptions struct {
 // give that session an identity again (SaveIdentity and the Guard swap against a live identity, and only the
 // first save of a Start handle writes without one), but a provider or application value may land in it. Meant for one replica at
 // non-production scale; use Redis in production.
-// ponytail: O(n) eviction scan when full; shard or use Redis if that ever shows in profiles.
 type MemoryBackend struct {
 	options     MemoryBackendOptions
 	mutex       sync.Mutex
 	sessions    map[string]*memorySession
-	storedBytes int // of every session ID, key and value in sessions
+	expiries    expiryQueue // every entry of sessions, soonest expiring first: eviction costs O(log n), not a scan
+	storedBytes int         // of every session ID, key and value in sessions
 	now         func() time.Time
 }
 
 type memorySession struct {
+	sessionID    string
 	values       map[string]memoryValue
 	revokedUntil time.Time
+	expiresAt    time.Time // when the last value or the revocation marker expires; kept by updateExpiry
+	position     int       // index in MemoryBackend.expiries
 }
 
 type memoryValue struct {
@@ -149,7 +153,7 @@ func (b *MemoryBackend) Revoke(_ context.Context, sessionID string, ttl time.Dur
 		return nil
 	}
 	now := b.now()
-	revokedUntil := entry.expiresAt()
+	revokedUntil := entry.expiresAt
 	if limit := now.Add(ttl); limit.Before(revokedUntil) {
 		revokedUntil = limit
 	}
@@ -180,7 +184,9 @@ func (b *MemoryBackend) remove(sessionID, key string, now time.Time) {
 	delete(entry.values, key)
 	if len(entry.values) == 0 && !entry.revoked(now) {
 		b.deleteSession(sessionID)
+		return
 	}
+	b.updateExpiry(entry)
 }
 
 // makeRoom frees room for a write that adds a session (newSession) and up to size bytes when it would pass
@@ -190,13 +196,11 @@ func (b *MemoryBackend) makeRoom(now time.Time, newSession bool, size int) {
 	if b.fits(newSession, size) {
 		return
 	}
-	for sessionID, entry := range b.sessions {
-		if !entry.expiresAt().After(now) {
-			b.deleteSession(sessionID)
-		}
+	for b.expiries.Len() > 0 && !b.expiries.soonest().expiresAt.After(now) {
+		b.deleteSession(b.expiries.soonest().sessionID)
 	}
-	for len(b.sessions) > 0 && !b.fits(newSession, size) {
-		b.deleteSession(b.soonestExpiring())
+	for b.expiries.Len() > 0 && !b.fits(newSession, size) {
+		b.deleteSession(b.expiries.soonest().sessionID)
 	}
 }
 
@@ -222,7 +226,9 @@ func growth(entry *memorySession, key string, valueBytes, size int) int {
 
 // addSession stores entry, a new or a revoked session without values, under sessionID. b.mutex must be held.
 func (b *MemoryBackend) addSession(sessionID string, entry *memorySession) *memorySession {
+	entry.sessionID, entry.expiresAt = sessionID, entry.latestExpiry()
 	b.sessions[sessionID] = entry
+	heap.Push(&b.expiries, entry)
 	b.storedBytes += len(sessionID)
 	return entry
 }
@@ -238,6 +244,7 @@ func (b *MemoryBackend) deleteSession(sessionID string) {
 		b.storedBytes -= len(key) + len(item.value)
 	}
 	delete(b.sessions, sessionID)
+	heap.Remove(&b.expiries, entry.position)
 }
 
 // storeValue sets key of entry to item. b.mutex must be held.
@@ -247,25 +254,21 @@ func (b *MemoryBackend) storeValue(entry *memorySession, key string, item memory
 	}
 	entry.values[key] = item
 	b.storedBytes += len(key) + len(item.value)
+	b.updateExpiry(entry)
 }
 
-func (b *MemoryBackend) soonestExpiring() string {
-	var soonestID string
-	var soonest time.Time
-	for sessionID, entry := range b.sessions {
-		if expiresAt := entry.expiresAt(); soonestID == "" || expiresAt.Before(soonest) {
-			soonestID, soonest = sessionID, expiresAt
-		}
-	}
-	return soonestID
+// updateExpiry moves entry to its place in b.expiries after its values changed. b.mutex must be held.
+func (b *MemoryBackend) updateExpiry(entry *memorySession) {
+	entry.expiresAt = entry.latestExpiry()
+	heap.Fix(&b.expiries, entry.position)
 }
 
 func (m *memorySession) revoked(now time.Time) bool {
 	return m.revokedUntil.After(now)
 }
 
-// expiresAt is when the last value or the revocation marker of the session expires.
-func (m *memorySession) expiresAt() time.Time {
+// latestExpiry is when the last value or the revocation marker of the session expires.
+func (m *memorySession) latestExpiry() time.Time {
 	latest := m.revokedUntil
 	for _, item := range m.values {
 		if item.expiresAt.After(latest) {
@@ -273,4 +276,37 @@ func (m *memorySession) expiresAt() time.Time {
 		}
 	}
 	return latest
+}
+
+// expiryQueue is a min-heap (container/heap) of sessions by expiresAt.
+type expiryQueue struct {
+	sessions    []*memorySession
+	comparisons int // the work done so far, for the test that eviction stays O(log n)
+}
+
+func (q *expiryQueue) soonest() *memorySession { return q.sessions[0] }
+
+func (q *expiryQueue) Len() int { return len(q.sessions) }
+
+func (q *expiryQueue) Less(first, second int) bool {
+	q.comparisons++
+	return q.sessions[first].expiresAt.Before(q.sessions[second].expiresAt)
+}
+
+func (q *expiryQueue) Swap(first, second int) {
+	q.sessions[first], q.sessions[second] = q.sessions[second], q.sessions[first]
+	q.sessions[first].position, q.sessions[second].position = first, second
+}
+
+func (q *expiryQueue) Push(item any) {
+	entry := item.(*memorySession)
+	entry.position = len(q.sessions)
+	q.sessions = append(q.sessions, entry)
+}
+
+func (q *expiryQueue) Pop() any {
+	last := q.sessions[len(q.sessions)-1]
+	q.sessions[len(q.sessions)-1] = nil
+	q.sessions = q.sessions[:len(q.sessions)-1]
+	return last
 }

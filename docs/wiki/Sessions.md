@@ -54,7 +54,7 @@ The Guard calls a provider's `Refresher` for identities whose last refresh is ol
 
 ## Backends
 
-- `MemoryBackend`: exactly one replica, lost on restart, non-production scale. Bounded by `MaximumSessions` (default 100000) and `MaximumBytes` of session IDs, keys and values (default 64 MiB; a replacement counts only what it adds): when full it drops expired entries, then evicts the entries expiring soonest, revocation markers included; a single value larger than `MaximumBytes` is refused.
+- `MemoryBackend`: exactly one replica, lost on restart, non-production scale. Bounded by `MaximumSessions` (default 100000) and `MaximumBytes` of session IDs, keys and values (default 64 MiB; a replacement counts only what it adds): when full it drops expired entries, then evicts the entries expiring soonest, revocation markers included (an expiry-ordered heap: O(log n) per evicted entry, never a scan of every session); a single value larger than `MaximumBytes` is refused. It is not built for anonymous login floods: every login start stores a session, so a flood keeps it full and evicts real sessions; rate-limit the login routes or use Redis.
 - `session/redisbackend`: any `redis.UniversalClient` (client, sentinel, cluster); you own and close the client; keys carry a hash tag, so `KeyPrefix` (default `session`) must not contain `{` or `}`. Logout and session rotation revoke on every replica; a revoked session never regains an identity and refuses writes while its revocation marker lives (Redis may evict it under its own eviction policy, as a full memory backend does). Tested excerpt ([session/redisbackend/example_test.go](../../session/redisbackend/example_test.go)):
 
 ```go

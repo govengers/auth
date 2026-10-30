@@ -174,7 +174,7 @@ Values without a default are required. *not empty* marks values with a default t
 | `SESSION_MAXIMUM_AGE_SECONDS` | `86400` | | | absolute lifetime, at least 1; refreshes never extend it |
 | `SESSION_REFRESH_INTERVAL_SECONDS` | `60` | | | how often the GitHub provider re-checks teams; at least 1 |
 | `SESSION_MAXIMUM_UNVERIFIED_AGE_SECONDS` | `3600` | | | a team re-check failing (GitHub outage, rate limit) for longer than this since the last successful one ends the session; at least `SESSION_REFRESH_INTERVAL_SECONDS` |
-| `SESSION_REDIS_ENABLED` | `false` | | | otherwise in-memory: exactly one replica |
+| `SESSION_REDIS_ENABLED` | `false` | | | otherwise in-memory: exactly one replica, not built for anonymous login floods (each start stores a session; a full backend evicts the soonest expiring): rate-limit `{prefix}/login` or use Redis |
 | `SESSION_REDIS_ADDRESS` | empty | with Redis | | `host:port`; pinged at boot (5 s) |
 | `SESSION_REDIS_PASSWORD` | empty | | yes | |
 | `SESSION_REDIS_DATABASE` | `0` | | | at least 0 |
