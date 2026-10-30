@@ -43,17 +43,26 @@ You implement [`password.Storage`](../../password/storage.go) (11 methods) on yo
 
 ## Routes
 
-Prefix `PathPrefix`, default `/auth/password`. Bodies are JSON (`Content-Type: application/json`, at most 64 KiB, unknown fields refused). Full answer table: [README, Password login](../../README.md#password-login).
+Prefix `PathPrefix`, default `/auth/password`. The provider reads sessions itself, so its routes need no Guard. Bodies are JSON (`Content-Type: application/json`, at most 64 KiB, unknown fields refused).
 
-| Method and path | Purpose | Registered when |
+| Method and path | Answer | Registered when |
 |---|---|---|
 | `POST /login` `{"identifier","password"}` | 200 identity, or 202 `{"challenge":"totp"}` / `{"challenge":"totp_setup"}` | always |
-| `POST /logout` | 204, ends the session | always |
-| `POST /register` `{"username","email","password"}` (at least one of username, email) | 201 identity, logged in | `EnableRegistration` |
-| `POST /totp/verify` `{"code","backupCode":false}` | second step of a 202 `totp` login | `TOTP.Enabled` |
-| `GET /totp` | `{"enabled"}` | `TOTP.Enabled` |
-| `POST /totp/setup` `{}`, `POST /totp/enable` `{"code","password"}` | enroll; enable returns the backup codes | `TOTP.Enabled` |
-| `POST /totp/disable` `{"password"}` | 204 | `TOTP.Enabled` |
+| `POST /logout` | 204; 403 `forbidden` for a request the browser marks `Sec-Fetch-Site: cross-site` | always |
+| `POST /register` `{"username","email","password"}` (at least one of username, email) | 201 identity (logged in), or 202 `{"challenge":"totp_setup"}` with `TOTP.Required` | `EnableRegistration` |
+| `POST /totp/verify` `{"code","backupCode":false}` | 200 identity; `"backupCode":true` checks the code against the backup codes only, `false` against the TOTP codes only | `TOTP.Enabled` |
+| `GET /totp` | 200 `{"enabled"}` | `TOTP.Enabled` |
+| `POST /totp/setup` `{}` | 200 `{"secret","otpauthUrl","issuer","accountName"}` | `TOTP.Enabled` |
+| `POST /totp/enable` `{"code","password"}` | 200 `{"backupCodes":[...]}`; a wrong code can be retried with the same setup; 409 `totp_already_enabled` when a concurrent enrollment won | `TOTP.Enabled` |
+| `POST /totp/disable` `{"password"}` | 204; a pending setup is dropped, so enable needs a new one | `TOTP.Enabled` |
+
+## TOTP and hashes
+
+- `TOTP.Required` enrolls users without a second factor during login and registration (the 202 `totp_setup` challenge, then `/totp/setup` and `/totp/enable`) instead of failing every route.
+- Limits: `TOTP.Digits` 6 or 8, `Period` at most 3600 s, `Skew` at most 10, `BackupCodeCount` at most 20; backup codes are at most 128 bytes and the alphabet and length must give at least 1,000,000 distinct codes.
+- Every TOTP code is accepted once (`Storage.ConsumeTOTPStep`). `MaximumAttempts` (default 5, no "unlimited") counts wrong codes in a row across logins; then the second factor stays locked until a code is verified or your application calls `Storage.ResetTOTPAttempts`.
+- `Policy.MinimumLength` counts characters; passwords are 1-128 bytes. Stable client codes replace translated messages.
+- Existing Argon2id hashes verify unchanged; `LegacyVerifier: password.VerifyBcrypt` upgrades bcrypt hashes at the next login, and Argon2id hashes on other parameters than `HashParameters` are rehashed too (only login rehashes, not the password checks of the TOTP routes). A stored hash nothing can verify answers like a wrong password (401 `invalid_credentials`, same cost); unknown users cost the same Argon2id verification as real ones.
 
 ## Options that matter
 

@@ -46,7 +46,7 @@ Prefix `PathPrefix`, default `/auth/oidc/<Name>`. All `GET`.
 |---|---|
 | `/login` | starts the login, 302 to the IdP; `?return_to=<path>` is where the user lands afterwards (the Guard's `RequireUI` sets it) |
 | `/callback` | the IdP's redirect target; rotates the session, stores the identity, 302 to the return path |
-| `/logout` | ends the session, 302 to the IdP's end-session endpoint (or `PostLogoutURL` without a stored ID token); link to it from your UI |
+| `/logout` | ends the local session and sends the browser to the IdP's end-session endpoint with the stored ID token as hint; without a stored ID token (the local session had already expired) straight to `PostLogoutURL`, and the IdP session stays; link to it from your UI |
 | `/frontchannel-logout` | OIDC front-channel logout, loaded by the IdP in an iframe |
 
 ## Options that matter
@@ -59,26 +59,29 @@ Prefix `PathPrefix`, default `/auth/oidc/<Name>`. All `GET`.
 | `ExternalURL` | required | public origin; the redirect URI derives from it |
 | `Scopes` | `openid profile email` | |
 | `ClaimMapper` | `oidc.DefaultClaimMapper` | `oidc.GoogleClaimMapper` for Google |
-| `AllowedEmailDomains` | none | requires `email_verified`; set it for Google or any Google account gets in |
-| `PostLogoutURL` | `ExternalURL + "/"` | path or absolute URL, no fragment |
-| `ErrorURL` | none (JSON answers) | callback failures redirect to `ErrorURL?code=<code>` |
+| `AllowedEmailDomains` | none | requires `email_verified`; ASCII domains, an internationalized one in its `xn--` form; set it for Google or any Google account gets in |
+| `PostLogoutURL` | `ExternalURL + "/"` | path or absolute `http(s)` URL without fragment; a path is made absolute with `ExternalURL` |
+| `ErrorURL` | none (JSON answers) | every callback failure redirects to `ErrorURL?code=<code>` (`code=internal` for a server-side failure); same URL rules as `PostLogoutURL` |
 | `OnLogin`, `OnLogout` | none | `OnLogin` is where you provision your application user and set `UserID` |
 
 Without Keycloak, `OIDCRoles` (`realm_access.roles`), `OIDCClientRoles` (`resource_access.<client>.roles`) and `Groups` (`groups`) come from the access token, per claim from the ID token when the access token lacks it.
 
 ## Keycloak enrichment
 
-`keycloak.New(&keycloak.Options{...})` returns a client whose `Enrich` is an `auth.Hook`; set it as `OnLogin` (or call it first inside your own hook). It replaces `OIDCRoles` (composite realm roles), `OIDCClientRoles` (of `ClientRolesClientID`), `Groups` (paths) and `Attributes` with the Admin API's answer and refuses the login with 403 when `RequiredRealmRoles`, `RequiredClientRoles` or `RequiredGroups` are missing. It authenticates with the client credentials grant of a service account (`ClientID`, `ClientSecret`), which needs the `realm-management` roles `view-users`, `query-users` and `query-groups`, plus `view-clients` and `query-clients` with `ClientRolesClientID` ([README](../../README.md#oidc-with-keycloak)). Tested excerpt: [oidc/keycloak/example_test.go](../../oidc/keycloak/example_test.go).
+`keycloak.New(&keycloak.Options{...})` returns a client whose `Enrich` is an `auth.Hook`; set it as `OnLogin` (or call it first inside your own hook). It replaces `OIDCRoles` (composite realm roles), `OIDCClientRoles` (of `ClientRolesClientID`), `Groups` (paths) and `Attributes` with the Admin API's answer and refuses the login with 403 (the role name stays server-side) when `RequiredRealmRoles`, `RequiredClientRoles` or `RequiredGroups` are missing; `RequiredClientRoles` needs `ClientRolesClientID`. It authenticates with the client credentials grant of a service account (`ClientID`, `ClientSecret`), which needs the `realm-management` roles `view-users`, `query-users` and `query-groups` (it reads the user, its role mappings, groups and attributes) and, with `ClientRolesClientID`, `view-clients` and `query-clients` (it looks the client up by its client ID). The `password` grant (`GrantType: keycloak.GrantTypePassword`, client `admin-cli` by default) breaks as soon as the admin user gets an OTP credential. Tested excerpt: [oidc/keycloak/example_test.go](../../oidc/keycloak/example_test.go).
 
 ## Refusal codes
 
 `login_expired`, `state_mismatch` (400), `login_denied`, `login_failed` (401) on the callback; `forbidden` (403) for a disallowed email domain, a missing required Keycloak role or group, an `OnLogin` refusal and a cross-site `/logout`; `internal` (500) when the IdP is down. With `ErrorURL` the same codes arrive as `?code=`.
 
+- The IdP rejecting the authorization code (an error answer below 500) is 401 `login_failed`; a 5xx answer or an IdP that cannot be reached is 500.
+- An ID token without `sub` is refused; one that does not verify is 401 `login_failed` with the fixed Reason `ID token expired` or `ID token verification` on the outcome (an unreachable JWKS reads like an invalid token: go-oidc's message quotes the token and the server's text).
+
 ## Gotchas
 
 - `oidc.New` refuses a `Sessions` store whose cookie is SameSite Strict: the callback would arrive without it.
 - OIDC has no `Refresher`: roles and groups are read at login and stay until the session ends (`StoreOptions.MaximumAge`, default 24 h).
-- `/logout` refuses `Sec-Fetch-Site: cross-site` with 403: logout links must live on the app's own site.
+- `/logout` refuses `Sec-Fetch-Site: cross-site` with 403 and ends nothing: logout links must live on the app's own site. Front-channel logout from the IdP's iframe still works.
 - Front-channel logout needs `StoreOptions.SameSite: http.SameSiteNoneMode` (https only), else the IdP's iframe gets no cookie.
 - No component follows a redirect of the issuer's endpoints: point `Issuer` at the final URL.
 - Google: `Issuer: "https://accounts.google.com"`, `ClaimMapper: oidc.GoogleClaimMapper`, `AllowedEmailDomains`; the `hd` claim is not checked.
