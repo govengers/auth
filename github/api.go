@@ -61,11 +61,13 @@ func (p *Provider) HTTPClient(ctx context.Context, current session.Session) (*ht
 	if err != nil {
 		return nil, err
 	}
-	return p.apiClient(token), nil
+	return p.apiClient(p.options.HTTPClient, token), nil
 }
 
-func (p *Provider) apiClient(token *oauth2.Token) *http.Client {
-	client := *p.options.HTTPClient
+// apiClient returns a copy of base that sends token to the GitHub API only. The provider's own reads pass
+// p.upstream: a redirect of /user or /user/teams must fail, or its target could forge the team membership.
+func (p *Provider) apiClient(base *http.Client, token *oauth2.Token) *http.Client {
+	client := *base
 	client.Transport = &apiTransport{base: client.Transport, api: p.api, token: token}
 	return &client
 }

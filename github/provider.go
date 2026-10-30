@@ -44,7 +44,7 @@ type Options struct {
 	AdminTeams             []string        // members get auth.RoleAdmin (they still need an AllowedTeams membership)
 	RelevantTeams          []string        // extra teams kept in Identity.Teams
 	Sessions               *session.Store  // required
-	HTTPClient             *http.Client    // default 10 s timeout; token exchange, GitHub API, revocation (a redirect fails the exchange and the revocation)
+	HTTPClient             *http.Client    // default 10 s timeout; token exchange, GitHub API, revocation (a redirect fails every call of the provider; HTTPClient(ctx, session) keeps this client's policy)
 	OnLogin                auth.Hook       // optional: maps or refuses the identity before the session exists
 	OnLogout               auth.LogoutHook // optional
 	Observer               auth.Observer   // optional
@@ -56,7 +56,7 @@ type Provider struct {
 	options  Options // resolved copy: defaults applied, slices cloned, team lists lower-cased
 	oauth    *oauth2.Config
 	api      *url.URL     // parsed APIURL: the only scheme and host the session's token is sent to
-	upstream *http.Client // HTTPClient without redirects, for the calls carrying the client secret
+	upstream *http.Client // HTTPClient without redirects, for the provider's own calls: exchange, user and team reads, revocation
 	reporter *failure.Reporter
 }
 

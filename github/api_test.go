@@ -54,7 +54,7 @@ func TestGetJSONSendsGitHubHeadersAndTheToken(t *testing.T) {
 	stub, apiURL := startAPIStub(t, http.StatusOK, `{"id":7,"login":"octocat"}`)
 	provider := providerForAPI(t, apiURL+"/")
 
-	account, err := provider.fetchUser(t.Context(), provider.apiClient(&oauth2.Token{AccessToken: "gho_secret", TokenType: "bearer"}))
+	account, err := provider.fetchUser(t.Context(), provider.apiClient(provider.upstream, &oauth2.Token{AccessToken: "gho_secret", TokenType: "bearer"}))
 
 	require.NoError(t, err)
 	require.Equal(t, user{ID: 7, Login: "octocat"}, account)
@@ -83,7 +83,7 @@ func TestGetJSONFailures(t *testing.T) {
 			_, apiURL := startAPIStub(t, testCase.status, testCase.body)
 			provider := providerForAPI(t, apiURL)
 
-			_, err := provider.fetchUser(t.Context(), provider.apiClient(&oauth2.Token{AccessToken: "gho_secret"}))
+			_, err := provider.fetchUser(t.Context(), provider.apiClient(provider.upstream, &oauth2.Token{AccessToken: "gho_secret"}))
 
 			require.Error(t, err)
 			require.Equal(t, testCase.wantUnauthenticated, isRefusal(err))
@@ -101,7 +101,7 @@ func TestGetJSONReadsAtMostTenMebibytes(t *testing.T) {
 	_, apiURL := startAPIStub(t, http.StatusOK, `{"login":"`+strings.Repeat("a", maximumResponseBytes)+`","id":7}`)
 	provider := providerForAPI(t, apiURL)
 
-	_, err := provider.fetchUser(t.Context(), provider.apiClient(&oauth2.Token{AccessToken: "gho_secret"}))
+	_, err := provider.fetchUser(t.Context(), provider.apiClient(provider.upstream, &oauth2.Token{AccessToken: "gho_secret"}))
 
 	require.ErrorContains(t, err, "decode /user")
 }
@@ -112,7 +112,7 @@ func TestGetJSONFailsWhenGitHubIsUnreachable(t *testing.T) {
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	_, err := provider.fetchTeams(cancelled, provider.apiClient(&oauth2.Token{AccessToken: "gho_secret"}))
+	_, err := provider.fetchTeams(cancelled, provider.apiClient(provider.upstream, &oauth2.Token{AccessToken: "gho_secret"}))
 
 	require.ErrorContains(t, err, "GET /user/teams")
 	require.ErrorIs(t, err, context.Canceled)

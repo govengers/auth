@@ -64,7 +64,7 @@ func (p *Provider) sessionMembership(ctx context.Context, current session.Sessio
 	if err != nil {
 		return membership{}, err
 	}
-	teams, err := p.fetchTeams(ctx, p.apiClient(token))
+	teams, err := p.fetchTeams(ctx, p.apiClient(p.upstream, token))
 	if err != nil {
 		return membership{}, err
 	}
@@ -115,7 +115,7 @@ func (p *Provider) completeLogin(ctx context.Context, request *http.Request) (co
 	if err != nil {
 		return completedLogin{}, err
 	}
-	identity, err := p.identityOf(ctx, p.apiClient(token))
+	identity, err := p.identityOf(ctx, p.apiClient(p.upstream, token))
 	if err != nil {
 		return completedLogin{identity: identity}, err
 	}

@@ -3,9 +3,12 @@ package github
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -241,4 +244,81 @@ func (e *testEnvironment) identityOf(t *testing.T, response *httptest.ResponseRe
 	identity, err := e.sessionOf(t, response).Identity(t.Context())
 	require.NoError(t, err)
 	return identity
+}
+
+// redirectingAPI stands between the provider and the fake GitHub API (inFrontOf) and passes every request
+// on, except requests to the path set by redirect, which it answers with a redirect to a sink. The sink
+// forges what an attacker would: /user is another user, /user/teams adds acme/admins. It records the
+// Authorization header of every request it gets.
+type redirectingAPI struct {
+	url            string
+	sinkURL        string
+	mutex          sync.Mutex
+	proxy          http.Handler // to the fake GitHub API; set by inFrontOf
+	path           string       // redirected path; empty passes every request on
+	status         int
+	authorizations []string // of the sink's requests
+}
+
+func startRedirectingAPI(t *testing.T) *redirectingAPI {
+	t.Helper()
+	api := &redirectingAPI{}
+	sink := httptest.NewServer(http.HandlerFunc(api.forge))
+	t.Cleanup(sink.Close)
+	front := httptest.NewServer(http.HandlerFunc(api.serve))
+	t.Cleanup(front.Close)
+	api.url, api.sinkURL = front.URL, sink.URL
+	return api
+}
+
+// inFrontOf returns a newTestEnvironment configure function that makes the front the provider's APIURL.
+func (a *redirectingAPI) inFrontOf(t *testing.T) func(options *Options) {
+	return func(options *Options) {
+		target, err := url.Parse(options.APIURL)
+		require.NoError(t, err)
+		a.mutex.Lock()
+		defer a.mutex.Unlock()
+		a.proxy = httputil.NewSingleHostReverseProxy(target)
+		options.APIURL = a.url
+	}
+}
+
+// redirect answers every later request to path with a redirect of status to the sink.
+func (a *redirectingAPI) redirect(path string, status int) {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	a.path, a.status = path, status
+}
+
+// sinkAuthorizations returns the Authorization header of every request the sink got, oldest first.
+func (a *redirectingAPI) sinkAuthorizations() []string {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	return slices.Clone(a.authorizations)
+}
+
+func (a *redirectingAPI) serve(writer http.ResponseWriter, request *http.Request) {
+	a.mutex.Lock()
+	path, status, proxy := a.path, a.status, a.proxy
+	a.mutex.Unlock()
+	if request.URL.Path == path {
+		http.Redirect(writer, request, a.sinkURL+path, status) // one page: the forged teams list is not full
+		return
+	}
+	proxy.ServeHTTP(writer, request)
+}
+
+func (a *redirectingAPI) forge(writer http.ResponseWriter, request *http.Request) {
+	a.mutex.Lock()
+	a.authorizations = append(a.authorizations, request.Header.Get("Authorization"))
+	a.mutex.Unlock()
+	writer.Header().Set("Content-Type", "application/json")
+	body := `[]`
+	switch request.URL.Path {
+	case "/user":
+		body = `{"id":7,"login":"mallory"}`
+	case "/user/teams":
+		body = `[{"slug":"developers","organization":{"login":"acme"}},{"slug":"admins","organization":{"login":"acme"}}]`
+	}
+	_, _ = io.WriteString(writer, body) // a lost write fails the forged read, which the tests expect anyway
 }

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -984,6 +985,87 @@ func TestHTTPClientSendsTheTokenToGitHubOnly(t *testing.T) {
 	mutex.Lock()
 	defer mutex.Unlock()
 	require.Equal(t, []string{""}, foreignAuthorization)
+}
+
+func TestHTTPClientFollowsARedirectWithoutTheToken(t *testing.T) {
+	api := startRedirectingAPI(t)
+	environment := newTestEnvironment(t, defaultTestTeams(), api.inFrontOf(t))
+	login := environment.login(t)
+	api.redirect("/repos/acme/app/tarball", http.StatusFound)
+	client, err := environment.provider.HTTPClient(t.Context(), environment.sessionOf(t, login))
+	require.NoError(t, err)
+
+	status := statusOf(t, client, api.url+"/repos/acme/app/tarball")
+
+	require.Equal(t, http.StatusOK, status, "the app's client keeps following redirects, as archive downloads need")
+	require.Equal(t, []string{""}, api.sinkAuthorizations(), "the token stays with the GitHub API")
+}
+
+// redirectStatuses are the redirects net/http follows for a GET.
+var redirectStatuses = []int{http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect}
+
+func TestCallbackFollowsNoRedirectOfTheUserOrTeamsRead(t *testing.T) {
+	for _, path := range []string{"/user", "/user/teams"} {
+		for _, status := range redirectStatuses {
+			t.Run(path+" "+strconv.Itoa(status), func(t *testing.T) {
+				api := startRedirectingAPI(t)
+				environment := newTestEnvironment(t, []fakeprovider.GitHubTeam{{Organization: "acme", Slug: "developers"}}, api.inFrontOf(t))
+				api.redirect(path, status)
+				login := environment.startLogin(t, "")
+
+				response := environment.callback(t, login, approve(t, login.Header().Get("Location")))
+
+				require.Equal(t, http.StatusInternalServerError, response.Code, response.Body.String())
+				outcome := environment.outcomes.last(t)
+				require.Equal(t, auth.ResultError, outcome.Result)
+				require.ErrorContains(t, outcome.Err, "redirect refused")
+				_, err := environment.sessionOf(t, login).Identity(t.Context())
+				require.ErrorIs(t, err, auth.ErrUnauthenticated, "no identity was installed")
+				require.Empty(t, api.sinkAuthorizations(), "the redirect's target is never asked")
+			})
+		}
+	}
+}
+
+func TestRefreshFollowsNoRedirectOfTheTeamsRead(t *testing.T) {
+	for _, status := range redirectStatuses {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			api := startRedirectingAPI(t)
+			environment := newTestEnvironment(t, []fakeprovider.GitHubTeam{{Organization: "acme", Slug: "developers"}}, api.inFrontOf(t))
+			login := environment.login(t)
+			api.redirect("/user/teams", status)
+
+			refreshed, err := environment.provider.Refresh(t.Context(), environment.sessionOf(t, login), environment.identityOf(t, login))
+
+			require.ErrorContains(t, err, "redirect refused")
+			require.NotErrorIs(t, err, auth.ErrUnauthenticated, "a plain error: the Guard keeps the identity")
+			require.NotErrorIs(t, err, auth.ErrForbidden)
+			require.Nil(t, refreshed)
+			require.Empty(t, api.sinkAuthorizations(), "the redirect's target is never asked")
+		})
+	}
+}
+
+func TestRefreshTeamsFollowsNoRedirectOfTheTeamsRead(t *testing.T) {
+	for _, status := range redirectStatuses {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			api := startRedirectingAPI(t)
+			environment := newTestEnvironment(t, []fakeprovider.GitHubTeam{{Organization: "acme", Slug: "developers"}}, api.inFrontOf(t))
+			login := environment.login(t)
+			api.redirect("/user/teams", status)
+
+			response := environment.serve(withSessionCookie(t, newRequest(t, http.MethodPost, testExternalURL+"/auth/github/refresh-teams"), login))
+
+			require.Equal(t, http.StatusInternalServerError, response.Code, response.Body.String())
+			outcome := environment.outcomes.last(t)
+			require.Equal(t, auth.ResultError, outcome.Result)
+			require.ErrorContains(t, outcome.Err, "redirect refused")
+			stored := environment.identityOf(t, login)
+			require.Equal(t, []string{"acme/developers"}, stored.Teams)
+			require.NotContains(t, stored.Roles, auth.RoleAdmin)
+			require.Empty(t, api.sinkAuthorizations(), "the redirect's target is never asked")
+		})
+	}
 }
 
 func TestHTTPClientRefusesSessionsWithoutToken(t *testing.T) {
