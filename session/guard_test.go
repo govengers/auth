@@ -917,3 +917,40 @@ func TestGuardRefreshesWhenTheClaimsReplyIsLost(t *testing.T) {
 		})
 	}
 }
+
+func TestGuardRefreshIsDueDespiteApplicationSaves(t *testing.T) {
+	testCases := []struct {
+		name string
+		save func(t *testing.T, current Session)
+	}{
+		{name: "SaveIdentity", save: func(t *testing.T, current Session) {
+			require.NoError(t, current.SaveIdentity(t.Context(), testIdentity()))
+		}},
+		{name: "SwapIdentity", save: func(t *testing.T, current Session) {
+			swapped, err := current.SwapIdentity(t.Context(), testIdentity(), testIdentity())
+			require.NoError(t, err)
+			require.True(t, swapped)
+		}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			refresher := &fakeRefresher{name: "password", refresh: func(*auth.Identity) (*auth.Identity, error) {
+				return nil, &auth.Error{Kind: auth.ErrForbidden, Reason: "removed from the team"}
+			}}
+			fixture := newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
+			request := login(t, fixture.store, testIdentity())
+			current, err := fixture.store.Open(request)
+			require.NoError(t, err)
+			fixture.clock.advance(50 * time.Second)
+			testCase.save(t, current) // more often than RefreshInterval
+			require.Equal(t, http.StatusNoContent, serveGuarded(fixture.guard.RequireAPI(), request).recorder.Code)
+			fixture.clock.advance(50 * time.Second)
+			testCase.save(t, current)
+
+			result := serveGuarded(fixture.guard.RequireAPI(), request)
+
+			require.Equal(t, 1, refresher.callCount(), "due 100 s after the login, saves or not")
+			require.Equal(t, http.StatusForbidden, result.recorder.Code)
+		})
+	}
+}

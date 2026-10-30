@@ -435,7 +435,8 @@ func (s Session) Put(ctx context.Context, key string, value []byte, ttl time.Dur
 func (s Session) Get(ctx context.Context, key string) ([]byte, bool, error)
 func (s Session) Pop(ctx context.Context, key string) ([]byte, bool, error)
 // SaveIdentity stores identity under key "identity". The first save of a session sets authenticatedAt to the
-// time Start issued it; later saves (refresh, TOTP enable, impersonation) keep it. refreshedAt=now.
+// time Start issued it; later saves (TOTP enable, impersonation) keep it and refreshedAt: they verify nothing,
+// so only the login and a Guard refresh may postpone the next refresh (D44).
 // TTL = authenticatedAt + MaximumAge - now; a ttl <= 0 refuses with ErrUnauthenticated.
 // Only a handle returned by Store.Start may have a first save, and only one (copies of the handle included):
 // without a live identity (never authenticated, expired, revoked) any other save refuses with ErrUnauthenticated,
@@ -449,7 +450,7 @@ func (s Session) Identity(ctx context.Context) (*auth.Identity, error)
 // SwapIdentity saves identity in place of previous (an identity Identity returned) only while the session still
 // holds an identity equal to it (same JSON, so nil and empty fields are equal); swapped is false when another request
 // saved a different one or changed the session between the read and the swap (Backend.CompareAndSwap on the sealed
-// envelope read). It keeps authenticatedAt and the expiry, refreshedAt=now. A session without a live identity refuses
+// envelope read). It keeps authenticatedAt, the expiry and refreshedAt, like SaveIdentity. A session without a live identity refuses
 // with ErrUnauthenticated, like Identity; a nil identity is an error. For read-modify-write saves that must not
 // overwrite a concurrent change (github refresh-teams; the Guard keeps its own claim on the whole envelope).
 func (s Session) SwapIdentity(ctx context.Context, previous, identity *auth.Identity) (bool, error)
@@ -1514,6 +1515,7 @@ Decisions taken during implementation (29.10.2026, settled by the lead):
 | D41 | After the agent-docs pass (30.10.2026): `session.Store.SameSite()`; `oidc.New` and `github.New` refuse a store whose cookie is SameSite Strict. Password-only stores may keep Strict. | A Strict cookie is withheld on the redirect back from the IdP or GitHub, so every callback failed with `login_expired` at runtime instead of at startup (the binary already refused `SESSION_SAME_SITE=strict`, D32). |
 | D42 | After security audit run 2: `MemoryBackend` keeps its sessions in a min-heap by expiry (`container/heap`), so a write into a full backend drops expired entries and evicts the soonest expiring in O(log n) each; eviction order is unchanged (exact soonest first, not sampled). The docs say the memory backend is not built for anonymous login floods. | Each eviction scanned every session twice under the one mutex every `Get` takes: about 100000 anonymous login starts filled the default backend, then every further start held the lock for about 60 ms and stalled all users. A heap keeps the documented eviction order and its tests truthful; sampled eviction would have changed both. |
 | D43 | After security audit run 2: the Redis backend's `Get`, `Pop` and `CompareAndSwap` count a value only while the session's index set lists it, checked atomically in Lua (`getScript` replaces the plain `GET`). The index TTL is never shorter than a value's (`putScript` only extends it, `swapScript` keeps the value's TTL, `popScript` removes the entry). The wiki names `noeviction` (or `volatile-ttl`) as the session Redis's `maxmemory-policy`. | `revokeScript` finds the values only through the index: under an evicting policy an idle index could go first, then a logout deleted nothing and wrote no marker while `GET` still found the identity, so the logged-out cookie kept authenticating. Failing closed turns that eviction into a logout. Existing sessions are unaffected: every v1.0.0 `Put` indexed its value. |
+| D44 | After security audit run 2, session hardening: `SaveIdentity` and `SwapIdentity` keep `refreshedAt` (only the first save and the Guard's refresh set it), rather than the Guard also keying on `verifiedAt`. | They set `refreshedAt` without asking a provider, and the Guard's refresh is due by `refreshedAt` alone, so application saves more frequent than `RefreshInterval` suppressed the Refresher and with it the `MaximumUnverifiedAge` cutoff for good. Also checking `verifiedAt` would still have let such saves postpone a refusal (a removed team member) up to `MaximumUnverifiedAge`; keeping `refreshedAt` the Guard's own clock refreshes every interval. |
 
 ---
 

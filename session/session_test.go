@@ -186,7 +186,7 @@ func TestIdentityExpiresAbsolutely(t *testing.T) {
 	envelope, err := current.envelope(ctx)
 	require.NoError(t, err)
 	require.Equal(t, authenticatedAt, envelope.AuthenticatedAt, "later saves keep authenticatedAt")
-	require.Equal(t, clock.now(), envelope.RefreshedAt)
+	require.Equal(t, authenticatedAt, envelope.RefreshedAt, "and refreshedAt: only the Guard's refresh moves it")
 	require.Equal(t, updated, envelope.Identity)
 
 	clock.advance(time.Hour - time.Second)
@@ -351,7 +351,7 @@ func TestSwapIdentity(t *testing.T) {
 	updated := testIdentity()
 	updated.Teams = []string{"acme/admins"}
 	clock.advance(time.Hour)
-	require.NoError(t, current.SaveIdentity(ctx, previous), "moves only refreshedAt, like a Guard claim: no conflict")
+	require.NoError(t, current.SaveIdentity(ctx, previous), "stores an equal identity: no conflict")
 
 	swapped, err := current.SwapIdentity(ctx, previous, updated)
 
@@ -361,7 +361,7 @@ func TestSwapIdentity(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, updated, envelope.Identity)
 	require.Equal(t, authenticatedAt, envelope.AuthenticatedAt, "the lifetime is kept")
-	require.Equal(t, clock.now(), envelope.RefreshedAt)
+	require.Equal(t, authenticatedAt, envelope.RefreshedAt, "refreshedAt is kept")
 
 	swapped, err = current.SwapIdentity(ctx, previous, testIdentity())
 	require.NoError(t, err)

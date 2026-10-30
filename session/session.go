@@ -112,8 +112,8 @@ func (s Session) Pop(ctx context.Context, key string) ([]byte, bool, error) {
 }
 
 // SaveIdentity stores identity under key "identity". The first save of a session sets authenticatedAt to
-// the time Start issued it; later saves (refresh, TOTP enable, impersonation) keep it. refreshedAt=now.
-// TTL = authenticatedAt + MaximumAge - now. Only a session returned by Start may have a first save, and only
+// the time Start issued it; later saves (TOTP enable, impersonation) keep it and refreshedAt: they verify
+// nothing, so only the login and a Guard refresh may postpone the next refresh. TTL = authenticatedAt + MaximumAge - now. Only a session returned by Start may have a first save, and only
 // one: without a live identity (never authenticated, expired, revoked) any other save refuses with
 // ErrUnauthenticated, so neither a planted cookie, a save racing the expiry nor a retained Start handle gets
 // a fresh lifetime. A later save swaps against the identity it read, so a save racing a logout cannot write
@@ -130,7 +130,7 @@ func (s Session) SaveIdentity(ctx context.Context, identity *auth.Identity) erro
 		if err != nil {
 			return err
 		}
-		stored.Identity, stored.RefreshedAt = identity, s.store.now()
+		stored.Identity = identity
 		_, swapped, err := s.swapEnvelope(ctx, stored)
 		if err != nil || swapped {
 			return err
@@ -163,8 +163,8 @@ func (s Session) Identity(ctx context.Context) (*auth.Identity, error) {
 
 // SwapIdentity saves identity in place of previous (an identity Identity returned) only while the session
 // still holds an identity equal to it (same JSON); swapped is false when another request saved a different
-// one meanwhile or changed the session between the read and the swap. It keeps authenticatedAt and the
-// expiry, refreshedAt=now. A session without a live identity refuses with ErrUnauthenticated, like Identity.
+// one meanwhile or changed the session between the read and the swap. It keeps authenticatedAt, the
+// expiry and refreshedAt, like SaveIdentity. A session without a live identity refuses with ErrUnauthenticated, like Identity.
 func (s Session) SwapIdentity(ctx context.Context, previous, identity *auth.Identity) (bool, error) {
 	if identity == nil {
 		return false, errors.New("swap session identity: identity is nil")
@@ -177,7 +177,7 @@ func (s Session) SwapIdentity(ctx context.Context, previous, identity *auth.Iden
 	if err != nil || !same {
 		return false, err
 	}
-	stored.Identity, stored.RefreshedAt = identity, s.store.now()
+	stored.Identity = identity
 	_, swapped, err := s.swapEnvelope(ctx, stored)
 	return swapped, err
 }

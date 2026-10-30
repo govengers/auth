@@ -46,7 +46,7 @@ Tested excerpt of a Guard in front of API and UI routes ([session/example_test.g
 
 ## Refresh
 
-The Guard calls a provider's `Refresher` for identities whose last refresh is older than `RefreshInterval`, once per interval per session, detached from the request (30 s bound). `auth.ErrUnauthenticated` or `auth.ErrForbidden` from it ends the session; any other error keeps the identity until `MaximumUnverifiedAge` since the last successful check, then ends it. A refresh never overwrites a change saved while it ran.
+The Guard calls a provider's `Refresher` for identities whose last refresh is older than `RefreshInterval`, once per interval per session, detached from the request (30 s bound). Only the login and the Guard's own refresh count: `SaveIdentity` and `SwapIdentity` verify nothing and keep the last refresh time, so frequent application saves cannot postpone the Refresher or the `MaximumUnverifiedAge` cutoff. `auth.ErrUnauthenticated` or `auth.ErrForbidden` from it ends the session; any other error keeps the identity until `MaximumUnverifiedAge` since the last successful check, then ends it. A refresh never overwrites a change saved while it ran.
 
 - `password`: re-reads the user; a deleted user loses the session. Updates `Username` and `Email` only.
 - `github`: refetches teams; outside every allowed team or token revoked ends the session; admin role follows `AdminTeams`.
