@@ -4,7 +4,7 @@ Deployment reference of the forward-auth image `ghcr.io/govengers/forwardauth`: 
 
 ## Image
 
-`ghcr.io/govengers/forwardauth` (about 22 MB, distroless `static-debian13`, non-root, `linux/amd64` and `linux/arm64`, ports 8080 and 9090) runs one provider, `PROVIDER=oidc` or `PROVIDER=github`, in front of any app behind Traefik. Tags: `:1.0.0`, `:1.0`, `:1` and `:latest` per release, `:main` from the main branch. Traefik calls `GET /auth/ui` (browsers) or `GET /auth/api` (APIs) for each request. 200 lets the request through, with a signed JWT in `Authorization` when `JWT_ENABLED`; anything else (302 to the login, 401, 403) goes to the client. Password login is not offered (Traefik's `basicAuth` covers static users). One instance serves one external origin. Without Redis it is a single replica.
+`ghcr.io/govengers/forwardauth` (about 22 MB, distroless `static-debian13`, non-root, `linux/amd64` and `linux/arm64`, ports 8080 and 9090) runs one provider, `PROVIDER=oidc` or `PROVIDER=github`, in front of any app behind Traefik. Tags: `:1.1.0`, `:1.1`, `:1` and `:latest` per release, `:main` from the main branch. Traefik calls `GET /auth/ui` (browsers) or `GET /auth/api` (APIs) for each request. 200 lets the request through, with a signed JWT in `Authorization` when `JWT_ENABLED`; anything else (302 to the login, 401, 403) goes to the client. Password login is not offered (Traefik's `basicAuth` covers static users). One instance serves one external origin. Without Redis it is a single replica.
 
 ## Quick start (docker compose)
 
@@ -23,7 +23,7 @@ services:
     volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
 
   forwardauth:
-    image: ghcr.io/govengers/forwardauth:1.0.0
+    image: ghcr.io/govengers/forwardauth:1.1.0
     environment:
       PROVIDER: oidc
       EXTERNAL_URL: http://app.localhost
@@ -244,7 +244,7 @@ Values without a default are required. *not empty* marks values with a default t
 | `JWT_LIFETIME_SECONDS` | `300` | | | 1 to 86400 |
 | `JWT_HEADER` | `Authorization` | not empty | | value `Bearer <jwt>`; list the header in `authResponseHeaders`; a header name, not `Cache-Control`, `Set-Cookie`, `Connection`, `Content-Length`, `Transfer-Encoding`, `Cookie` or `Host` |
 
-The token carries `iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`, `provider`, `user_id`, `preferred_username`, `name`, `email`, `picture`, `roles`, `realm_roles`, `client_roles`, `groups`, `teams`, `permissions` (empty ones omitted) and every other claim of the OIDC ID token; ID token claims with these names (and `nonce`, `at_hash`, `c_hash`, `auth_time`, `sid`, `azp`, and Keycloak's raw `realm_access` and `resource_access`, which the token carries as `realm_roles` and `client_roles`) are never copied, in any letter case, so an IdP `roles` or `Roles` claim cannot become application roles. For GitHub, `sub` is the numeric user ID and the login is `preferred_username`. Verify it in your backend as shown in [JWT](JWT.md).
+The token carries `iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`, `provider`, `user_id`, `preferred_username`, `name`, `email`, `picture`, `roles`, `realm_roles`, `client_roles`, `groups`, `teams`, `permissions` (empty ones omitted), `act` (the impersonator's `sub`, `provider` and `user_id`, only for a session an application's `session.Impersonator` started on a shared store) and every other claim of the OIDC ID token; ID token claims with these names (and `nonce`, `at_hash`, `c_hash`, `auth_time`, `sid`, `azp`, and Keycloak's raw `realm_access` and `resource_access`, which the token carries as `realm_roles` and `client_roles`) are never copied, in any letter case, so an IdP `roles` or `Roles` claim cannot become application roles. For GitHub, `sub` is the numeric user ID and the login is `preferred_username`. Verify it in your backend as shown in [JWT](JWT.md).
 
 ## Operations
 

@@ -17,9 +17,11 @@ const (
 	ActionTOTPSetup          Action = "totp_setup"
 	ActionTOTPEnable         Action = "totp_enable"
 	ActionTOTPDisable        Action = "totp_disable"
-	ActionRefreshTeams       Action = "refresh_teams" // github route
-	ActionAuthenticate       Action = "authenticate"  // per request: Guard, apikey, jwt verifier
-	ActionRefresh            Action = "refresh"       // Guard calling a Refresher
+	ActionRefreshTeams       Action = "refresh_teams"       // github route
+	ActionAuthenticate       Action = "authenticate"        // per request: Guard, apikey, jwt verifier
+	ActionRefresh            Action = "refresh"             // Guard calling a Refresher
+	ActionImpersonationStart Action = "impersonation_start" // session.Impersonator; Identity is the impersonating one on success
+	ActionImpersonationStop  Action = "impersonation_stop"
 )
 
 // Result is how an action ended.

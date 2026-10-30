@@ -20,6 +20,7 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/fakeprovider"
+	"github.com/govengers/auth/internal/sessiontest"
 	"github.com/govengers/auth/session"
 )
 
@@ -869,10 +870,7 @@ func TestRefreshTeamsRefusesACrossSiteRequest(t *testing.T) {
 func TestRefreshTeamsKeepsTheImpersonatedIdentity(t *testing.T) {
 	environment := newTestEnvironment(t, defaultTestTeams(), nil)
 	login := environment.login(t)
-	current := environment.sessionOf(t, login)
-	admin, err := current.Identity(t.Context())
-	require.NoError(t, err)
-	require.NoError(t, current.SaveIdentity(t.Context(), &auth.Identity{Provider: "password", Subject: "user-1", Active: true, Impersonator: admin}))
+	sessiontest.Impersonate(t, environment.store, withSessionCookie(t, newRequest(t, http.MethodGet, testExternalURL+"/"), login), &auth.Identity{Provider: "password", Subject: "user-1", Active: true})
 	environment.fake.SetTeams([]fakeprovider.GitHubTeam{{Organization: "acme", Slug: "developers"}})
 
 	response := environment.serve(withSessionCookie(t, newRequest(t, http.MethodPost, testExternalURL+"/auth/github/refresh-teams"), login))
@@ -895,25 +893,25 @@ func TestRefreshTeamsKeepsAConcurrentSave(t *testing.T) {
 	testCases := []struct {
 		name          string
 		impersonating bool
-		save          func(stored *auth.Identity) *auth.Identity // what the other request saves
-		want          func(stored *auth.Identity) *auth.Identity // the identity stored and answered
+		save          func(t *testing.T, environment *testEnvironment, login *httptest.ResponseRecorder, stored *auth.Identity) // what the other request does
+		want          func(stored *auth.Identity) *auth.Identity                                                                // the identity stored and answered
 	}{
-		{name: "deactivation", save: deactivated, want: func(stored *auth.Identity) *auth.Identity {
+		{name: "deactivation", save: saved(deactivated), want: func(stored *auth.Identity) *auth.Identity {
 			want := deactivated(stored)
 			want.Teams, want.Roles = []string{"acme/developers"}, nil
 			return want
 		}},
-		{name: "permission removed", save: func(stored *auth.Identity) *auth.Identity {
+		{name: "permission removed", save: saved(func(stored *auth.Identity) *auth.Identity {
 			changed := stored.Clone()
 			changed.Permissions = nil
 			return changed
-		}, want: func(stored *auth.Identity) *auth.Identity {
+		}), want: func(stored *auth.Identity) *auth.Identity {
 			want := stored.Clone()
 			want.Permissions, want.Teams, want.Roles = nil, []string{"acme/developers"}, nil
 			return want
 		}},
-		{name: "impersonation stopped", impersonating: true, save: func(stored *auth.Identity) *auth.Identity {
-			return stored.Impersonator
+		{name: "impersonation stopped", impersonating: true, save: func(t *testing.T, environment *testEnvironment, login *httptest.ResponseRecorder, _ *auth.Identity) {
+			sessiontest.StopImpersonating(t, environment.store, withSessionCookie(t, newRequest(t, http.MethodGet, testExternalURL+"/"), login))
 		}, want: func(stored *auth.Identity) *auth.Identity {
 			want := stored.Impersonator.Clone()
 			want.Teams, want.Roles = []string{"acme/developers"}, nil
@@ -932,15 +930,13 @@ func TestRefreshTeamsKeepsAConcurrentSave(t *testing.T) {
 				}
 			})
 			login := environment.login(t)
-			current := environment.sessionOf(t, login)
 			stored := environment.identityOf(t, login)
 			if testCase.impersonating {
-				stored = &auth.Identity{Provider: "password", Subject: "user-1", Active: true, Impersonator: stored}
-				require.NoError(t, current.SaveIdentity(t.Context(), stored))
+				stored = sessiontest.Impersonate(t, environment.store, withSessionCookie(t, newRequest(t, http.MethodGet, testExternalURL+"/"), login), &auth.Identity{Provider: "password", Subject: "user-1", Active: true})
 			}
 			environment.fake.SetTeams([]fakeprovider.GitHubTeam{{Organization: "acme", Slug: "developers"}})
 			transport.set(func() {
-				require.NoError(t, current.SaveIdentity(t.Context(), testCase.save(stored)))
+				testCase.save(t, environment, login, stored)
 			})
 
 			response := environment.serve(withSessionCookie(t, newRequest(t, http.MethodPost, testExternalURL+"/auth/github/refresh-teams"), login))
@@ -953,6 +949,13 @@ func TestRefreshTeamsKeepsAConcurrentSave(t *testing.T) {
 			require.Equal(t, auth.NewIdentityResponse(want), body)
 			require.Equal(t, auth.ResultSuccess, environment.outcomes.last(t).Result)
 		})
+	}
+}
+
+// saved returns a concurrent request that saves what change makes of the stored identity.
+func saved(change func(stored *auth.Identity) *auth.Identity) func(*testing.T, *testEnvironment, *httptest.ResponseRecorder, *auth.Identity) {
+	return func(t *testing.T, environment *testEnvironment, login *httptest.ResponseRecorder, stored *auth.Identity) {
+		require.NoError(t, environment.sessionOf(t, login).SaveIdentity(t.Context(), change(stored)))
 	}
 }
 

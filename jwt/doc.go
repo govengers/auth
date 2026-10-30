@@ -13,12 +13,16 @@
 //	preferred_username, name, email, picture         Identity.Username, Name, Email, Picture
 //	roles, realm_roles, client_roles, groups, teams  Identity.Roles, OIDCRoles, OIDCClientRoles, Groups, Teams (JSON arrays)
 //	permissions                                      Identity.Permissions as text forms (["builds:write","*:read"])
+//	act                                              while impersonating (RFC 8693): {"sub", "provider", "user_id"}
+//	                                                 of Identity.Impersonator
 //	any other key of Identity.Claims                 copied, except nonce, at_hash, c_hash, auth_time, sid, azp,
-//	                                                 realm_access, resource_access
+//	                                                 realm_access, resource_access, act
 //
-// Sign fails on an invalid permission. Verify reads the same claims back, sets Active and puts all claims
-// of the token into Identity.Claims; permission entries that are not strings or do not parse are dropped.
-// Attributes, Data and Impersonator are not carried.
+// Sign fails on an invalid permission and refuses an inactive identity or impersonator. Verify reads the same
+// claims back, sets Active and puts all claims of the token into Identity.Claims; permission entries that are
+// not strings or do not parse are dropped. An act claim becomes an active Impersonator with only Subject,
+// Provider and UserID, so a check wrapped in authorization.Real sees no roles or permissions of it.
+// Attributes and Data are not carried.
 //
 // The package never logs and starts no goroutines: the Verifier refreshes its keys lazily inside Verify.
 package jwt

@@ -43,7 +43,9 @@ type identityEnvelope struct {
 	AuthenticatedAt time.Time      `json:"authenticatedAt"`
 	RefreshedAt     time.Time      `json:"refreshedAt"`
 	VerifiedAt      time.Time      `json:"verifiedAt"` // the login or the last successful Guard refresh; see verifiedAt
-	sealed          []byte         // the stored value it was read from or swapped in (never encoded): what swapEnvelope compares
+	// ImpersonationEndsAt is when the Guard ends the impersonation Identity holds; zero when it holds none.
+	ImpersonationEndsAt time.Time `json:"impersonationEndsAt,omitzero"`
+	sealed              []byte    // the stored value it was read from or swapped in (never encoded): what swapEnvelope compares
 }
 
 // verifiedAt is when a provider last vouched for the identity; an envelope stored before VerifiedAt
@@ -53,6 +55,12 @@ func (e identityEnvelope) verifiedAt() time.Time {
 		return e.AuthenticatedAt
 	}
 	return e.VerifiedAt
+}
+
+// impersonationOver reports whether the envelope holds an impersonation whose time is up. One without an
+// end (saved by an application before the Impersonator existed) is over as well.
+func (e identityEnvelope) impersonationOver(now time.Time) bool {
+	return e.Identity.Impersonator != nil && !now.Before(e.ImpersonationEndsAt)
 }
 
 // Put seals value and stores it under key for ttl (positive). A revoked session refuses with ErrUnauthenticated.
@@ -112,12 +120,14 @@ func (s Session) Pop(ctx context.Context, key string) ([]byte, bool, error) {
 }
 
 // SaveIdentity stores identity under key "identity". The first save of a session sets authenticatedAt to
-// the time Start issued it; later saves (TOTP enable, impersonation) keep it and refreshedAt: they verify
+// the time Start issued it; later saves (TOTP enable, application changes) keep it and refreshedAt: they verify
 // nothing, so only the login and a Guard refresh may postpone the next refresh. TTL = authenticatedAt + MaximumAge - now. Only a session returned by Start may have a first save, and only
 // one: without a live identity (never authenticated, expired, revoked) any other save refuses with
 // ErrUnauthenticated, so neither a planted cookie, a save racing the expiry nor a retained Start handle gets
 // a fresh lifetime. A later save swaps against the identity it read, so a save racing a logout cannot write
 // the identity back even where the backend forgot the revocation (a full MemoryBackend).
+// A save never changes who the session belongs to: the first one refuses an impersonating identity, a later
+// one an identity or impersonator of another provider or subject than the stored ones (see Impersonator).
 func (s Session) SaveIdentity(ctx context.Context, identity *auth.Identity) error {
 	if identity == nil {
 		return errors.New("save session identity: identity is nil")
@@ -125,9 +135,15 @@ func (s Session) SaveIdentity(ctx context.Context, identity *auth.Identity) erro
 	for range saveAttempts {
 		stored, err := s.envelope(ctx)
 		if s.start != nil && errors.Is(err, auth.ErrUnauthenticated) {
+			if identity.Impersonator != nil {
+				return errors.New("save session identity: a login cannot impersonate; use session.Impersonator")
+			}
 			return s.saveFirstIdentity(ctx, identity, err)
 		}
 		if err != nil {
+			return err
+		}
+		if err := checkPrincipals(stored.Identity, identity); err != nil {
 			return err
 		}
 		stored.Identity = identity
@@ -165,6 +181,8 @@ func (s Session) Identity(ctx context.Context) (*auth.Identity, error) {
 // still holds an identity equal to it (same JSON); swapped is false when another request saved a different
 // one meanwhile or changed the session between the read and the swap. It keeps authenticatedAt, the
 // expiry and refreshedAt, like SaveIdentity. A session without a live identity refuses with ErrUnauthenticated, like Identity.
+// Like SaveIdentity it never changes who the session belongs to: an identity or impersonator of another
+// provider or subject than the stored ones is an error (see Impersonator).
 func (s Session) SwapIdentity(ctx context.Context, previous, identity *auth.Identity) (bool, error) {
 	if identity == nil {
 		return false, errors.New("swap session identity: identity is nil")
@@ -177,9 +195,75 @@ func (s Session) SwapIdentity(ctx context.Context, previous, identity *auth.Iden
 	if err != nil || !same {
 		return false, err
 	}
+	if err := checkPrincipals(stored.Identity, identity); err != nil {
+		return false, err
+	}
 	stored.Identity = identity
 	_, swapped, err := s.swapEnvelope(ctx, stored)
 	return swapped, err
+}
+
+// checkPrincipals refuses a save of identity over stored that starts, stops or changes an impersonation or
+// replaces the user: only the Impersonator may do the first three, and only a login (Store.Start) the last.
+func checkPrincipals(stored, identity *auth.Identity) error {
+	if !samePrincipal(stored, identity) || !samePrincipal(stored.Impersonator, identity.Impersonator) {
+		return errors.New("save session identity: the identity and its impersonator must keep their provider and subject; start and stop impersonating with session.Impersonator")
+	}
+	return nil
+}
+
+// samePrincipal reports whether two identities have the same provider and subject; two nil identities do.
+func samePrincipal(first, second *auth.Identity) bool {
+	if first == nil || second == nil {
+		return first == second
+	}
+	return first.Provider == second.Provider && first.Subject == second.Subject
+}
+
+// replaceIdentity saves next with its impersonation end in place of previous (an identity the session held),
+// keeping the lifetime and refreshedAt like SwapIdentity. It is how the Impersonator starts and stops: a
+// session that no longer holds previous refuses with ErrConflict.
+func (s Session) replaceIdentity(ctx context.Context, previous, next *auth.Identity, impersonationEndsAt time.Time) error {
+	stored, err := s.envelope(ctx)
+	if err != nil {
+		return err
+	}
+	same, err := sameIdentity(stored.Identity, previous)
+	if err != nil {
+		return err
+	}
+	if same {
+		stored.Identity, stored.ImpersonationEndsAt = next, impersonationEndsAt
+		_, same, err = s.swapEnvelope(ctx, stored)
+	}
+	if err != nil {
+		return err
+	}
+	if !same {
+		return &auth.Error{Kind: auth.ErrConflict, Reason: "session identity changed meanwhile"}
+	}
+	return nil
+}
+
+// endImpersonation saves stored with the impersonation it holds ended (the identity that authenticated in
+// place of the impersonated one) and returns the envelope the session holds now: the saved one, or what
+// another request saved meanwhile. That one still holding an impersonation that is over is ErrConflict.
+func (s Session) endImpersonation(ctx context.Context, stored identityEnvelope) (identityEnvelope, error) {
+	for stored.Identity.Impersonator != nil { // an application may have nested one before the Impersonator existed
+		stored.Identity = stored.Identity.Impersonator
+	}
+	stored.ImpersonationEndsAt = time.Time{}
+	saved, swapped, err := s.swapEnvelope(ctx, stored)
+	if err == nil && !swapped {
+		saved, err = s.envelope(ctx)
+	}
+	switch {
+	case err != nil:
+		return identityEnvelope{}, err
+	case saved.impersonationOver(s.store.now()):
+		return identityEnvelope{}, &auth.Error{Kind: auth.ErrConflict, Reason: "impersonation ended by another request"}
+	}
+	return saved, nil
 }
 
 // sameIdentity compares previous with the stored identity in its stored form (JSON), so nil and empty fields

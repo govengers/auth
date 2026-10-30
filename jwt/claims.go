@@ -14,6 +14,7 @@ import (
 const (
 	claimUserID      = "user_id"
 	claimPermissions = "permissions"
+	claimActor       = "act" // RFC 8693 actor claim: the impersonator
 )
 
 // stringClaim maps a string field of an identity to the claim Sign writes and Verify reads.
@@ -81,7 +82,20 @@ func identityClaims(identity *auth.Identity) (map[string]any, error) {
 		}
 		claims[claimPermissions] = permissions
 	}
+	if identity.Impersonator != nil {
+		claims[claimActor] = actorClaims(identity.Impersonator)
+	}
 	return claims, nil
+}
+
+// actorClaims is the act claim of an impersonated identity: who acts, with its sub, provider and user_id.
+// The impersonator's roles and permissions are not carried: a token grants the impersonated identity's.
+func actorClaims(impersonator *auth.Identity) map[string]any {
+	actor := map[string]any{jwxjwt.SubjectKey: impersonator.Subject, "provider": impersonator.Provider}
+	if impersonator.UserID != uuid.Nil {
+		actor[claimUserID] = impersonator.UserID.String()
+	}
+	return actor
 }
 
 func permissionTexts(permissions []auth.Permission) ([]string, error) {
@@ -100,7 +114,7 @@ func permissionTexts(permissions []auth.Permission) ([]string, error) {
 // when the token has no exact match, so a foreign claim in another case must not ride along.
 func ownedClaim(name string) bool {
 	sameName := func(owned string) bool { return strings.EqualFold(owned, name) }
-	return sameName(claimUserID) || sameName(claimPermissions) ||
+	return sameName(claimUserID) || sameName(claimPermissions) || sameName(claimActor) ||
 		slices.ContainsFunc(uncopiedClaims, sameName) ||
 		slices.ContainsFunc(stringClaims, func(claim stringClaim) bool { return sameName(claim.name) }) ||
 		slices.ContainsFunc(stringListClaims, func(claim stringListClaim) bool { return sameName(claim.name) })
@@ -119,7 +133,20 @@ func identityFromClaims(claims map[string]any) *auth.Identity {
 	}
 	identity.UserID = userID(claims[claimUserID])
 	identity.Permissions = permissions(claims[claimPermissions])
+	identity.Impersonator = actor(claims[claimActor])
 	return identity
+}
+
+// actor returns the impersonator an act claim names: active, with only Subject, Provider and UserID; nil
+// without an act object carrying a string sub.
+func actor(value any) *auth.Identity {
+	claims, _ := value.(map[string]any)
+	subject, _ := claims[jwxjwt.SubjectKey].(string)
+	if subject == "" {
+		return nil
+	}
+	provider, _ := claims["provider"].(string)
+	return &auth.Identity{Provider: provider, Subject: subject, UserID: userID(claims[claimUserID]), Active: true}
 }
 
 // stringList returns the strings of a JSON array claim; non-string elements are skipped.

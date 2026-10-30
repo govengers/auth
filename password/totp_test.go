@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/sessiontest"
 )
 
 const (
@@ -740,18 +741,17 @@ func TestBackupCodesUseTheConfiguredAlphabet(t *testing.T) {
 func TestTOTPRoutesRefuseForeignSessions(t *testing.T) {
 	fixture := newFixture(t, totpOptions())
 	user := fixture.createUser(t, "ada", "")
-	impersonated := identityOf(user)
-	impersonated.Impersonator = &auth.Identity{Provider: "password", Subject: uuid.NewString(), Active: true}
 	inactive := identityOf(user)
 	inactive.Active = false
 
 	testCases := []struct {
-		name       string
-		identity   *auth.Identity // nil: no session
-		wantStatus int
-		wantCode   string
+		name        string
+		identity    *auth.Identity // nil: no session
+		impersonate *auth.Identity // the identity it impersonates; nil: none
+		wantStatus  int
+		wantCode    string
 	}{
-		{name: "impersonating", identity: impersonated, wantStatus: http.StatusForbidden, wantCode: "forbidden"},
+		{name: "impersonating", identity: &auth.Identity{Provider: "password", Subject: uuid.NewString(), Active: true}, impersonate: identityOf(user), wantStatus: http.StatusForbidden, wantCode: "forbidden"},
 		{name: "inactive", identity: inactive, wantStatus: http.StatusForbidden, wantCode: "forbidden"},
 		{name: "another provider", identity: &auth.Identity{Provider: "github", Subject: "42", UserID: user.ID, Active: true}, wantStatus: http.StatusUnauthorized, wantCode: "unauthenticated"},
 		{name: "deleted user", identity: identityOf(&User{ID: uuid.New()}), wantStatus: http.StatusUnauthorized, wantCode: "unauthenticated"},
@@ -762,6 +762,9 @@ func TestTOTPRoutesRefuseForeignSessions(t *testing.T) {
 			browser := fixture.newClient(t)
 			if testCase.identity != nil {
 				browser = fixture.clientWith(t, testCase.identity)
+			}
+			if testCase.impersonate != nil {
+				sessiontest.Impersonate(t, fixture.sessions, browser.cookieRequest("/"), testCase.impersonate)
 			}
 			requireRefusal(t, browser.get(statusPath), testCase.wantStatus, testCase.wantCode)
 			requireRefusal(t, browser.post(setupPath, map[string]any{}), testCase.wantStatus, testCase.wantCode)

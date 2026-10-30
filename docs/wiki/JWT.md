@@ -22,7 +22,7 @@ Tested ([jwt/example_test.go](../../jwt/example_test.go), `ExampleVerifier`):
 - `Middleware()` reads `Authorization: Bearer <token>` (`HeaderName` to change; scheme in any case, spaces around the token ignored) and answers 401 `unauthenticated` (missing) or `invalid_token` (invalid), with `WWW-Authenticate: Bearer`. Why a token was refused (expired, issuer mismatch, ...) is in the outcome's Reason, never token content. `Verify(ctx, token)` is the same check as a function.
 - `Verify` checks the signature (with the JWKS key the token's `kid` names, under that key's algorithm), `iss`, `aud`, `exp` (required), `nbf` and `iat` (30 s skew). `sub` becomes `Subject`, `preferred_username` `Username`; `provider`, `user_id`, `name`, `email`, `picture`, `roles`, `realm_roles`, `client_roles`, `groups`, `teams` fill the matching fields, `permissions` fills `Permissions` (entries that do not parse are dropped).
 - On gin: `ginadapter.Middleware(verifier.Middleware())`, then `ginadapter.Require(...)`.
-- The identity comes back `Active`, with `Roles`, `OIDCRoles`, `OIDCClientRoles`, `Groups`, `Teams`, `Permissions` and every claim in `Claims`; `Attributes`, `Data` and `Impersonator` are not carried. Claim table: `go doc github.com/govengers/auth/jwt` ([jwt/doc.go](../../jwt/doc.go)).
+- The identity comes back `Active`, with `Roles`, `OIDCRoles`, `OIDCClientRoles`, `Groups`, `Teams`, `Permissions` and every claim in `Claims`; an `act` claim (RFC 8693, written while impersonating) becomes an active `Impersonator` with only `Subject`, `Provider` and `UserID`, so `authorization.Real(...)` sees none of its roles; `Attributes` and `Data` are not carried. Claim table: `go doc github.com/govengers/auth/jwt` ([jwt/doc.go](../../jwt/doc.go)).
 
 ## Signing
 
