@@ -131,12 +131,12 @@ Set `GOMEMLIMIT` 5-10 % below the container memory limit in your manifests (limi
 | `GET {prefix}/ui` | forward-auth check for browsers: 302 to the login when unauthenticated |
 | `GET {prefix}/api` | forward-auth check for APIs: 401 JSON when unauthenticated |
 | `GET {prefix}/jwks` | public keys of the JWT signer (`JWT_ENABLED`), `Cache-Control: public, max-age=300` |
-| `GET {prefix}/me` | the caller's identity as JSON (`IDENTITY_ENDPOINT_ENABLED`; sessions only, not API keys) |
+| `GET {prefix}/me` | the caller's identity as JSON (`IDENTITY_ENDPOINT_ENABLED`; sessions only, not API keys); an inactive identity gets 403 like on the checks |
 | `GET {prefix}/health` | liveness, 200 `{"status":"ok"}` |
 | `GET {prefix}/ready` | readiness: 200 `{"status":"ok"}`, or 503 `{"code":"unavailable","message":"not ready"}` during shutdown or when the Redis ping (2 s) fails; a failed ping is kept as a wide event, successful probes are sampled |
 | `GET {prefix}/oidc/<OIDC_NAME>/{login,callback,logout,frontchannel-logout}` | OIDC provider |
 | `GET {prefix}/github/{login,callback,logout}`, `POST {prefix}/github/refresh-teams` | GitHub provider |
-| any other path | 404 `{"code":"not_found","message":"not found"}`, also a known route with a trailing `/` (no redirect) |
+| any other path | 404 `{"code":"not_found","message":"not found"}`, also a known route with a trailing `/` (no redirect) or with a percent-encoded character (`{prefix}/%75i`): routes match the path as sent, not the decoded one |
 | `GET /metrics` on `METRICS_PORT` | Prometheus, the only route of that listener; keep this port off Traefik |
 
 Route `{prefix}` to the service with its own Traefik router, minus the checks and probes, as in the labels above: the check endpoints do not dispatch login routes by `X-Forwarded-Uri`. Link users to `{prefix}/oidc/<name>/logout` or `{prefix}/github/logout` to log out; both are plain `GET` links, same-site only: a link from another site (`Sec-Fetch-Site: cross-site`, e.g. a portal on another domain) is refused with 403.

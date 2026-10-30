@@ -149,10 +149,10 @@ func TestChecksPassASessionAndHandTheIdentityOnAsAVerifiableJWT(t *testing.T) {
 func TestChecksRefuseAnInactiveIdentityWithAndWithoutJWT(t *testing.T) {
 	inactive := testIdentity()
 	inactive.Active = false
-	for name, options := range map[string]harnessOptions{"without JWT": {}, "with JWT": {signer: newTestSigner(t)}} {
+	for name, options := range map[string]harnessOptions{"without JWT": {identityEndpoint: true}, "with JWT": {signer: newTestSigner(t), identityEndpoint: true}} {
 		testHarness := newHarness(t, options)
 		cookie := testHarness.signIn(t, inactive)
-		for _, check := range []string{"/auth/ui", "/auth/api"} {
+		for _, check := range []string{"/auth/ui", "/auth/api", "/auth/me"} {
 			t.Run(name+" "+check, func(t *testing.T) {
 				response := testHarness.serve(t, http.MethodGet, check, nil, cookie)
 
@@ -341,6 +341,19 @@ func TestATrailingSlashIsAnUnmatchedRequestNotARedirect(t *testing.T) {
 	require.Equal(t, 3, testHarness.events.count(), "every request has its event")
 	require.Equal(t, "code=redacted&state=redacted", testHarness.events.last(t)["request"].(map[string]any)["query"])
 	require.Equal(t, 3.0, requestCount(t, testHarness.registry, map[string]string{"route": "unmatched", "method": http.MethodGet, "status": "404"}))
+}
+
+func TestPercentEncodedVariantsOfARouteAreUnmatched(t *testing.T) {
+	testHarness := newHarness(t, harnessOptions{})
+	cookie := testHarness.signIn(t, testIdentity())
+
+	for _, target := range []string{"/auth/%75i", "/auth/%72eady", "/auth%2Fui", "/%61uth/api"} {
+		response := testHarness.serve(t, http.MethodGet, target, nil, cookie)
+
+		require.Equal(t, http.StatusNotFound, response.Code, target)
+	}
+	require.Equal(t, http.StatusOK, testHarness.serve(t, http.MethodGet, "/auth/ui", nil, cookie).Code)
+	require.Equal(t, http.StatusOK, testHarness.serve(t, http.MethodGet, "/auth/ready", nil).Code)
 }
 
 // requestCount returns the forwardauth_http_requests_total sample with exactly labels, or fails.

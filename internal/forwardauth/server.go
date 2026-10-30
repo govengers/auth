@@ -191,10 +191,13 @@ func validPort(port int) bool {
 // newEngine builds the gin engine: wide event outermost so it records the final status, then the HTTP
 // metrics, then the sums of the outbound calls, then the panic recovery, then the routes. A trailing
 // "/" is an unmatched route: gin's redirect would answer before the middleware, without event or
-// metric, and print the raw query in debug mode [LOG-009].
+// metric, and print the raw query in debug mode [LOG-009]. Routes match the path as sent (UseRawPath),
+// so a percent-encoded variant such as /auth/%75i is unmatched: a proxy matching the encoded path must
+// not reach a check or the probe it did not route there.
 func (s *Server) newEngine(metrics *httpMetrics) *gin.Engine {
 	engine := gin.New()
 	engine.RedirectTrailingSlash = false
+	engine.UseRawPath = true
 	engine.Use(
 		wideevent.Middleware(
 			wideevent.WithEmitter(latestValues(s.options.Emitter)),
@@ -218,7 +221,7 @@ func (s *Server) registerRoutes(engine *gin.Engine) {
 		engine.GET(s.path("/jwks"), succeeding(s.options.Signer.JWKSHandler()))
 	}
 	if s.options.IdentityEndpoint {
-		engine.GET(s.path("/me"), ginadapter.Middleware(s.options.Guard.RequireAPI()), succeeding(auth.IdentityHandler()))
+		engine.GET(s.path("/me"), ginadapter.Middleware(s.options.Guard.RequireAPI()), requireActive, succeeding(auth.IdentityHandler()))
 	}
 	engine.GET(s.path("/health"), health)
 	engine.GET(s.path("/ready"), s.readiness)
