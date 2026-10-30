@@ -9,6 +9,8 @@
 
 Authentication and authorization for Go services, plus a forward-auth proxy image for Traefik.
 
+Coding agents: start at [llms.txt](llms.txt) and [docs/wiki/Home.md](docs/wiki/Home.md); runnable servers are in [examples/](examples/).
+
 Every provider (password, OIDC incl. Keycloak, GitHub OAuth, API key, JWT) produces the same `auth.Identity`. Redirect and password logins store it in one server-side session (the cookie carries a random ID only). One `session.Guard` turns a request with a session into a request with an identity in its `context.Context`, or refuses it: 401 JSON for APIs, 302 to the login URL for UIs. Authorization is a plain `func(context.Context) error` over that identity: roles, groups, teams and resource permissions (`builds:write`). The core packages are `net/http` only; gin, the wide-event logger and Prometheus stay in adapter packages. It replaces `mxcd/go-basicauth`, `mxcd/oidc-fwd-auth` and `mxcd/github-fwd-auth` ([migration guide](docs/migration.md)).
 
 ## Installation
