@@ -651,7 +651,7 @@ func validateSession(configuration *Configuration) error {
 	if !configuration.SessionInsecureCookie && !redirect.IsSecureURL(configuration.ExternalURL) {
 		problems = append(problems, errors.New("EXTERNAL_URL is plain http on a host that is not loopback: browsers drop the Secure session cookie; use https or set SESSION_INSECURE_COOKIE=true (development only)"))
 	}
-	if configuration.SessionInsecureCookie && strings.HasPrefix(configuration.ExternalURL, "https://") {
+	if configuration.SessionInsecureCookie && isHTTPS(configuration.ExternalURL) {
 		problems = append(problems, errors.New("SESSION_INSECURE_COOKIE=true with an https EXTERNAL_URL: Secure cookies work on https; unset SESSION_INSECURE_COOKIE"))
 	}
 	problems = append(problems,
@@ -664,6 +664,12 @@ func validateSession(configuration *Configuration) error {
 		problems = append(problems, requireValues("SESSION_REDIS_ENABLED=true", namedValue{"SESSION_REDIS_ADDRESS", configuration.SessionRedisAddress}))
 	}
 	return errors.Join(problems...)
+}
+
+// isHTTPS reports whether rawURL's scheme is https in any letter case: url.Parse lower-cases it.
+func isHTTPS(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	return err == nil && parsed.Scheme == "https"
 }
 
 // validateAPIKeys parses API_KEYS and API_KEY_PERMISSIONS when API_KEYS_ENABLED and lets apikey.New

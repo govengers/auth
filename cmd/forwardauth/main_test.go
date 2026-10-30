@@ -151,6 +151,12 @@ func TestValidateConfigurationNamesEveryProblem(t *testing.T) {
 			configuration.KeycloakRequiredRealmRoles, configuration.KeycloakRequiredGroups = []string{"reader"}, []string{"/engineering"}
 		}, problems: []string{"KEYCLOAK_REQUIRED_REALM_ROLES is set but KEYCLOAK_ENABLED=false", "KEYCLOAK_REQUIRED_GROUPS is set but KEYCLOAK_ENABLED=false"}},
 		{name: "insecure cookie on https", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.SessionInsecureCookie = true }, problems: []string{"SESSION_INSECURE_COOKIE=true with an https EXTERNAL_URL"}},
+		{name: "insecure cookie on upper-case HTTPS", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
+			configuration.SessionInsecureCookie, configuration.ExternalURL = true, "HTTPS://app.example.com"
+		}, problems: []string{"SESSION_INSECURE_COOKIE=true with an https EXTERNAL_URL"}},
+		{name: "insecure cookie on mixed-case HtTpS", configuration: validOIDCConfiguration, change: func(configuration *Configuration) {
+			configuration.SessionInsecureCookie, configuration.ExternalURL = true, "HtTpS://app.example.com"
+		}, problems: []string{"SESSION_INSECURE_COOKIE=true with an https EXTERNAL_URL"}},
 		{name: "jwt lifetime beyond a day", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTLifetimeSeconds = 86401 }, problems: []string{"JWT_LIFETIME_SECONDS 86401 must be between 1 and 86400"}},
 		{name: "jwt without key", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTEnabled = true }, problems: []string{"JWT_PRIVATE_KEY"}},
 		{name: "jwt header that is no header name", configuration: validOIDCConfiguration, change: func(configuration *Configuration) { configuration.JWTHeader = "X Auth" }, problems: []string{"JWT_HEADER \"X Auth\" is not an HTTP header name"}},
