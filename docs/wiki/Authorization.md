@@ -14,7 +14,7 @@ An `authorization.Check` is `func(ctx context.Context) error` over the `auth.Ide
 | `Teams` | `github` |
 | `Permissions` | API keys, the JWT `permissions` claim, your `OnLogin` hook; browser sessions have none by default |
 | `Claims`, `Attributes`, `Data` | ID token or JWT claims, Keycloak attributes, your hooks; never in `IdentityResponse` |
-| `Impersonator` | your code, while one identity acts as another |
+| `Impersonator` | `session.Impersonator` while one identity acts as another ([Sessions](Sessions.md#impersonation)); a JWT's `act` claim |
 
 Read it with `auth.IdentityFrom(ctx)` (nil without one); never mutate it, `Clone()` first.
 

@@ -276,10 +276,11 @@ func (s *Server) checkChain(guard func(http.Handler) http.Handler) []gin.Handler
 	return append(chain, forward)
 }
 
-// requireActive refuses an inactive identity with 403, with or without JWT: the Guard and the API keys pass
-// any identity they find, and a check answering 200 lets Traefik forward the request.
+// requireActive refuses an inactive identity, or one whose impersonator is inactive, with 403, with or without
+// JWT: the Guard and the API keys pass any identity they find, and a check answering 200 lets Traefik forward
+// the request.
 func requireActive(ginContext *gin.Context) {
-	if identity := auth.IdentityFrom(ginContext.Request.Context()); identity != nil && identity.Active {
+	if identity := auth.IdentityFrom(ginContext.Request.Context()); identity != nil && identity.Active && identity.Real().Active {
 		return
 	}
 	err := &auth.Error{Kind: auth.ErrForbidden, Reason: auth.ReasonInactive}

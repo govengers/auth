@@ -61,7 +61,8 @@ type GuardOptions struct {
 }
 
 // Guard authenticates requests by their session: it puts the stored identity into the request
-// context or refuses the request. One Guard serves every provider. It is safe for concurrent use.
+// context or refuses the request. An impersonation whose MaximumDuration is up ends on the next request, which
+// then carries the impersonator's identity. One Guard serves every provider. It is safe for concurrent use.
 type Guard struct {
 	options    GuardOptions
 	refreshers map[string]Refresher
@@ -174,6 +175,13 @@ func (g *Guard) authenticate(writer http.ResponseWriter, request *http.Request) 
 	stored, err := current.envelope(ctx)
 	if err != nil {
 		return nil, g.reportFailure(ctx, auth.Outcome{Provider: auth.ProviderSession, Action: auth.ActionAuthenticate, Err: err})
+	}
+	if stored.impersonationOver(g.now()) {
+		ended, err := current.endImpersonation(ctx, stored)
+		if err != nil {
+			return nil, g.reportFailure(ctx, auth.Outcome{Provider: stored.Identity.Real().Provider, Action: auth.ActionAuthenticate, Err: err, Identity: stored.Identity})
+		}
+		stored = ended
 	}
 	identity := stored.Identity
 	if g.refreshDue(stored) {

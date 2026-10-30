@@ -26,6 +26,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/sessiontest"
 	"github.com/govengers/auth/jwt"
 	"github.com/govengers/auth/session"
 )
@@ -165,6 +166,30 @@ func TestChecksRefuseAnInactiveIdentityWithAndWithoutJWT(t *testing.T) {
 				require.Contains(t, event["error"], auth.ReasonInactive)
 			})
 		}
+	}
+}
+
+func TestChecksRefuseAnIdentityWhoseImpersonatorIsInactive(t *testing.T) {
+	testHarness := newHarness(t, harnessOptions{signer: newTestSigner(t), identityEndpoint: true})
+	cookie := testHarness.signIn(t, &auth.Identity{Provider: "oidc", Subject: "admin-1", Active: true, Roles: []string{auth.RoleAdmin}})
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	request.AddCookie(cookie)
+	impersonated := sessiontest.Impersonate(t, testHarness.store, request, testIdentity())
+	deactivated := impersonated.Clone()
+	deactivated.Impersonator.Active = false
+	current, err := testHarness.store.Open(request)
+	require.NoError(t, err)
+	swapped, err := current.SwapIdentity(t.Context(), impersonated, deactivated)
+	require.NoError(t, err)
+	require.True(t, swapped)
+
+	for _, check := range []string{"/auth/ui", "/auth/api", "/auth/me"} {
+		t.Run(check, func(t *testing.T) {
+			response := testHarness.serve(t, http.MethodGet, check, nil, cookie)
+
+			require.Equal(t, http.StatusForbidden, response.Code)
+			require.Empty(t, response.Header().Get("Authorization"), "no token for the impersonated identity")
+		})
 	}
 }
 

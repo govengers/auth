@@ -16,7 +16,7 @@
 | `InsecureCookie` | false | drops `Secure`; local plain-http development only |
 | `MaximumAge` | 24 h | absolute lifetime from the login, never extended by activity or refresh |
 
-Application code rarely touches the store directly: `store.Open(request)` returns the `session.Session` handle (for `github.Provider.HTTPClient` or own values via `Put`, `Get`, `Pop`; the key `identity` is reserved). `Session.SwapIdentity` saves a changed identity only while the session still holds the one you read (impersonation, own role changes).
+Application code rarely touches the store directly: `store.Open(request)` returns the `session.Session` handle (for `github.Provider.HTTPClient` or own values via `Put`, `Get`, `Pop`; the key `identity` is reserved). `Session.SwapIdentity` saves a changed identity only while the session still holds the one you read (own role changes). Neither save changes who the session belongs to: both refuse an identity or impersonator of another provider or subject than the stored ones, so only a login replaces the user and only the [Impersonator](#impersonation) starts or stops an impersonation.
 
 ## Guard
 
@@ -51,6 +51,45 @@ The Guard calls a provider's `Refresher` for identities whose last refresh is ol
 - `password`: re-reads the user; a deleted user loses the session, and so does a session opened before the user's password hash or second factor changed ([Password](Password.md#gotchas)). Updates `Username` and `Email` only.
 - `github`: refetches teams; outside every allowed team or token revoked ends the session; admin role follows `AdminTeams`.
 - `oidc`: no refresher; roles and groups are fixed at login.
+
+## Impersonation
+
+`session.NewImpersonator(&session.ImpersonatorOptions{...})` lets an identity act as another one in its own session, for support and admin tools. It is the only way to start or stop an impersonation.
+
+| Option | Default | Note |
+|---|---|---|
+| `Guard` | required | its `Store` holds the sessions; the routes run behind its `RequireAPI` |
+| `Load` | required | `func(ctx, subject) (*auth.Identity, error)`: the target as a login of that user would produce it (your user table, your `OnLogin`); `nil, nil` when there is no such user; `ctx` carries the impersonator, so return an `*auth.Error` to refuse a target (another tenant) |
+| `Actor` | `authorization.IsAdmin()` | who may impersonate |
+| `Target` | `authorization.Not(authorization.IsAdmin())` | who may be impersonated; nobody gains an admin's rights by impersonating one |
+| `MaximumDuration` | 1 h | the Guard ends the impersonation that long after its start, at least 1 s |
+| `PathPrefix` | `/auth/impersonation` | |
+| `Observer` | none | `impersonation_start` and `impersonation_stop` outcomes under the impersonator's provider |
+
+`Routes()`: `POST {PathPrefix}` with `{"subject":"..."}` starts (200, the impersonating identity's `IdentityResponse` with `impersonator` set), `DELETE {PathPrefix}` stops (200, the impersonator's). Both run behind the Guard's `RequireAPI`; the JSON body and the `DELETE` method need a CORS preflight, so a cross-site page cannot send them. Your own handler behind the Guard calls `Start(request, subject)` and `Stop(request)` instead.
+
+Whatever the options say, it refuses: an impersonating identity (409 `already_impersonating`), an inactive impersonator (403), an empty subject (400), no target (400 `unknown_impersonation_target`), the impersonator itself, by provider and subject or by `UserID` (400 `self_impersonation`), an inactive target (403), a session saved by another request since the Guard read it (409), and `Stop` without an impersonation (409 `not_impersonating`). The session keeps its cookie, lifetime and provider values (the GitHub token, the OIDC logout hint); the impersonation ends when stopped, with the session, or after `MaximumDuration`, whichever comes first, and the next request then carries the impersonator. The impersonated identity is the snapshot `Load` returned; the Guard keeps refreshing the impersonator, and every authorization check also requires the impersonator to be active. Logout ends the whole session. `authorization.Real(check)` evaluates the impersonator; `jwt.Signer` carries it as the RFC 8693 `act` claim.
+
+Tested ([session/example_test.go](../../session/example_test.go), `ExampleImpersonator`):
+
+```go
+	users := map[string]*auth.Identity{"user-2": {Provider: "password", Subject: "user-2", Username: "ada", Active: true}}
+	impersonator, err := session.NewImpersonator(&session.ImpersonatorOptions{
+		Guard: guard,
+		// Actor defaults to authorization.IsAdmin(), Target to authorization.Not(authorization.IsAdmin()).
+		Load: func(_ context.Context, subject string) (*auth.Identity, error) {
+			return users[subject].Clone(), nil // your user table and OnLogin; nil: no such user
+		},
+	})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	serveMux := http.NewServeMux()
+	serveMux.Handle("POST /login", adminLoginHandler(store))
+	serveMux.Handle("GET /api/me", guard.RequireAPI()(auth.IdentityHandler()))
+	auth.RegisterRoutes(serveMux, impersonator.Routes()) // POST and DELETE /auth/impersonation
+```
 
 ## Backends
 

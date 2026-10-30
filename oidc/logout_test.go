@@ -16,6 +16,7 @@ import (
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/fakeprovider"
+	"github.com/govengers/auth/internal/sessiontest"
 	"github.com/govengers/auth/oidc"
 	"github.com/govengers/auth/session"
 )
@@ -123,9 +124,7 @@ func TestLogoutWhileImpersonatingUsesTheRealLogin(t *testing.T) {
 	application := newApplication(t, issuer, nil)
 	person := newBrowser(t)
 	require.Equal(t, http.StatusFound, person.signIn(application, prefix+"/login").Code)
-	person.replaceIdentity(application.store, func(impersonator *auth.Identity) *auth.Identity {
-		return &auth.Identity{Provider: "password", Subject: "user-9", Active: true, Impersonator: impersonator}
-	})
+	person.impersonate(application.store, &auth.Identity{Provider: "password", Subject: "user-9", Active: true})
 
 	response := person.get(application.handler, prefix+"/logout", nil)
 
@@ -531,16 +530,12 @@ func (b *browser) plantSession(store *session.Store, identity *auth.Identity) {
 	}), "/", nil)
 }
 
-// replaceIdentity stores change(identity) in the browser's session, keeping the session.
-func (b *browser) replaceIdentity(store *session.Store, change func(identity *auth.Identity) *auth.Identity) {
+// impersonate lets the identity of the browser's session impersonate target, keeping the session.
+func (b *browser) impersonate(store *session.Store, target *auth.Identity) {
 	b.t.Helper()
 	request := httptest.NewRequestWithContext(b.t.Context(), http.MethodGet, "/", nil)
 	for _, cookie := range b.cookies {
 		request.AddCookie(cookie)
 	}
-	current, err := store.Open(request)
-	require.NoError(b.t, err)
-	identity, err := current.Identity(b.t.Context())
-	require.NoError(b.t, err)
-	require.NoError(b.t, current.SaveIdentity(b.t.Context(), change(identity)))
+	sessiontest.Impersonate(b.t, store, request, target)
 }

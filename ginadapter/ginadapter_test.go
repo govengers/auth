@@ -258,10 +258,29 @@ func TestObserve(t *testing.T) {
 			},
 		},
 		{
+			name:    "impersonation start records under auth.impersonation and answers the request",
+			outcome: auth.Outcome{Provider: "password", Action: auth.ActionImpersonationStart, Result: auth.ResultSuccess, Identity: impersonated},
+			want: map[string]any{
+				"auth": map[string]any{"impersonation": map[string]any{
+					"provider": "password", "action": "impersonation_start", "result": "success", "subject": "admin-1", "impersonating": true, "impersonated_subject": "user-7",
+				}},
+				"outcome": "success",
+			},
+		},
+		{
+			name:    "impersonation stop denial records under auth.impersonation",
+			outcome: auth.Outcome{Provider: "password", Action: auth.ActionImpersonationStop, Result: auth.ResultDenied, Err: &auth.Error{Kind: auth.ErrConflict, Code: "not_impersonating"}, Identity: identity},
+			want: map[string]any{
+				"auth":    map[string]any{"impersonation": map[string]any{"provider": "password", "action": "impersonation_stop", "result": "denied", "code": "not_impersonating", "subject": "42"}},
+				"outcome": "failure",
+				"error":   "conflict: not_impersonating",
+			},
+		},
+		{
 			name:    "impersonation records the real subject and the acting user ID",
 			outcome: auth.Outcome{Provider: "session", Action: auth.ActionAuthenticate, Result: auth.ResultSuccess, Identity: impersonated},
 			want: map[string]any{
-				"auth": map[string]any{"provider": "session", "action": "authenticate", "result": "success", "subject": "admin-1", "impersonating": true},
+				"auth": map[string]any{"provider": "session", "action": "authenticate", "result": "success", "subject": "admin-1", "impersonating": true, "impersonated_subject": "user-7"},
 			},
 		},
 		{

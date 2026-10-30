@@ -13,7 +13,7 @@ Core packages never log and never start goroutines; they report outcomes to an o
 | Import `github.com/govengers/auth/...` | Use it for | Page |
 |---|---|---|
 | (root) `auth` | `Identity`, `Permission`, `IdentityFrom`, `Error` + `WriteError` + `ResponseFor`, `Observer`, `Hook`, `Route`, `RegisterRoutes`, `IdentityHandler` | [Errors-and-Observability](Errors-and-Observability.md), [Authorization](Authorization.md) |
-| `session` | `Store` (cookie + server-side values), `Guard` (`RequireAPI`, `RequireUI`), `MemoryBackend`, `Refresher` | [Sessions](Sessions.md) |
+| `session` | `Store` (cookie + server-side values), `Guard` (`RequireAPI`, `RequireUI`), `Impersonator`, `MemoryBackend`, `Refresher` | [Sessions](Sessions.md) |
 | `session/redisbackend` | session backend shared by replicas | [Sessions](Sessions.md) |
 | `password` | username/email + password login, TOTP, registration; you implement `Storage` | [Password](Password.md) |
 | `oidc` | OIDC code flow login (Keycloak, Google, any IdP) and logout | [OIDC](OIDC.md) |
@@ -37,6 +37,7 @@ Importing one provider compiles none of the others' dependencies. Heavy dependen
 - Your service sits behind the forward-auth image (or any `jwt.Signer`): `jwt.Verifier`, no sessions.
 - You cannot change the app, or it is not Go: the [forward-auth image](Forward-Auth.md).
 - More than one replica: `session/redisbackend`.
+- Admins act as a user (support): `session.Impersonator` on the same `Guard`. [Sessions](Sessions.md#impersonation)
 - Several login methods at once: one `Store` and one `Guard`, every provider on that store; an OIDC provider per IdP with distinct `Name`s.
 
 ## Wiring order (session-based providers)
