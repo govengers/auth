@@ -33,7 +33,7 @@ The rules agents and humans get wrong most often, one line each with the page th
 
 ## Known limits
 
-- No rate limiting: rate-limit the password login and TOTP routes at the edge. [Password](Password.md#gotchas)
+- No rate limiting: rate-limit the password login, `POST {prefix}/register` (an anonymous Argon2id, like login) and TOTP routes at the edge. [Password](Password.md#gotchas)
 - No retries, no idle timeout, no key rotation list; changing `EncryptionKey` logs everyone out. [Sessions](Sessions.md#store)
 - `MemoryBackend` is for one replica at non-production scale; use `redisbackend` in production. [Sessions](Sessions.md#backends)
 - A stale `SaveIdentity` from your code can race a Guard refresh; use `Session.SwapIdentity`. [Sessions](Sessions.md#store)
