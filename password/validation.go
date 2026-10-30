@@ -25,8 +25,13 @@ type Policy struct {
 	RequireSpecial   bool // any rune that is neither letter nor digit
 }
 
-// check returns the first rule password breaks, or nil.
-func (p Policy) check(password string) error {
+// Validate returns the first rule password breaks, nil when password satisfies the policy; a zero MinimumLength
+// is the default 12, as in Options. Registration applies the provider's policy itself; check passwords your
+// application sets elsewhere (an administrator account, a password change) with the same Policy.
+func (p Policy) Validate(password string) error {
+	if p.MinimumLength == 0 {
+		p.MinimumLength = defaultMinimumLength
+	}
 	switch {
 	case utf8.RuneCountInString(password) < p.MinimumLength:
 		return fmt.Errorf("password is shorter than %d characters", p.MinimumLength)
@@ -85,7 +90,7 @@ func validateRegistration(registration registerRequest, options Options) error {
 	case registration.Email != nil && !emailPattern.MatchString(*registration.Email):
 		return &auth.Error{Kind: auth.ErrInvalidRequest, Code: codeInvalidEmail, Reason: "malformed email"}
 	}
-	if err := options.Policy.check(registration.Password); err != nil {
+	if err := options.Policy.Validate(registration.Password); err != nil {
 		return &auth.Error{Kind: auth.ErrInvalidRequest, Code: codeWeakPassword, Reason: err.Error()}
 	}
 	return nil
