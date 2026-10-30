@@ -613,14 +613,14 @@ func TestClientControlledEventFieldsAreCut(t *testing.T) {
 	testHarness := newHarness(t, harnessOptions{})
 	long := strings.Repeat("a", 1000)
 
-	testHarness.serve(t, http.MethodGet, "/"+long+"?"+long+"=1", http.Header{
+	testHarness.serve(t, strings.Repeat("M", 32<<10), "/"+long+"?"+long+"=1", http.Header{
 		"User-Agent": {strings.Repeat("€", 400)}, "X-Request-Id": {long},
 		"X-Forwarded-Method": {long}, "X-Forwarded-Host": {long}, "X-Forwarded-Uri": {"/" + long},
 	})
 
 	event := testHarness.events.last(t)
 	request := event["request"].(map[string]any)
-	for _, field := range []string{"path", "query", "id"} {
+	for _, field := range []string{"method", "path", "query", "id"} {
 		require.Len(t, request[field], 512, field)
 	}
 	userAgent := request["user_agent"].(string)
@@ -628,5 +628,26 @@ func TestClientControlledEventFieldsAreCut(t *testing.T) {
 	require.True(t, utf8.ValidString(userAgent))
 	for _, field := range []string{"method", "host", "path"} {
 		require.Len(t, event["forward"].(map[string]any)[field], 512, "forward."+field)
+	}
+}
+
+func TestNeitherEmitterPrintsAnUncutMethod(t *testing.T) {
+	testCases := []struct {
+		name       string
+		newEmitter func(writer io.Writer) wideevent.Emitter
+	}{
+		{name: "dev", newEmitter: func(writer io.Writer) wideevent.Emitter { return wideevent.DevWriterEmitter(writer) }},
+		{name: "json", newEmitter: wideevent.JSONWriterEmitter},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			output := &bytes.Buffer{}
+			testHarness := newHarness(t, harnessOptions{emitter: testCase.newEmitter(output)})
+
+			testHarness.serve(t, strings.Repeat("M", 32<<10), "/unknown", nil)
+
+			require.Contains(t, output.String(), strings.Repeat("M", 512))
+			require.NotContains(t, output.String(), strings.Repeat("M", 513))
+		})
 	}
 }

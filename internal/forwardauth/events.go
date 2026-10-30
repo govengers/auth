@@ -83,6 +83,7 @@ func latestFields(we *wideevent.Event) *wideevent.Event {
 func (s *Server) recordRequest(we *wideevent.Event, ginContext *gin.Context) {
 	request := ginContext.Request
 	we.Str("request.query", truncated(redactedQuery(request.URL.Query()))).
+		Str("request.method", truncated(request.Method)).
 		Str("request.path", truncated(request.URL.Path)).
 		Str("request.host", truncated(request.Host)).
 		Str("request.user_agent", truncated(request.UserAgent())).
