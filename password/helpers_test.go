@@ -239,6 +239,15 @@ func (c *client) get(path string) *httptest.ResponseRecorder {
 	return c.send(httptest.NewRequestWithContext(c.t.Context(), http.MethodGet, path, nil))
 }
 
+// cookieRequest returns a GET request to path carrying the client's cookies, without sending it.
+func (c *client) cookieRequest(path string) *http.Request {
+	request := httptest.NewRequestWithContext(c.t.Context(), http.MethodGet, path, nil)
+	for _, cookie := range c.cookies {
+		request.AddCookie(cookie)
+	}
+	return request
+}
+
 func (c *client) send(request *http.Request) *httptest.ResponseRecorder {
 	c.t.Helper()
 	for _, cookie := range c.cookies {

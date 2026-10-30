@@ -400,6 +400,7 @@ func TestVerifyReturnsEveryIdentityField(t *testing.T) {
 	signer := newTestSigner(t, clock.now)
 	verifier := newTestVerifier(t, testVerifierOptions(newKeySetServer(t, signer.JWKSHandler()).server.URL), clock)
 	userID := uuid.MustParse("6f1c2a52-6c43-4c5e-9d3a-0f3d1c2b4a5e")
+	adminID := uuid.MustParse("0b6f2c1e-7a3d-4c55-9f0e-2d8b1a6c4e71")
 	identity := &auth.Identity{
 		Provider:        "keycloak",
 		Subject:         "subject-1",
@@ -418,7 +419,7 @@ func TestVerifyReturnsEveryIdentityField(t *testing.T) {
 		Attributes:      map[string][]string{"department": {"r&d"}},
 		Claims:          map[string]any{"locale": "de", "nonce": "n-1", "sid": "s-1"},
 		Data:            map[string]any{"app": "value"},
-		Impersonator:    &auth.Identity{Provider: "password", Subject: "admin-1"},
+		Impersonator:    &auth.Identity{Provider: "password", Subject: "admin-1", UserID: adminID, Active: true, Roles: []string{auth.RoleAdmin}},
 	}
 	token, err := signer.Sign(identity)
 	require.NoError(t, err)
@@ -450,7 +451,9 @@ func TestVerifyReturnsEveryIdentityField(t *testing.T) {
 			"email": "ada@example.com", "picture": "https://example.com/ada.png", "roles": []any{auth.RoleAdmin}, "realm_roles": []any{"realm-role"},
 			"client_roles": []any{"client-role"}, "groups": []any{"/engineering"}, "teams": []any{"org/team"},
 			"permissions": []any{"builds:write", "*:read"}, "locale": "de",
+			"act": map[string]any{"sub": "admin-1", "provider": "password", "user_id": adminID.String()},
 		},
+		Impersonator: &auth.Identity{Provider: "password", Subject: "admin-1", UserID: adminID, Active: true},
 	}, verified)
 }
 

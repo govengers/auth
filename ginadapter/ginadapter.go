@@ -72,15 +72,20 @@ func RegisterRoutes(router gin.IRoutes, routes []auth.Route) {
 
 // Observe is an auth.Observer that records the outcome on the request's wide event: auth.provider,
 // auth.action, auth.result, the client code, reason and error of Err, degraded for a success with Err,
-// the subject and user ID of the identity, and the request outcome when the outcome decided it.
+// the subject and user ID of the identity (the impersonator's subject and the impersonated subject while
+// impersonating), and the request outcome when the outcome decided it.
 // A session.Guard reports a refresh on the same event before the request's authenticate outcome, so a
-// refresh outcome goes under auth.refresh.* instead, without the user ID: no key is set twice.
+// refresh outcome goes under auth.refresh.* instead, without the user ID: no key is set twice. For the same
+// reason a session.Impersonator's outcome, which follows the Guard's, goes under auth.impersonation.*.
 // Without a wide event in ctx it records nothing.
 func Observe(ctx context.Context, outcome auth.Outcome) {
 	we := wideevent.FromContext(ctx)
 	prefix := requestPrefix
 	if outcome.Action == auth.ActionRefresh {
 		prefix = refreshPrefix
+	}
+	if outcome.Action == auth.ActionImpersonationStart || outcome.Action == auth.ActionImpersonationStop {
+		prefix = impersonationPrefix
 	}
 	recordDecision(we, prefix, outcome)
 	recordOutcomeError(we, prefix, outcome)
@@ -98,8 +103,9 @@ func RedactQuery(we *wideevent.Event, ginContext *gin.Context) {}
 
 // The key prefixes of an outcome's fields.
 const (
-	requestPrefix = "auth."
-	refreshPrefix = "auth.refresh."
+	requestPrefix       = "auth."
+	refreshPrefix       = "auth.refresh."
+	impersonationPrefix = "auth.impersonation."
 )
 
 // errNilCheck is the internal failure a Require without a check answers with.
@@ -166,15 +172,15 @@ func recordOutcomeError(we *wideevent.Event, prefix string, outcome auth.Outcome
 	}
 }
 
-// recordIdentity records the identity's subject; the user ID only for the request's own outcome, since
-// user.id has no prefix.
+// recordIdentity records the subject of the identity that authenticated and, while it impersonates, the
+// impersonated one's; the user ID only for the request's own outcome, since user.id has no prefix.
 func recordIdentity(we *wideevent.Event, prefix string, identity *auth.Identity) {
 	if identity == nil {
 		return
 	}
 	we.String(prefix+"subject", identity.Real().Subject)
 	if identity.Impersonator != nil {
-		we.Bool(prefix+"impersonating", true)
+		we.Bool(prefix+"impersonating", true).String(prefix+"impersonated_subject", identity.Subject)
 	}
 	if prefix == requestPrefix && identity.UserID != uuid.Nil {
 		we.UserID(identity.UserID)

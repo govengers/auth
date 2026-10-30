@@ -17,6 +17,7 @@ The rules agents and humans get wrong most often, one line each with the page th
 - The password provider's `OnLogin` must keep `UserID`, or the login fails with 500. [Password](Password.md#gotchas)
 - `UserID` is `uuid.Nil` for OIDC, GitHub and API keys until your `OnLogin` (or `Resolver`) sets it; `HasUserID` never matches `uuid.Nil`. [Authorization](Authorization.md#identity-fields-and-who-fills-them)
 - Inactive identities (`Active: false`), and identities impersonated by an inactive one, pass only `IsAuthenticated`; a `Resolver` must set `Active: true`. [API-Keys](API-Keys.md#behaviour)
+- Impersonate only through `session.Impersonator`: `SaveIdentity` and `SwapIdentity` refuse an identity or impersonator of another provider or subject than the session holds, and a stored impersonation without the Impersonator's end time ends at the next request. [Sessions](Sessions.md#impersonation)
 - Roles from `OnLogin` and OIDC roles are fixed for the session's lifetime; only the password (user deleted, password or second factor changed) and GitHub (teams) refreshers change a running session. [Sessions](Sessions.md#refresh)
 - The GitHub refresher re-derives `auth.RoleAdmin` from `AdminTeams` on every refresh, so an `OnLogin` that strips `admin` is undone; gate on a role of your own instead. [GitHub](GitHub.md#identity)
 - Browser sessions carry no `Permissions` unless a hook grants them; `HasPermission` alone locks interactive users out. [Authorization](Authorization.md#permissions)

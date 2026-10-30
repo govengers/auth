@@ -240,3 +240,12 @@ func TestSignRefusesAnInactiveIdentity(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, status)
 	require.Empty(t, token)
 }
+
+func TestSignRefusesAnIdentityWithAnInactiveImpersonator(t *testing.T) {
+	signer := newTestSigner(t, fixedClock(signedAt))
+
+	token, err := signer.Sign(&auth.Identity{Subject: "42", Active: true, Roles: []string{"reader"}, Impersonator: &auth.Identity{Subject: "admin-1", Roles: []string{auth.RoleAdmin}}})
+
+	require.ErrorIs(t, err, auth.ErrForbidden, "Verify would drop the deactivation with the impersonator's state")
+	require.Empty(t, token)
+}

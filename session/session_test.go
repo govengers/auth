@@ -130,9 +130,6 @@ func TestSaveIdentityRoundTrip(t *testing.T) {
 		Attributes: map[string][]string{"department": {"research"}},
 		Claims:     map[string]any{"sid": "abc"},
 		Data:       map[string]any{"tenant": "a"},
-		Impersonator: &auth.Identity{
-			Provider: "keycloak", Subject: "admin-1", Active: true, Roles: []string{auth.RoleAdmin},
-		},
 	}
 	request := login(t, store, identity)
 	current, err := store.Open(request)

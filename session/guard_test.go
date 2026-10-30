@@ -322,22 +322,19 @@ func TestGuardRefreshesAfterTheInterval(t *testing.T) {
 }
 
 func TestGuardRefreshesTheImpersonator(t *testing.T) {
-	impersonated := &auth.Identity{
-		Provider: "password", Subject: "user-2", Active: true,
-		Impersonator: &auth.Identity{Provider: "password", Subject: "admin-1", Active: true, Roles: []string{auth.RoleAdmin}},
-	}
 	refresher := &fakeRefresher{name: "password", refresh: func(identity *auth.Identity) (*auth.Identity, error) {
 		refreshed := identity.Clone()
 		refreshed.Roles = nil
 		return refreshed, nil
 	}}
-	fixture := newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
-	request := login(t, fixture.store, impersonated)
+	fixture := newImpersonationFixture(t, GuardOptions{Refreshers: []Refresher{refresher}}, ImpersonatorOptions{})
+	request := login(t, fixture.store, testAdmin())
+	fixture.impersonate(t, request, "user-2")
 	fixture.clock.advance(2 * time.Minute)
 
 	result := serveGuarded(fixture.guard.RequireAPI(), request)
 
-	require.Equal(t, []*auth.Identity{impersonated.Impersonator}, refresher.calls, "called with the real identity")
+	require.Equal(t, []*auth.Identity{testAdmin()}, refresher.calls, "called with the real identity")
 	require.Equal(t, "user-2", result.identity.Subject)
 	require.Equal(t, "admin-1", result.identity.Impersonator.Subject)
 	require.Empty(t, result.identity.Impersonator.Roles)

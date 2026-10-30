@@ -76,6 +76,7 @@ github.com/govengers/auth
 │   ├── hook                   runs an OnLogin hook
 │   ├── impersonation          writes a refreshed real identity back into an impersonating one
 │   ├── backendtest            conformance suite for session.Backend implementations
+│   ├── sessiontest            session states for tests of other packages (an impersonation through the Impersonator)
 │   ├── fakeprovider           fake OIDC issuer (+ Keycloak admin API) and fake GitHub for tests and e2e
 │   └── forwardauth            the forward-auth server (service code of the binary)
 ├── cmd/forwardauth            main: configuration (config v2), wiring, run
@@ -88,7 +89,7 @@ github.com/govengers/auth
 | Package | Own module imports | Third-party | Heavy deps it pulls |
 |---|---|---|---|
 | `auth` | `internal/httpjson` | `google/uuid` | none |
-| `session` | `auth`, `internal/random`, `internal/redirect`, `internal/failure`, `internal/impersonation` | none | none |
+| `session` | `auth`, `authorization`, `internal/random`, `internal/redirect`, `internal/httpjson`, `internal/failure`, `internal/impersonation` | none | none |
 | `session/redisbackend` | `session`, `internal/dependency` | `redis/go-redis/v9` | go-redis |
 | `jwt` | `auth`, `internal/dependency`, `internal/failure` | `lestrrat-go/jwx/v3`, `google/uuid` | jwx |
 | `password` | `auth`, `session`, `internal/{httpjson, random, redirect, dependency, failure, fetchmetadata, hook}` | `golang.org/x/crypto` (argon2, bcrypt), `pquerna/otp`, `google/uuid` | x/crypto, otp |
@@ -105,6 +106,7 @@ github.com/govengers/auth
 | `internal/tokenendpoint` | `internal/dependency` | `golang.org/x/oauth2` (apart from `internal/dependency`, so packages without OAuth do not link it [LIB-007]) | none |
 | `internal/oauthlogin` | `auth`, `session`, `internal/random`, `internal/redirect` | none (the PKCE verifier is `random.Token(32)`) | none |
 | `internal/backendtest` | `session` | testify | test-only |
+| `internal/sessiontest` | `auth`, `authorization`, `session` | testify | test-only |
 | `internal/fakeprovider` | none | none (stdlib only, RS256 fake tokens) | test-only |
 | `internal/forwardauth` | `auth`, `apikey`, `ginadapter`, `jwt`, `session`, `prometheusadapter`, `internal/{httpjson, redirect, dependency}` | gin, wideevent, client_golang (incl. `promhttp`) | binary-only |
 | `cmd/forwardauth` | every provider, `session/redisbackend`, `prometheusadapter`, `internal/{forwardauth, redirect, dependency}` | `govengers/config/v2`, gin (`gin.SetMode`), wideevent (emitters), client_golang (collectors), go-redis | binary-only: config v2 |
@@ -288,6 +290,8 @@ const (
 	ActionRefreshTeams       Action = "refresh_teams"       // github route
 	ActionAuthenticate       Action = "authenticate"        // per request: Guard, apikey, jwt verifier
 	ActionRefresh            Action = "refresh"             // Guard calling a Refresher
+	ActionImpersonationStart Action = "impersonation_start" // session.Impersonator (D60)
+	ActionImpersonationStop  Action = "impersonation_stop"
 )
 
 // The fixed provider names (Identity.Provider, Outcome.Provider); an OIDC provider uses its own Name, which must
@@ -435,7 +439,7 @@ func (s Session) Put(ctx context.Context, key string, value []byte, ttl time.Dur
 func (s Session) Get(ctx context.Context, key string) ([]byte, bool, error)
 func (s Session) Pop(ctx context.Context, key string) ([]byte, bool, error)
 // SaveIdentity stores identity under key "identity". The first save of a session sets authenticatedAt to the
-// time Start issued it; later saves (TOTP enable, impersonation) keep it and refreshedAt: they verify nothing,
+// time Start issued it; later saves (TOTP enable, application changes) keep it and refreshedAt: they verify nothing,
 // so only the login and a Guard refresh may postpone the next refresh (D44).
 // TTL = authenticatedAt + MaximumAge - now; a ttl <= 0 refuses with ErrUnauthenticated.
 // Only a handle returned by Store.Start may have a first save, and only one (copies of the handle included):
@@ -444,6 +448,8 @@ func (s Session) Pop(ctx context.Context, key string) ([]byte, bool, error)
 // A later save writes by Backend.CompareAndSwap against the envelope it read (last writer wins: a lost swap
 // re-reads, at most 3 tries, then an error), so a save racing a logout cannot write the identity back even where
 // the backend forgot the revocation (a full MemoryBackend).
+// A save never changes who the session belongs to: the first one refuses an impersonating identity, a later one
+// an identity or impersonator of another provider or subject than the stored ones (an error, D60).
 func (s Session) SaveIdentity(ctx context.Context, identity *auth.Identity) error
 // Identity returns the stored identity; none, expired (now > authenticatedAt + MaximumAge) or revoked: *auth.Error ErrUnauthenticated.
 func (s Session) Identity(ctx context.Context) (*auth.Identity, error)
@@ -453,10 +459,11 @@ func (s Session) Identity(ctx context.Context) (*auth.Identity, error)
 // envelope read). It keeps authenticatedAt, the expiry and refreshedAt, like SaveIdentity. A session without a live identity refuses
 // with ErrUnauthenticated, like Identity; a nil identity is an error. For read-modify-write saves that must not
 // overwrite a concurrent change (github refresh-teams; the Guard keeps its own claim on the whole envelope).
+// It keeps the session's principals like SaveIdentity (D60).
 func (s Session) SwapIdentity(ctx context.Context, previous, identity *auth.Identity) (bool, error)
 ```
 
-Reserved session keys (binding): `identity` (envelope `{"identity", "authenticatedAt", "refreshedAt", "verifiedAt"}`, unexported type; `Session.Put` and `Pop` refuse it, so only SaveIdentity and SwapIdentity write it), `<provider name>.<anything>` for provider state (`password.pending`, `password.totp_setup`, `<oidc name>.login`, `<oidc name>.id_token`, `github.login`, `github.token`). Applications prefix their own keys with `app.`.
+Reserved session keys (binding): `identity` (envelope `{"identity", "authenticatedAt", "refreshedAt", "verifiedAt", "impersonationEndsAt"}` (the last omitted when zero), unexported type; `Session.Put` and `Pop` refuse it, so only SaveIdentity and SwapIdentity write it), `<provider name>.<anything>` for provider state (`password.pending`, `password.totp_setup`, `<oidc name>.login`, `<oidc name>.id_token`, `github.login`, `github.token`). Applications prefix their own keys with `app.`.
 
 Guard:
 
@@ -498,6 +505,34 @@ func (g *Guard) RequireAPI() func(http.Handler) http.Handler
 // A request that already carries an identity passes untouched.
 func (g *Guard) RequireUI() func(http.Handler) http.Handler
 ```
+
+Impersonator (D60), in `session/impersonation.go`:
+
+```go
+// ImpersonationLoader returns the identity of the user subject names, as a login of that user would produce it
+// (OnLogin applied), or nil without an error when there is none. ctx carries the impersonator's identity.
+type ImpersonationLoader func(ctx context.Context, subject string) (*auth.Identity, error)
+
+type ImpersonatorOptions struct {
+	Guard           *Guard              // required; its Store holds the sessions, Routes run behind its RequireAPI
+	Load            ImpersonationLoader // required
+	Actor           authorization.Check // default authorization.IsAdmin(), evaluated against the impersonator
+	Target          authorization.Check // default authorization.Not(authorization.IsAdmin()), evaluated against the target
+	MaximumDuration time.Duration       // default 1 h, at least 1 s
+	PathPrefix      string              // default "/auth/impersonation" (redirect.IsPathPrefix)
+	Observer        auth.Observer       // optional
+}
+func NewImpersonator(options *ImpersonatorOptions) (*Impersonator, error)
+// Start: the request's identity (auth.IdentityFrom) impersonates Load(subject) in the request's session.
+func (i *Impersonator) Start(request *http.Request, subject string) (*auth.Identity, error)
+// Stop: the session holds the impersonator again.
+func (i *Impersonator) Stop(request *http.Request) (*auth.Identity, error)
+// Routes: POST {PathPrefix} {"subject"} (Start) and DELETE {PathPrefix} (Stop), both behind Guard.RequireAPI,
+// answering 200 auth.IdentityResponse.
+func (i *Impersonator) Routes() []auth.Route
+```
+
+Start refuses, in this order: no identity (401), an impersonating identity (409 `already_impersonating`), an inactive one (403), an empty subject (400), Actor's refusal, Load's error (wrapped, its `*auth.Error` decides), no target (400 `unknown_impersonation_target`), a target that impersonates (500, a Load bug), the impersonator itself by Provider and Subject or by a non-nil UserID (400 `self_impersonation`), an inactive target (403), Target's refusal. Then it swaps `target.Clone()` with `Impersonator = actor.Clone()` and `impersonationEndsAt = now + MaximumDuration` against the request's identity (409 when the session holds another one). Stop swaps the stored impersonator back with a zero end (409 `not_impersonating` without an impersonation). The session ID, lifetime and provider values stay (rotation would drop the provider values the Backend cannot enumerate, and the session already belongs to the impersonator). Both report one outcome under the impersonator's provider. The Guard ends an impersonation whose end has passed, or that has none (saved before D60), before it refreshes: it swaps the root identity in (409 when another request saved an impersonation that is still over, 500 on a backend failure) and the request continues as the impersonator.
 
 `ReturnPathHeader`: when set, only that header is the return path source; a missing header omits the return path (behind forward auth the request URI would be `{prefix}/ui`). Without it the request URI is used.
 
@@ -577,7 +612,7 @@ Claims written by `Sign` and read back by `Verify` (binding):
 | `permissions` | `Permissions` | JSON array of text forms (`["builds:write","*:read"]`), omitted when empty; `Sign` fails on an invalid permission; `Verify` parses each entry with `auth.ParsePermission` and drops entries that do not parse or are not strings (fail closed per entry) |
 | every other key of `Claims` | `Claims` | copied; never copied: `iss sub aud exp nbf iat jti nonce at_hash c_hash auth_time sid azp`, Keycloak's raw `realm_access resource_access` (D48) and every claim name of the rows above (`provider`, `user_id`, `preferred_username`, `name`, `email`, `picture`, `roles`, `realm_roles`, `client_roles`, `groups`, `teams`, `permissions`), matched case-insensitively (decoders like encoding/json read `Roles` into a `roles` field), so an identity field left empty cannot come back from `Claims` (an IdP `roles` claim must not become application roles) |
 
-`Verify` sets `Active=true`, the fields above, and `Claims` = all claims of the token. Wrong claim types are skipped, never asserted (no panics). `Attributes`, `Data` and `Impersonator` are not carried.
+`Verify` sets `Active=true`, the fields above, and `Claims` = all claims of the token. Wrong claim types are skipped, never asserted (no panics). While impersonating, `Sign` writes the RFC 8693 actor claim `act` = `{"sub", "provider", "user_id"}` of the impersonator (never its roles or permissions) and refuses an inactive impersonator; `Verify` turns an `act` object with a string `sub` into an active `Impersonator` with only those fields (D60). `act` is an owned claim, never copied from `Claims`. `Attributes` and `Data` are not carried.
 
 ### 3.5 `password`
 
@@ -922,7 +957,7 @@ func Require(check authorization.Check) gin.HandlerFunc
 func RequireMethodPermission(resource string) gin.HandlerFunc
 // RedactQuery does nothing. Deprecated: the wide-event-logger v1 middleware redacts request.query itself, every
 // value becomes "redacted" unless its parameter is in Options.QueryAllowlist [LOG-009]. Kept so enrichers that
-// mount or call it keep compiling once they move to wide-event-logger v1 (D40, D60).
+// mount or call it keep compiling once they move to wide-event-logger v1 (D40, D62).
 func RedactQuery(we *wideevent.Event, ginContext *gin.Context)
 ```
 
@@ -1192,7 +1227,7 @@ Every failure of steps 1-8 (refusals and 500s) is answered by the ErrorURL redir
    - ErrUnauthenticated/ErrForbidden: `Store.End`; refuse (401 per variant, 403 JSON in both); only the refresh outcome is reported. When `Store.End` fails, the session stays usable: 500 `internal` in both variants, outcome error (the refusal kept as text only, so it cannot decide the answer), and the refresh claim is released (best effort: the claimed envelope is swapped back to the refreshedAt read in step 2), so the next request refreshes again and fails closed instead of passing for RefreshInterval.
    - other error, or a nil identity without error: keep the identity, save it unchanged (moves refreshedAt, so a GitHub outage costs one call per interval), outcome success with `Err` set (degraded) and Action refresh, continue. Once the envelope's `verifiedAt` (set at the login and on every successful refresh; an envelope without it counts from `authenticatedAt`) is older than `MaximumUnverifiedAge`, the failure is handled like a refusal instead: `*auth.Error{Kind: ErrUnauthenticated, Reason: "identity could not be verified", Err: <failure>}`, the session ends.
    - The save is a `Backend.CompareAndSwap` against the claimed envelope, keeping its expiry (so a refresh never touches the lifetime, D8). A lost swap (another save, a logout or the expiry won meanwhile) continues with what is stored now: 401 "no session identity" when nothing is. A backend failure: 500.
-   - Not covered by `SaveIdentity`: a stale `SaveIdentity` from application code (impersonation, TOTP enable) racing a refresh still overwrites it. Application code that must not lose a concurrent save uses `Session.SwapIdentity` against the identity it read (as github refresh-teams does).
+   - Not covered by `SaveIdentity`: a stale `SaveIdentity` from application code (TOTP enable, own changes) racing a refresh still overwrites it. Application code that must not lose a concurrent save uses `Session.SwapIdentity` against the identity it read (as github refresh-teams does).
 4. Request context gets `auth.WithIdentity`; outcome success, Action authenticate, Provider = the real identity's provider; next.
 
 ### F12 Forward-auth UI check (`GET {prefix}/ui`, called by Traefik)
@@ -1249,6 +1284,8 @@ Callers branch with `errors.Is(err, auth.ErrUnauthenticated | ErrForbidden | Err
 | `login_denied`, `login_failed` | Unauthenticated | oidc/github callback |
 | `invalid_api_key` | Unauthenticated | apikey |
 | `invalid_token` | Unauthenticated | jwt verifier |
+| `already_impersonating`, `not_impersonating` | Conflict | session.Impersonator start, stop |
+| `unknown_impersonation_target`, `self_impersonation` | InvalidRequest | session.Impersonator start |
 | `internal` | (500) | every unhandled failure; also the `code` of an ErrorURL redirect for a 500 |
 | `not_found`, `unavailable` | (404, 503) | forward-auth binary only: unknown route, readiness while shutting down or Redis down |
 | (defaults) | all | everything else |
@@ -1266,10 +1303,12 @@ Callers branch with `errors.Is(err, auth.ErrUnauthenticated | ErrForbidden | Err
 | `degraded` | true | Result success/challenge with Err != nil [LOG-002, LOG-010] |
 | `auth.subject` | Identity.Real().Subject | Identity != nil |
 | `auth.impersonating` | true | Identity.Impersonator != nil |
+| `auth.impersonated_subject` | Identity.Subject | Identity.Impersonator != nil |
 | `user.id` (`we.UserID`) | Identity.UserID | Identity != nil and UserID != uuid.Nil |
 | outcome | `we.Failure(Err)` | Result denied or error |
 | outcome | `we.Success()` | Result success/challenge and Action not authenticate/refresh (the library answered the request itself) |
-| `auth.refresh.provider`, `.action`, `.result`, `.code`, `.reason`, `.error`, `.subject`, `.impersonating` | as the `auth.*` keys above | Action refresh: the Guard reports the refresh on the same event before the authenticate outcome, so its fields get their own prefix; it never sets `user.id`. `degraded` and the request outcome stay top-level |
+| `auth.refresh.provider`, `.action`, `.result`, `.code`, `.reason`, `.error`, `.subject`, `.impersonating`, `.impersonated_subject` | as the `auth.*` keys above | Action refresh: the Guard reports the refresh on the same event before the authenticate outcome, so its fields get their own prefix; it never sets `user.id`. `degraded` and the request outcome stay top-level |
+| `auth.impersonation.*` | as the `auth.*` keys above, without `user.id` | Action `impersonation_start` or `impersonation_stop`: the Impersonator runs behind the Guard, whose authenticate outcome already set `auth.*` |
 
 `ginadapter.Require` records `authorization.denied=true`, `authorization.reason` (Reason, or Err.Error() for non-`*auth.Error`), `authorization.error` (internal errors only) and `we.Failure(err)`. Never usernames, emails, names, tokens, codes, keys [LOG-009]. One `Set` per key per event [LOG-006].
 
@@ -1541,7 +1580,8 @@ Decisions taken during implementation (29.10.2026, settled by the lead):
 | D56 | `oidc.New` refuses `Issuer == oidc.GoogleIssuer` with neither `AllowedEmailDomains` nor `OnLogin` unless `AllowAnyAccount`; the binary refuses Google (by issuer or `OIDC_CLAIM_MAPPER=google`) without `OIDC_ALLOWED_EMAIL_DOMAINS`, an enforced `KEYCLOAK_REQUIRED_*` list or `OIDC_ALLOW_ANY_ACCOUNT=true`. With the Google issuer, every allowed domain except `gmail.com` and `googlemail.com` also requires `hd` to equal the email's domain. | Anyone can create a Google account, so a Google login without admission let the whole world in, and nothing at boot said so. The library keys on the issuer, not the claim mapper: the risk is the public IdP, the mapper only reads the profile (and a func cannot be compared); the binary also treats the google mapper as Google, since that is how operators spell it. Google documents `hd` as set only for Workspace accounts and as the claim to check when restricting to a domain: a consumer Google account may carry a verified address of any domain (a former employee can register one with the company address and keep it after offboarding). Requiring `hd` for every listed domain is the safe default; consumer accounts with a company address are admitted through `OnLogin` instead. `gmail.com` and `googlemail.com` never have `hd`, and Google is authoritative for them. |
 | D57 | `session.Revoker`, an optional interface of a `Refresher`: the Guard calls `RevokeSession` on its own detached 10 s context before it ends a session whose refresh it refused (refusal or `MaximumUnverifiedAge`); its error joins the outcome's Err after the refusal, so the answer and the end of the session never depend on it. `github.Provider` implements it (revokes the OAuth token), also uses it when `/refresh-teams` ends a session, and its callback revokes the token of the session a re-login replaces. Not covered: expiry (`MaximumAge`; nothing runs then), and a GitHub session that another provider's login or logout ends on a shared `Store`. | Only GitHub logout revoked the token: a team removal, `MaximumUnverifiedAge` or a re-login ended the session and left its token valid, and GitHub OAuth app tokens do not expire on their own. A hook on the Refresher reaches every provider-owned end the Guard decides without a registry in the Store. `Store.Start` and `Store.End` stay provider-agnostic: making the Store call providers would invert the dependency (providers take the Store), so the re-login is covered where the provider knows it, in its own callback; the cross-provider cases need two providers on one store and a user switching between them, and are documented instead. Revoking before `Store.End` is required (End deletes the token); revoking even when End then fails is fail-safe, since the session's next refresh is refused at GitHub. |
 | D59 | The image is published by an `image` job in `ci.yml` that `needs` the reusable `go-library` job (`release.yml` is gone); `:<major>.<minor>`, `:<major>` and `:latest` move only for the newest stable tag they cover; every image gets a signed build provenance attestation; third-party actions are pinned by SHA and base images by digest, with Dependabot bumping both. | The release published even when CI failed, a backport tag moved `:1` and `:latest` back to an older release, consumers could not verify where an image came from, and a moved third-party tag would have run with `packages: write`. One group per tag ref keeps every queued release (a shared group would replace a queued one); the newest-tag decision comes from the repository's tags, so run order cannot move a tag back. |
-| D60 | wide-event-logger v1 (`github.com/govengers/wide-event-logger`) replaces `mxcd/go-wide-event-logger` v0.3.2. `ginadapter.RedactQuery` is deprecated as a no-op: the logger v1 middleware redacts `request.query` itself (`Options.QueryAllowlist`). The binary's pre-enricher records only `service.version` and `forward.*`; it no longer re-records and cuts the `request.*` fields, and its emitter wrapper that kept only the latest value of each field is gone. | v1 redacts the query, cuts every client-controlled request field and keeps one value per key, so the dev emitter cannot print a replaced value; doing it again in auth duplicated the logger. The exported function stays because v1.0.0 is released [LIB-001]; its parameter is now the v1 `*wideevent.Event`, and `Observe` and `Require` find only an event the v1 middleware put into the request context, so consumers move to the logger v1 together with this release. |
+| D60 | Impersonation is part of the library: `session.Impersonator` (options `Guard`, `Load`, `Actor` default `IsAdmin()`, `Target` default `Not(IsAdmin())`, `MaximumDuration` default 1 h) starts and stops it through `POST`/`DELETE {PathPrefix}` or `Start`/`Stop`, enforcing no nesting, an active impersonator and target, no self-impersonation (provider and subject, or UserID) and a swap against the identity the Guard read; the envelope carries `impersonationEndsAt` and the Guard ends an impersonation past it (or without one) on the next request. `SaveIdentity` and `SwapIdentity` refuse to change the provider or subject of the identity or its impersonator, and a first save refuses an impersonating identity. `jwt.Signer.Sign` and the binary's `requireActive` refuse an inactive impersonator; tokens carry it as the RFC 8693 `act` claim (`sub`, `provider`, `user_id`), which `Verify` reads back. Outcomes `impersonation_start`/`impersonation_stop`; wide events add `auth.impersonated_subject`. No session ID rotation on start or stop. | Each application wrote impersonation itself through `SwapIdentity`: who may impersonate, nesting, self, inactive targets, an end, the audit trail and token issuance were left to every implementation, and audit run 3 found `Sign` minting tokens for an identity whose impersonator was deactivated (the token dropped the impersonator, so backends saw an active user). A save rule in the store is the only boundary application code cannot route around. `act` keeps the actor visible to backends and their audit logs without granting its roles. Rotation would drop provider values (GitHub token, OIDC logout hint) the Backend cannot enumerate, and the session already belongs to the impersonator, so it defends nothing. |
+| D62 | wide-event-logger v1 (`github.com/govengers/wide-event-logger`) replaces `mxcd/go-wide-event-logger` v0.3.2. `ginadapter.RedactQuery` is deprecated as a no-op: the logger v1 middleware redacts `request.query` itself (`Options.QueryAllowlist`). The binary's pre-enricher records only `service.version` and `forward.*`; it no longer re-records and cuts the `request.*` fields, and its emitter wrapper that kept only the latest value of each field is gone. | v1 redacts the query, cuts every client-controlled request field and keeps one value per key, so the dev emitter cannot print a replaced value; doing it again in auth duplicated the logger. The exported function stays because v1.0.0 is released [LIB-001]; its parameter is now the v1 `*wideevent.Event`, and `Observe` and `Require` find only an event the v1 middleware put into the request context, so consumers move to the logger v1 together with this release. |
 
 ---
 

@@ -14,7 +14,7 @@
 - [Password](docs/wiki/Password.md): password login, `password.Storage`, TOTP, registration, routes, codes.
 - [OIDC](docs/wiki/OIDC.md): OIDC login and logout, options, Keycloak enrichment, Google.
 - [GitHub](docs/wiki/GitHub.md): GitHub OAuth, teams, admin role, refresh, API client.
-- [Sessions](docs/wiki/Sessions.md): `Store`, `Guard`, cookie naming, refresh, memory and Redis backends.
+- [Sessions](docs/wiki/Sessions.md): `Store`, `Guard`, cookie naming, refresh, impersonation (`Impersonator`), memory and Redis backends.
 - [Authorization](docs/wiki/Authorization.md): identity fields, roles, permissions, checks, net/http check middleware, own checks.
 - [JWT](docs/wiki/JWT.md): `jwt.Verifier` in backends, `jwt.Signer`.
 - [API-Keys](docs/wiki/API-Keys.md): static keys, `Resolver`, ordering with the Guard.

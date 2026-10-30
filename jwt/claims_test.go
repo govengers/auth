@@ -18,6 +18,7 @@ func TestIdentityClaimsCopiesOnlyForeignClaims(t *testing.T) {
 		"name": "n", "email": "e", "picture": "p", "roles": []any{auth.RoleAdmin}, "realm_roles": []any{"r"},
 		"client_roles": []any{"c"}, "groups": []any{"g"}, "teams": []any{"t"}, "permissions": []any{"*:write"},
 		"Roles": []any{auth.RoleAdmin}, "PERMISSIONS": []any{"*:write"}, "Sub": "s", "User_ID": "u",
+		"act": map[string]any{"sub": "admin"}, "ACT": map[string]any{"sub": "admin"},
 		"realm_access": map[string]any{"roles": []any{"x"}}, "Resource_Access": map[string]any{"app": map[string]any{"roles": []any{"y"}}},
 	}
 	allClaims := maps.Clone(ownedClaims)
@@ -67,6 +68,32 @@ func TestIdentityClaimsRefusesInvalidPermissions(t *testing.T) {
 	}
 }
 
+func TestIdentityClaimsWritesTheImpersonatorAsActor(t *testing.T) {
+	adminID := uuid.MustParse("0b6f2c1e-7a3d-4c55-9f0e-2d8b1a6c4e71")
+	testCases := []struct {
+		name         string
+		impersonator *auth.Identity
+		want         map[string]any
+	}{
+		{
+			name: "with user ID", impersonator: &auth.Identity{Provider: "password", Subject: "admin-1", UserID: adminID, Active: true, Roles: []string{auth.RoleAdmin}},
+			want: map[string]any{"sub": "admin-1", "provider": "password", "user_id": adminID.String()},
+		},
+		{
+			name: "without user ID", impersonator: &auth.Identity{Provider: "github", Subject: "42", Active: true},
+			want: map[string]any{"sub": "42", "provider": "github"},
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			claims, err := identityClaims(&auth.Identity{Subject: "user-2", Impersonator: testCase.impersonator})
+
+			require.NoError(t, err)
+			require.Equal(t, map[string]any{"sub": "user-2", "act": testCase.want}, claims)
+		})
+	}
+}
+
 func TestIdentityFromClaimsSkipsWrongTypes(t *testing.T) {
 	testCases := []struct {
 		name   string
@@ -81,6 +108,13 @@ func TestIdentityFromClaimsSkipsWrongTypes(t *testing.T) {
 		{name: "user ID not a UUID", claims: map[string]any{"user_id": "ada"}, want: &auth.Identity{}},
 		{name: "null values", claims: map[string]any{"sub": nil, "roles": nil, "user_id": nil, "permissions": nil}, want: &auth.Identity{}},
 		{name: "permissions as string", claims: map[string]any{"permissions": "builds:write"}, want: &auth.Identity{}},
+		{name: "act as string", claims: map[string]any{"act": "admin-1"}, want: &auth.Identity{}},
+		{name: "act without sub", claims: map[string]any{"act": map[string]any{"provider": "password"}}, want: &auth.Identity{}},
+		{name: "act with a numeric sub", claims: map[string]any{"act": map[string]any{"sub": 42.0}}, want: &auth.Identity{}},
+		{
+			name: "act with wrong types besides sub", claims: map[string]any{"act": map[string]any{"sub": "admin-1", "provider": 1.0, "user_id": "x"}},
+			want: &auth.Identity{Impersonator: &auth.Identity{Subject: "admin-1", Active: true}},
+		},
 		{
 			name:   "permissions with invalid entries",
 			claims: map[string]any{"permissions": []any{"builds:write", 1.0, "Builds:write", "builds:admin", "builds", nil, map[string]any{"resource": "x"}, "*:read"}},

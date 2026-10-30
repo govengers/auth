@@ -40,18 +40,20 @@ Stable codes for frontends; the kind decides the status.
 | `login_denied`, `login_failed` | unauthenticated | OIDC and GitHub callback |
 | `invalid_api_key` | unauthenticated | `apikey` |
 | `invalid_token` | unauthenticated | `jwt` verifier |
+| `already_impersonating`, `not_impersonating` | conflict | `session.Impersonator` start, stop |
+| `unknown_impersonation_target`, `self_impersonation` | invalid request | `session.Impersonator` start |
 | `not_found`, `unavailable` | (404, 503) | forward-auth binary only: unknown route, readiness while shutting down or Redis down |
 
 With `ErrorURL` set, OIDC and GitHub callbacks send the same codes as `?code=<code>`, `internal` included.
 
 ## Observer and Outcome
 
-`type Observer func(ctx context.Context, outcome auth.Outcome)`, an option on every provider, `session.Guard`, `apikey.Authenticator` and `jwt.Verifier`. Called synchronously, at most once per action per request; it must not block.
+`type Observer func(ctx context.Context, outcome auth.Outcome)`, an option on every provider, `session.Guard`, `session.Impersonator`, `apikey.Authenticator` and `jwt.Verifier`. Called synchronously, at most once per action per request; it must not block.
 
 `Outcome{Provider, Action, Result, Err, Identity}`:
 
 - `Provider`: the provider's name (`password`, an OIDC `Name`, `github`, `apikey`, `jwt`, or `session` when the Guard found no identity).
-- `Action`: `login`, `callback`, `logout`, `frontchannel_logout`, `register`, `totp_*`, `refresh_teams`, `authenticate` (per request: Guard, `apikey`, `jwt`), `refresh` (Guard calling a Refresher).
+- `Action`: `login`, `callback`, `logout`, `frontchannel_logout`, `register`, `totp_*`, `refresh_teams`, `authenticate` (per request: Guard, `apikey`, `jwt`), `refresh` (Guard calling a Refresher), `impersonation_start`, `impersonation_stop` (`session.Impersonator`).
 - `Result`: `success`, `challenge` (TOTP pending), `denied` (an `*auth.Error` was answered), `error` (500).
 - `Err` with `Result` `success`: a degraded success (e.g. GitHub token revocation failed, a refresh failed but the identity was kept).
 
