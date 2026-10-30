@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -870,4 +871,49 @@ func TestGuardRestartsTheUnverifiedAgeOnASuccessfulRefresh(t *testing.T) {
 
 	require.Equal(t, http.StatusNoContent, result.recorder.Code, "verified 50 minutes ago, 100 after the login")
 	require.Equal(t, testIdentity(), result.identity)
+}
+
+// lostClaimReplyBackend commits the first CompareAndSwap and then reports it failed, as a swap whose reply
+// was lost to a dropped connection does; every later call passes through.
+type lostClaimReplyBackend struct {
+	Backend
+	lost atomic.Bool
+}
+
+func (b *lostClaimReplyBackend) CompareAndSwap(ctx context.Context, sessionID, key string, previous, value []byte) (bool, error) {
+	swapped, err := b.Backend.CompareAndSwap(ctx, sessionID, key, previous, value)
+	if err == nil && b.lost.CompareAndSwap(false, true) {
+		return false, context.Canceled
+	}
+	return swapped, err
+}
+
+func TestGuardRefreshesWhenTheClaimsReplyIsLost(t *testing.T) {
+	testCases := []struct {
+		name   string
+		answer error
+		after  time.Duration
+	}{
+		{name: "a refusal still ends the session", answer: &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "user deleted"}, after: 2 * time.Minute},
+		{name: "a failure beyond the maximum unverified age still ends it", answer: errors.New("provider down"), after: 61 * time.Minute},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			refresher := &fakeRefresher{name: "password", refresh: func(*auth.Identity) (*auth.Identity, error) {
+				return nil, testCase.answer
+			}}
+			fixture := newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
+			request := login(t, fixture.store, testIdentity())
+			fixture.store.options.Backend = &lostClaimReplyBackend{Backend: fixture.store.options.Backend}
+			fixture.clock.advance(testCase.after)
+
+			first := serveGuarded(fixture.guard.RequireAPI(), request)
+			next := serveGuarded(fixture.guard.RequireAPI(), request)
+
+			require.Equal(t, 1, refresher.callCount(), "the claim committed, so the refresh ran")
+			require.Equal(t, http.StatusUnauthorized, first.recorder.Code)
+			require.Equal(t, http.StatusUnauthorized, next.recorder.Code, "the session did not pass as fresh")
+			require.Nil(t, next.identity)
+		})
+	}
 }

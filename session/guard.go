@@ -187,25 +187,27 @@ func (g *Guard) refreshDue(stored identityEnvelope) bool {
 // failure keeps the identity and is reported as a degraded success (Result success with Err set): the
 // request is still answered. Once the identity was last verified longer than MaximumUnverifiedAge ago, such
 // a failure is a refusal as well. The save swaps against the claim: when another request saved the session
-// meanwhile, that save wins and the request continues with it. The Refresher and everything after it run
-// without the request's cancellation: a client aborting each due refresh would otherwise keep a refused
-// identity alive with the claim taken.
+// meanwhile, that save wins and the request continues with it. The claim, the Refresher and everything
+// after them run without the request's cancellation: a client aborting each due refresh would otherwise
+// keep a refused identity alive with the claim taken. A claim the backend failed may have committed with
+// its reply lost, so the refresh runs anyway (degraded); when it did not commit, the save loses its swap.
 func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, current Session, stored identityEnvelope) (*auth.Identity, error) {
 	ctx := request.Context()
+	refreshContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
+	defer cancel()
 	realIdentity := stored.Identity.Real()
 	outcome := auth.Outcome{Provider: realIdentity.Provider, Action: auth.ActionRefresh, Identity: stored.Identity}
 	readAt := stored.RefreshedAt
 	stored.RefreshedAt = g.now()
-	claimed, swapped, err := current.swapEnvelope(ctx, stored)
-	if err != nil {
+	claimed, swapped, err := current.swapEnvelope(refreshContext, stored)
+	switch {
+	case err != nil && claimed.sealed == nil: // nothing was sent: the session expired or could not be sealed
 		outcome.Err = err
 		return nil, g.reportFailure(ctx, outcome)
-	}
-	if !swapped {
+	case err == nil && !swapped:
 		return stored.Identity, nil
 	}
-	refreshContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
-	defer cancel()
+	outcome.Err = err // a failed claim that may have committed: refreshed anyway
 	refreshed, err := g.refreshers[realIdentity.Provider].Refresh(refreshContext, current, realIdentity.Clone())
 	err = g.refreshError(claimed, realIdentity.Provider, refreshed, err)
 	switch {

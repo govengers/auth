@@ -222,7 +222,9 @@ func (s Session) envelope(ctx context.Context) (identityEnvelope, error) {
 
 // swapEnvelope saves envelope, keeping the stored lifetime, only while the stored value is still the one
 // envelope was read from, and returns it as stored now (the base of a later swap); false when the session
-// was saved, revoked or expired meanwhile.
+// was saved, revoked or expired meanwhile. When the backend's swap fails, the returned envelope is still the
+// one sent (sealed set): the swap may have committed with its reply lost. When nothing was sent (an expired
+// session, a sealing failure), sealed is nil.
 func (s Session) swapEnvelope(ctx context.Context, envelope identityEnvelope) (identityEnvelope, bool, error) {
 	encoded, _, err := s.encodeEnvelope(envelope)
 	if err != nil {
@@ -233,10 +235,10 @@ func (s Session) swapEnvelope(ctx context.Context, envelope identityEnvelope) (i
 		return identityEnvelope{}, false, fmt.Errorf("swap session identity: %w", err)
 	}
 	swapped, err := s.store.options.Backend.CompareAndSwap(ctx, s.id, identityKey, envelope.sealed, sealed)
-	if err != nil {
-		return identityEnvelope{}, false, fmt.Errorf("swap session identity: %w", err)
-	}
 	envelope.sealed = sealed
+	if err != nil {
+		return envelope, false, fmt.Errorf("swap session identity: %w", err)
+	}
 	return envelope, swapped, nil
 }
 
