@@ -38,6 +38,7 @@ func TestNewValidatesOptions(t *testing.T) {
 		{name: "no client ID", change: func(options *oidc.Options) { options.ClientID = "" }},
 		{name: "no client secret", change: func(options *oidc.Options) { options.ClientSecret = "" }},
 		{name: "no sessions", change: func(options *oidc.Options) { options.Sessions = nil }},
+		{name: "strict session cookie", change: func(options *oidc.Options) { options.Sessions = newStoreWith(t, http.SameSiteStrictMode) }},
 		{name: "no issuer", change: func(options *oidc.Options) { options.Issuer = "" }},
 		{name: "plain HTTP issuer", change: func(options *oidc.Options) { options.Issuer = "http://idp.example.com" }},
 		{name: "issuer with user info", change: func(options *oidc.Options) { options.Issuer = "https://user:pass@idp.example.com" }},

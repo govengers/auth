@@ -1,0 +1,86 @@
+# Sessions
+
+`session.Store` issues server-side sessions (the cookie carries 32 random bytes; values are AES-256-GCM sealed in a `Backend`). `session.Guard` authenticates requests by their session for every provider and re-validates identities through `Refresher`s.
+
+## Store
+
+`session.NewStore(&session.StoreOptions{...})`:
+
+| Option | Default | Note |
+|---|---|---|
+| `Backend` | required | `session.NewMemoryBackend(nil)` or `redisbackend.New` |
+| `EncryptionKey` | required | exactly 32 bytes: `session.ParseKey(os.Getenv(...))`, generated with `openssl rand -base64 32`; same on every replica; changing it logs everyone out (no rotation list) |
+| `CookieName` | `auth_session` | sent as `__Host-auth_session` while the cookie is Secure, host-only and on `/` (the default) |
+| `CookieDomain`, `CookiePath` | host-only, `/` | either one drops the `__Host-` prefix |
+| `SameSite` | `http.SameSiteLaxMode` | `None` for OIDC front-channel logout (https only); `Strict` only without OIDC and GitHub providers; `SameSiteDefaultMode` is refused |
+| `InsecureCookie` | false | drops `Secure`; local plain-http development only |
+| `MaximumAge` | 24 h | absolute lifetime from the login, never extended by activity or refresh |
+
+Application code rarely touches the store directly: `store.Open(request)` returns the `session.Session` handle (for `github.Provider.HTTPClient` or own values via `Put`, `Get`, `Pop`; the key `identity` is reserved). `Session.SwapIdentity` saves a changed identity only while the session still holds the one you read (impersonation, own role changes).
+
+## Guard
+
+`session.NewGuard(&session.GuardOptions{...})`, one per application, shared by every provider:
+
+- `RequireAPI()` answers 401 JSON without a session, 403 JSON for a refused identity.
+- `RequireUI()` answers 302 to `LoginURL?return_to=<path>` without a session; 403 JSON for a refused identity (a redirect would loop).
+- Both pass a request that already carries an identity (from `apikey` mounted in front) untouched.
+
+| Option | Default | Note |
+|---|---|---|
+| `Store` | required | |
+| `LoginURL` | `/` | `provider.LoginURL()` for OIDC and GitHub; your login page for password |
+| `ReturnPathHeader` | request URI | forward auth uses `X-Forwarded-Uri` |
+| `Refreshers` | none | password and GitHub providers; names must be unique |
+| `RefreshInterval` | 1 min | |
+| `MaximumUnverifiedAge` | 1 h | how long a failing (not refusing) refresh keeps the identity |
+
+Tested excerpt of a Guard in front of API and UI routes ([session/example_test.go](../../session/example_test.go)):
+
+```go
+	serveMux := http.NewServeMux()
+	serveMux.Handle("POST /login", loginHandler(store))
+	serveMux.Handle("GET /api/me", guard.RequireAPI()(auth.IdentityHandler()))
+	serveMux.Handle("GET /reports", guard.RequireUI()(http.NotFoundHandler()))
+```
+
+## Refresh
+
+The Guard calls a provider's `Refresher` for identities whose last refresh is older than `RefreshInterval`, once per interval per session, detached from the request (30 s bound). `auth.ErrUnauthenticated` or `auth.ErrForbidden` from it ends the session; any other error keeps the identity until `MaximumUnverifiedAge` since the last successful check, then ends it. A refresh never overwrites a change saved while it ran.
+
+- `password`: re-reads the user; a deleted user loses the session. Updates `Username` and `Email` only.
+- `github`: refetches teams; outside every allowed team or token revoked ends the session; admin role follows `AdminTeams`.
+- `oidc`: no refresher; roles and groups are fixed at login.
+
+## Backends
+
+- `MemoryBackend`: exactly one replica, lost on restart, bounded (`MaximumSessions` 100000, `MaximumBytes` 64 MiB; when full it evicts the entries expiring soonest). Not for production.
+- `session/redisbackend`: any `redis.UniversalClient` (client, sentinel, cluster); you own and close the client; `KeyPrefix` (default `session`) must not contain `{` or `}`. Tested excerpt ([session/redisbackend/example_test.go](../../session/redisbackend/example_test.go)):
+
+```go
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	defer func() { _ = client.Close() }() // nothing to flush
+
+	backend, err := redisbackend.New(&redisbackend.Options{Client: client, KeyPrefix: "myapp:session"})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	key, err := session.ParseKey("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	store, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: key})
+```
+
+- Own database: implement the five methods of [`session.Backend`](../../session/backend.go) (`Put`, `Get`, `Pop`, `CompareAndSwap`, `Revoke`) with their atomicity contracts. The built-in backends run the conformance suite [internal/backendtest](../../internal/backendtest/backendtest.go); it is internal to the module, so copy it into your tests.
+
+## Gotchas
+
+- Instances sharing `EncryptionKey`, Redis `KeyPrefix` and cookie name accept each other's sessions: give every application its own key and prefix.
+- Plain `http` on a host other than `localhost`/loopback: browsers drop the `Secure` cookie and every login loops; set `InsecureCookie` for local development only.
+- `SameSite: http.SameSiteStrictMode` is for password-only stores: the browser withholds it on the redirect back from the IdP, so `oidc.New` and `github.New` refuse such a store.
+- No idle timeout: a session lives until logout, `MaximumAge` or a refusing refresh.
+
+Source: [session/](../../session/) ([store.go](../../session/store.go), [guard.go](../../session/guard.go), [session.go](../../session/session.go), [memory.go](../../session/memory.go)), [session/redisbackend/backend.go](../../session/redisbackend/backend.go).

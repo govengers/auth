@@ -33,7 +33,7 @@ type StoreOptions struct {
 	CookieName     string        // default "auth_session"; "__Host-" is prepended when Secure, host-only and on "/" (see NewStore)
 	CookieDomain   string        // default "" (host-only cookie)
 	CookiePath     string        // default "/"
-	SameSite       http.SameSite // Lax (default), Strict or None; None requires InsecureCookie false (front-channel logout needs None); SameSiteDefaultMode would send no attribute and is refused
+	SameSite       http.SameSite // Lax (default), Strict or None; None requires InsecureCookie false (front-channel logout needs None); Strict only for password-only stores (oidc and github refuse it); SameSiteDefaultMode would send no attribute and is refused
 	InsecureCookie bool          // drops the Secure attribute; local HTTP development only
 	MaximumAge     time.Duration // default 24h, at least 1s; absolute session lifetime, also the cookie Max-Age
 }
@@ -169,6 +169,13 @@ func (s *Store) End(ctx context.Context, writer http.ResponseWriter, request *ht
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revokeTimeout)
 	defer cancel()
 	return s.revoke(ctx, id)
+}
+
+// SameSite returns the cookie's SameSite mode. The OIDC and GitHub providers refuse a store with
+// http.SameSiteStrictMode: the browser withholds a Strict cookie on the redirect back from the provider,
+// and the login state with it.
+func (s *Store) SameSite() http.SameSite {
+	return s.options.SameSite
 }
 
 // MaximumAge returns the configured absolute session lifetime.

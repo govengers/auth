@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/url"
 	"strings"
 	"unicode/utf8"
 
@@ -77,13 +76,14 @@ func latestFields(we *wideevent.Event) *wideevent.Event {
 }
 
 // recordRequest is the wide-event pre-enricher: it replaces the query the middleware recorded verbatim
-// (callbacks carry code and state) [LOG-009] and records the version and what Traefik asks to forward.
+// (ginadapter.RedactQuery: callbacks carry code and state) [LOG-009] and records the version and what
+// Traefik asks to forward.
 // Only the path of X-Forwarded-Uri is recorded, never its query. Every field a client controls is cut to
 // maximumFieldBytes, also those the middleware recorded: 401s and unmatched paths are always kept.
 func (s *Server) recordRequest(we *wideevent.Event, ginContext *gin.Context) {
 	request := ginContext.Request
-	we.Str("request.query", truncated(redactedQuery(request.URL.Query()))).
-		Str("request.method", truncated(request.Method)).
+	ginadapter.RedactQuery(we, ginContext)
+	we.Str("request.method", truncated(request.Method)).
 		Str("request.path", truncated(request.URL.Path)).
 		Str("request.host", truncated(request.Host)).
 		Str("request.user_agent", truncated(request.UserAgent())).
@@ -111,13 +111,4 @@ func truncated(value string) string {
 		cut--
 	}
 	return value[:cut]
-}
-
-// redactedQuery keeps every parameter name and replaces every value with "redacted".
-func redactedQuery(values url.Values) string {
-	redacted := url.Values{}
-	for name := range values {
-		redacted.Set(name, "redacted")
-	}
-	return redacted.Encode()
 }

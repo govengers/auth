@@ -1,0 +1,43 @@
+# govengers/auth
+
+> Authentication and authorization for Go services: password (Argon2id, TOTP), OIDC (Keycloak enrichment, Google), GitHub OAuth with teams, API keys and JWT all produce one `auth.Identity`; redirect and password logins keep it in a server-side session that one `session.Guard` turns into a request context identity (401 JSON for APIs, 302 to the login for UIs); authorization is `authorization.Check`, a `func(context.Context) error` over that identity. Core packages are `net/http` only; gin and Prometheus live in adapter packages. Also ships the forward-auth image `ghcr.io/govengers/forwardauth` for Traefik.
+
+- Module: `github.com/govengers/auth` (v1), Go 1.26, Apache 2.0.
+- Packages: `auth` (root), `session`, `session/redisbackend`, `password`, `oidc`, `oidc/keycloak`, `github`, `apikey`, `jwt`, `authorization`, `ginadapter`, `prometheusadapter`; binary `cmd/forwardauth`.
+- Constructors are `New(options *Options) (*X, error)` and validate at startup; components never log and never start goroutines, they report to an optional `auth.Observer`.
+- Errors: `*auth.Error` with `errors.Is` kinds `auth.ErrUnauthenticated`, `ErrForbidden`, `ErrInvalidRequest`, `ErrConflict`; one JSON body `{"code","message"}`.
+- Standards: govengers/standards, `library` profile (`.govengers.yml`); service rules also apply to `cmd/forwardauth` and `internal/forwardauth`.
+
+## Docs
+
+- [Home](docs/wiki/Home.md): model, package map, which package for which need, wiring order.
+- [Password](docs/wiki/Password.md): password login, `password.Storage`, TOTP, registration, routes, codes.
+- [OIDC](docs/wiki/OIDC.md): OIDC login and logout, options, Keycloak enrichment, Google.
+- [GitHub](docs/wiki/GitHub.md): GitHub OAuth, teams, admin role, refresh, API client.
+- [Sessions](docs/wiki/Sessions.md): `Store`, `Guard`, cookie naming, refresh, memory and Redis backends.
+- [Authorization](docs/wiki/Authorization.md): identity fields, roles, permissions, checks, net/http check middleware, own checks.
+- [JWT](docs/wiki/JWT.md): `jwt.Verifier` in backends, `jwt.Signer`.
+- [API-Keys](docs/wiki/API-Keys.md): static keys, `Resolver`, ordering with the Guard.
+- [Gin](docs/wiki/Gin.md): `ginadapter`, wide events, `prometheusadapter`.
+- [Errors-and-Observability](docs/wiki/Errors-and-Observability.md): `auth.Error`, `ResponseFor`, `Observer`, `Outcome`.
+- [Forward-Auth](docs/wiki/Forward-Auth.md): the image, routes, configuration, Traefik wiring.
+- [Gotchas](docs/wiki/Gotchas.md): the non-obvious rules, one line each.
+
+## Examples
+
+- [examples/password/main.go](examples/password/main.go): net/http server with password login, registration, TOTP, an admin role from `OnLogin`, API and UI routes, logout.
+- [examples/oidc/main.go](examples/oidc/main.go): net/http server with OIDC login, optional Keycloak enrichment, a realm role check, logout at the IdP.
+- [examples/github/main.go](examples/github/main.go): gin server with GitHub login, team-based admin check, wide-event recording, logout.
+- Each `main_test.go` runs a full login against the in-repo fakes; package `Example*` functions live in each package's `example_test.go`.
+
+## Reference
+
+- [README.md](README.md): user documentation, environment variables of the image, security notes, known limits, release notes.
+- [docs/design.md](docs/design.md): binding design, package APIs, flows F1-F15, error taxonomy (section 5), decisions D1-D39.
+- [docs/migration.md](docs/migration.md): migration from go-basicauth, oidc-fwd-auth and github-fwd-auth, Storage SQL.
+- [pkg.go.dev](https://pkg.go.dev/github.com/govengers/auth): API reference.
+
+## Optional
+
+- [docs/infrastructure-notes.md](docs/infrastructure-notes.md): CI workflow, Dockerfile, image release, end-to-end stack.
+- [justfile](justfile): `just lint`, `just test`, `just test-e2e`, `just check`.

@@ -5,7 +5,7 @@ govulncheck := "go run golang.org/x/vuln/cmd/govulncheck@v1.9.0"
 coverage_threshold := "80"
 image := "ghcr.io/govengers/forwardauth"
 version := `git describe --tags --always --dirty 2>/dev/null || echo dev`
-excluded := "/cmd/|/internal/fakeprovider/|/test/"
+excluded := "/cmd/|/examples/|/internal/fakeprovider/|/test/"
 
 default:
     @just --list
@@ -17,7 +17,7 @@ lint:
     if [ -d test/e2e ]; then go vet -tags e2e ./test/e2e/...; fi
     golangci-lint run ./...
 
-# Unit tests with -race; gates total and per-package coverage (excluding cmd, fakes, tests)
+# Unit tests with -race; gates total and per-package coverage (excluding cmd, examples, fakes, tests)
 test:
     mkdir -p sandbox
     {{gotestsum}} --format testname --jsonfile sandbox/unit.json -- -race -count=1 -coverprofile=sandbox/unit.raw.cover ./...

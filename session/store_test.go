@@ -81,7 +81,7 @@ func TestNewStoreDefaultsOnACopy(t *testing.T) {
 	require.Equal(t, original, *options, "caller's options untouched")
 	require.Equal(t, "__Host-auth_session", store.options.CookieName)
 	require.Equal(t, "/", store.options.CookiePath)
-	require.Equal(t, http.SameSiteLaxMode, store.options.SameSite)
+	require.Equal(t, http.SameSiteLaxMode, store.SameSite())
 	require.Equal(t, 24*time.Hour, store.MaximumAge())
 
 	current, request := startSession(t, store)

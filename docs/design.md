@@ -403,7 +403,7 @@ type StoreOptions struct {
 	CookieName     string        // default "auth_session"; Secure, host-only and on "/": sent as "__Host-" + CookieName (an own "__Host-"/"__Secure-" prefix is kept and validated)
 	CookieDomain   string        // default "" (host-only cookie)
 	CookiePath     string        // default "/"
-	SameSite       http.SameSite // Lax (default), Strict or None; None requires InsecureCookie false (front-channel logout needs None); SameSiteDefaultMode (no attribute) is refused
+	SameSite       http.SameSite // Lax (default), Strict or None; None requires InsecureCookie false (front-channel logout needs None); Strict only for password-only stores (oidc and github refuse it, D41); SameSiteDefaultMode (no attribute) is refused
 	InsecureCookie bool          // drops the Secure attribute; local HTTP development only
 	MaximumAge     time.Duration // default 24h, at least 1s; absolute session lifetime, also the cookie Max-Age
 }
@@ -422,6 +422,8 @@ func (s *Store) Open(request *http.Request) (Session, error)
 func (s *Store) End(ctx context.Context, writer http.ResponseWriter, request *http.Request) error
 // MaximumAge returns the configured absolute session lifetime.
 func (s *Store) MaximumAge() time.Duration
+// SameSite returns the cookie's SameSite mode; oidc.New and github.New refuse http.SameSiteStrictMode (D41).
+func (s *Store) SameSite() http.SameSite
 
 // Session is a handle on one server-side session (value type, unexported fields: the backend ID, the store
 // and, on a handle Start returned, its one first save: the time Start issued it, shared by every copy and usable once). Values are AES-256-GCM sealed with a key derived per session
@@ -725,7 +727,7 @@ type Options struct {
 	ClaimMapper                  ClaimMapper       // default DefaultClaimMapper
 	AllowedEmailDomains          []string          // optional: requires email_verified=true and a matching domain (ASCII only, case-insensitive, exact; an IDN in its xn-- form)
 	DisableIframeLogoutDetection bool              // stop treating Sec-Fetch-Dest: iframe on /logout as front-channel (A-2.4); a cross-site iframe load of /logout is then refused (403)
-	Sessions                     *session.Store    // required
+	Sessions                     *session.Store    // required; not SameSite Strict (D41)
 	HTTPClient                   *http.Client      // default 10 s timeout; used for discovery, token exchange, JWKS
 	OnLogin                      auth.Hook         // e.g. keycloak.Client.Enrich, or an app closure calling it and then provisioning
 	OnLogout                     auth.LogoutHook
@@ -790,7 +792,7 @@ type Options struct {
 	AllowedTeams           []string      // required, >= 1, "org/team-slug" (one "/", no white space or control characters), case-insensitive
 	AdminTeams             []string      // members get auth.RoleAdmin; they still need an AllowedTeams membership
 	RelevantTeams          []string      // extra teams kept in Identity.Teams
-	Sessions               *session.Store // required
+	Sessions               *session.Store // required; not SameSite Strict (D41)
 	HTTPClient             *http.Client  // default 10 s timeout (token exchange, API, revocation)
 	OnLogin                auth.Hook
 	OnLogout               auth.LogoutHook
@@ -907,6 +909,11 @@ func Require(check authorization.Check) gin.HandlerFunc
 // evaluated per request: one gate for a route group, GET/HEAD/OPTIONS need read, everything else write
 // (build-api's read_only/read_write behaviour). Same recording and responses as Require.
 func RequireMethodPermission(resource string) gin.HandlerFunc
+// RedactQuery is a wide-event pre-enricher (wideevent.WithPreEnricher): it sets request.query again with every
+// parameter name kept and every value replaced by "redacted", cut to 512 bytes, because the middleware records
+// the raw query and OAuth callbacks carry code and state [LOG-009]. JSON emitters print the latest value of a key,
+// dev emitters every value (D40).
+func RedactQuery(we *wideevent.Event, ginContext *gin.Context)
 ```
 
 ### 3.12 `prometheusadapter`
@@ -1421,7 +1428,7 @@ func (d *Dependencies) RedisPing(ping func(ctx context.Context) error) func(ctx 
 - There is no `DevMode` option: gin's mode is process-wide, so main calls `gin.SetMode` (D29).
 - Both listeners (public and metrics) are `http.Server`s with ReadHeaderTimeout 10 s, ReadTimeout 30 s, WriteTimeout 60 s, IdleTimeout 120 s [LAY-006], MaxHeaderBytes 64 KiB (431 above; Traefik forwards the client's headers, large cookies fit) and write their error lines through `Logger` (`slog.NewLogLogger`, level error).
 - Engine order (gin's `RedirectTrailingSlash` off, see 6.3): `wideevent.Middleware` (outermost, records the final status), HTTP metrics, `recordDependencies` (collects the request's outbound calls and writes per dependency namespace `<namespace>.calls`, `.failures`, `.duration_ms` and, when set, `.backend`, `.status`, `.error`: `cache.*` for Redis, `http.<name>.*` for the HTTP clients, so the GitHub team page loop adds no field per call), panic recovery (500 JSON `internal`, `we.Failure` plus `panic.stack` on the wide event), routes; `NoRoute` answers 404 JSON `not_found` and records the failure `no route`. Calls outside a request (discovery at boot) reach only the histogram; the recorded error is the transport's reduced by `dependency.TransportFailure` (shared with `dependency.Error`) to cancellation, a dial error, "timeout" or the type of the innermost error (e.g. `transport failure (textproto.ProtocolError)`), so it names neither the URL nor anything the server sent; the caller gets the original error.
-- `wideevent.Middleware` with: emitter (JSON stdout, or dev emitter when DEV_MODE; either receives a copy of the event with only the latest value of each field, so the dev emitter cannot print the raw query the pre-enricher replaced), `WithSkipPaths(health)` (`/ready` records events: a failed check is kept by `AlwaysOnError`, successful probes are sampled like any request), sampler `CompositeSampler(AlwaysOnError(), AlwaysOnStatus(401, 403), keepDegraded, Rate(SampleRate))`, pre-enricher that overwrites `request.query` with the parameter names and every value replaced by `redacted` (callbacks carry `code` and `state`) [LOG-009], records `service.version`, `forward.method`, `forward.host`, `forward.path` (X-Forwarded-Method/Host and the path part of X-Forwarded-Uri, never its query). Every client-controlled field (those, `request.query`, and the middleware's `request.method`, `request.path`, `request.host`, `request.user_agent`, `request.id`, overwritten) is cut to 512 bytes at a character boundary: 401s and unmatched paths are always kept.
+- `wideevent.Middleware` with: emitter (JSON stdout, or dev emitter when DEV_MODE; either receives a copy of the event with only the latest value of each field, so the dev emitter cannot print the raw query the pre-enricher replaced), `WithSkipPaths(health)` (`/ready` records events: a failed check is kept by `AlwaysOnError`, successful probes are sampled like any request), sampler `CompositeSampler(AlwaysOnError(), AlwaysOnStatus(401, 403), keepDegraded, Rate(SampleRate))`, pre-enricher that calls `ginadapter.RedactQuery` (overwrites `request.query` with the parameter names and every value replaced by `redacted`, cut to 512 bytes; callbacks carry `code` and `state`) [LOG-009], records `service.version`, `forward.method`, `forward.host`, `forward.path` (X-Forwarded-Method/Host and the path part of X-Forwarded-Uri, never its query). Every client-controlled field (those, `request.query`, and the middleware's `request.method`, `request.path`, `request.host`, `request.user_agent`, `request.id`, overwritten) is cut to 512 bytes at a character boundary: 401s and unmatched paths are always kept.
 - The JWT step records `forward.jwt_issued=true`; the forward handler sets `Cache-Control: no-store`, calls `we.Success()` and answers 200. `{prefix}/jwks` and `{prefix}/me` also record `we.Success()`.
 - HTTP metrics middleware (MET-003, namespace `forwardauth`, subsystem `http`): `forwardauth_http_requests_total{route,method,status}`, `forwardauth_http_request_duration_seconds{route,method}`, `forwardauth_http_requests_in_flight`; route = `ginContext.FullPath()` or `unmatched`; method bounded to the standard set or `other`; health/ready excluded. Plus `forwardauth_auth_outcomes_total{provider,action,result}`, `forwardauth_dependency_request_duration_seconds{dependency,operation,outcome}` (`Dependencies`) and Go, process and build-info collectors. No Redis pool collector (one small pool; add `redis.PoolStats` if it ever matters).
 - No tracing in v1: a check is one hop from Traefik with at most a Redis and a provider call, which the wide event sums per dependency, and there is no trace backend or context to join; add otelhttp/redisotel in `Dependencies` when a deployment traces.
@@ -1504,6 +1511,8 @@ Decisions taken during implementation (29.10.2026, settled by the lead):
 | D37 | The store names a Secure, host-only cookie on path `/` `__Host-` + `CookieName`; an own `__Host-` name needs those attributes and an own `__Secure-` name a Secure cookie, otherwise `NewStore` fails. | `request.Cookie` returns the first cookie of a name, so a sibling subdomain could toss a `Domain=` cookie that shadows the session (fixation into the attacker's session). Browsers accept a `__Host-` cookie only from the host itself over https. Existing sessions end once (the name changes). |
 | D38 | `MemoryBackend` also bounds the bytes it holds (`MaximumBytes`, default 64 MiB; expired entries first, then soonest expiring); the login state is JSON without HTML escaping and `SafeReturnPath` refuses invalid UTF-8. | Every anonymous login start stores its state: `json.Marshal` wrote each `<`, `>`, `&` of a 2048-byte return path as six bytes (12 KB a start, 1.2 GB at the entry cap), each invalid UTF-8 byte as `\ufffd`; an entry cap alone does not bound memory. |
 | D39 | The public listener reads at most 64 KiB of request line and headers; the wide event's client-controlled fields are cut to 512 bytes. | net/http's 1 MiB default let a client push up to 1 MiB of header bytes into every 401 or unmatched-path event, which the sampler always keeps. |
+| D40 | After the agent-docs pass (30.10.2026): the binary's query redaction moved into the library as `ginadapter.RedactQuery`, which the binary's pre-enricher calls. | Library consumers on gin mounted the wide-event middleware without redaction, so callback `code` and `state` reached their logs. |
+| D41 | After the agent-docs pass (30.10.2026): `session.Store.SameSite()`; `oidc.New` and `github.New` refuse a store whose cookie is SameSite Strict. Password-only stores may keep Strict. | A Strict cookie is withheld on the redirect back from the IdP or GitHub, so every callback failed with `login_expired` at runtime instead of at startup (the binary already refused `SESSION_SAME_SITE=strict`, D32). |
 
 ---
 

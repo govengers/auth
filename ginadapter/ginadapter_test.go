@@ -1,7 +1,9 @@
 package ginadapter_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -398,6 +400,33 @@ func TestObserveRecordsAGuardRefreshOnce(t *testing.T) {
 	require.NotContains(t, authFields, "error", "the refresh's failure is not the authentication's")
 	require.Equal(t, map[string]any{"provider": "github", "action": "refresh", "result": "success", "code": "internal", "error": "github api: 503", "subject": "42"}, authFields["refresh"])
 	require.Equal(t, true, emitted["degraded"])
+}
+
+func TestRedactQuery(t *testing.T) {
+	testCases := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{name: "callback", query: "?code=secret-code&state=secret-state", want: "code=redacted&state=redacted"},
+		{name: "no query", query: "", want: ""},
+		{name: "names cut", query: "?" + strings.Repeat("a", 1000) + "=secret-value", want: strings.Repeat("a", 512)},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			output := &bytes.Buffer{}
+			engine := gin.New()
+			engine.Use(wideevent.Middleware(wideevent.WithEmitter(wideevent.JSONWriterEmitter(output)), wideevent.WithPreEnricher(ginadapter.RedactQuery)))
+			engine.GET("/callback", func(ginContext *gin.Context) { ginContext.Status(http.StatusFound) })
+
+			serve(t, engine, http.MethodGet, "/callback"+testCase.query)
+
+			event := map[string]any{}
+			require.NoError(t, json.Unmarshal(output.Bytes(), &event))
+			require.Equal(t, testCase.want, event["request"].(map[string]any)["query"])
+			require.NotContains(t, output.String(), "secret-")
+		})
+	}
 }
 
 func TestObserveWithoutWideEvent(t *testing.T) {
