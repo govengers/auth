@@ -143,7 +143,7 @@ Route `{prefix}` to the service with its own Traefik router, minus the checks an
 
 ## Environment variables
 
-Values without a default are required. *not empty* marks values with a default that refuse an explicitly empty value. Lists are comma-separated. The process exits non-zero before it serves anything and lists every problem it can find: missing or invalid values, an `EXTERNAL_URL` with a path, a plain `http` `EXTERNAL_URL` off loopback without `SESSION_INSECURE_COOKIE=true` (browsers would drop the `Secure` cookie and loop every login), an unparsable `SESSION_ENCRYPTION_KEY`, `PORT` equal to `METRICS_PORT`, values the selected provider, Keycloak or JWT needs, `KEYCLOAK_ENABLED` without `PROVIDER=oidc`, `API_KEYS_ENABLED` without keys, a malformed `API_KEYS` entry (reported by position, never echoed), a secret that is too short or used twice, a bad `API_KEY_PERMISSIONS` entry. Then the components fail the boot on what only they can judge (team format, `GITHUB_SCOPES`, URLs, the JWT key, the issuer's discovery) and, with `SESSION_REDIS_ENABLED`, on a Redis that does not answer a `PING` within 5 s. Sensitive values are masked in the startup table. A `.env` file in the working directory is read if present (development only; the image has none).
+Values without a default are required. *not empty* marks values with a default that refuse an explicitly empty value. Lists are comma-separated. The process exits non-zero before it serves anything and lists every problem it can find: missing or invalid values, an `EXTERNAL_URL` with a path, a plain `http` `EXTERNAL_URL` off loopback without `SESSION_INSECURE_COOKIE=true` (browsers would drop the `Secure` cookie and loop every login), an unparsable or placeholder (one repeated byte) `SESSION_ENCRYPTION_KEY`, `PORT` equal to `METRICS_PORT`, values the selected provider, Keycloak or JWT needs, `KEYCLOAK_ENABLED` without `PROVIDER=oidc`, `API_KEYS_ENABLED` without keys, a malformed `API_KEYS` entry (reported by position, never echoed), a secret that is too short or used twice, a bad `API_KEY_PERMISSIONS` entry. Then the components fail the boot on what only they can judge (team format, `GITHUB_SCOPES`, URLs, the JWT key, the issuer's discovery) and, with `SESSION_REDIS_ENABLED`, on a Redis that does not answer a `PING` within 5 s. Sensitive values are masked in the startup table. A `.env` file in the working directory is read if present (development only; the image has none).
 
 ### General
 
@@ -166,7 +166,7 @@ Values without a default are required. *not empty* marks values with a default t
 
 | Variable | Default | Required | Sensitive | Notes |
 |---|---|---|---|---|
-| `SESSION_ENCRYPTION_KEY` | - | yes | yes | base64 of 32 bytes: `openssl rand -base64 32` |
+| `SESSION_ENCRYPTION_KEY` | - | yes | yes | base64 of 32 bytes: `openssl rand -base64 32`; a key that repeats one byte (all zero included) is refused |
 | `SESSION_COOKIE_NAME` | `forwardauth_session` | not empty | | sent as `__Host-forwardauth_session` unless `SESSION_COOKIE_DOMAIN` or `SESSION_INSECURE_COOKIE` is set (a `__Host-` or `__Secure-` name of your own is kept and must fit its prefix) |
 | `SESSION_COOKIE_DOMAIN` | empty | | | empty is a host-only cookie |
 | `SESSION_INSECURE_COOKIE` | `false` | | | drops `Secure`; local HTTP development only; required for an `http` `EXTERNAL_URL` whose host is not loopback (`app.localhost` is not); refused with an `https` `EXTERNAL_URL` |
