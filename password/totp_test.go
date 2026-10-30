@@ -484,6 +484,22 @@ func TestRequiredTOTPEnrollsDuringLogin(t *testing.T) {
 	require.JSONEq(t, `{"challenge":"totp"}`, recorder.Body.String())
 }
 
+func TestEnableWithoutSetupVerifiesNoPassword(t *testing.T) {
+	fixture := newFixture(t, totpOptions())
+	fixture.createUser(t, "ada", "")
+	browser := loggedInClient(t, fixture)
+	verifications := 0
+	fixture.provider.verifyHash = func(password, encodedHash string) (bool, Parameters, error) {
+		verifications++
+		return verifyHash(password, encodedHash)
+	}
+
+	recorder := browser.post(enablePath, map[string]any{"code": "000000", "password": "wrong password"})
+
+	requireRefusal(t, recorder, http.StatusBadRequest, "totp_setup_missing")
+	require.Zero(t, verifications)
+}
+
 func TestTOTPManagement(t *testing.T) {
 	fixture := newFixture(t, totpOptions())
 	user := fixture.createUser(t, "ada", "ada@example.com")

@@ -171,11 +171,11 @@ func (p *Provider) enableTOTP(writer http.ResponseWriter, request *http.Request)
 	if account.user.TOTPEnabled {
 		return refused(&auth.Error{Kind: auth.ErrConflict, Code: codeTOTPAlreadyEnabled})
 	}
-	if err := p.confirmPassword(account.user, body.Password); err != nil {
+	secret, err := setupSecret(ctx, account.session) // before the Argon2id of the password: a request without a setup costs nothing
+	if err != nil {
 		return refused(err)
 	}
-	secret, err := setupSecret(ctx, account.session)
-	if err != nil {
+	if err := p.confirmPassword(account.user, body.Password); err != nil {
 		return refused(err)
 	}
 	valid, err := p.consumeTOTPCode(ctx, account.user.ID, secret, body.Code)
