@@ -126,6 +126,11 @@ func TestFailedChecksCostAVerification(t *testing.T) {
 	}{
 		{name: "unknown user", identifier: "grace", password: testPassword, wantVerified: []string{"dummy"}},
 		{name: "wrong password", identifier: "ada", password: "wrong password", wantVerified: []string{"stored"}},
+		{
+			// D46: the bcrypt verification is the cost; a dummy Argon2id on top would widen the gap to unknown users.
+			name: "wrong password on a legacy hash", identifier: "ada", storedHash: bcryptHash(t, testPassword), legacyVerifier: VerifyBcrypt, password: "wrong password",
+			wantVerified: []string{"stored"},
+		},
 		{name: "hash nothing verifies", identifier: "ada", storedHash: unverifiable, password: testPassword, wantVerified: []string{"stored", "dummy"}},
 		{
 			name: "hash the legacy verifier refuses", identifier: "ada", storedHash: unverifiable, legacyVerifier: VerifyBcrypt, password: testPassword,

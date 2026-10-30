@@ -62,7 +62,7 @@ Prefix `PathPrefix`, default `/auth/password`. The provider reads sessions itsel
 - Limits: `TOTP.Digits` 6 or 8, `Period` at most 3600 s, `Skew` at most 10, `BackupCodeCount` at most 20; backup codes are at most 128 bytes and the alphabet and length must give at least 1,000,000 distinct codes.
 - Every TOTP code is accepted once (`Storage.ConsumeTOTPStep`). `MaximumAttempts` (default 5, no "unlimited") counts wrong codes in a row across logins; then the second factor stays locked until a code is verified or your application calls `Storage.ResetTOTPAttempts`.
 - `Policy.MinimumLength` counts characters; passwords are 1-128 bytes. Stable client codes replace translated messages.
-- Existing Argon2id hashes verify unchanged; `LegacyVerifier: password.VerifyBcrypt` upgrades bcrypt hashes at the next login, and Argon2id hashes on other parameters than `HashParameters` are rehashed too (only login rehashes, not the password checks of the TOTP routes). A stored hash nothing can verify answers like a wrong password (401 `invalid_credentials`, same cost); unknown users cost the same Argon2id verification as real ones.
+- Existing Argon2id hashes verify unchanged; `LegacyVerifier: password.VerifyBcrypt` upgrades bcrypt hashes at the next login, and Argon2id hashes on other parameters than `HashParameters` are rehashed too (only login rehashes, not the password checks of the TOTP routes). A stored hash nothing can verify answers like a wrong password (401 `invalid_credentials`, same cost); unknown users cost the same Argon2id verification as real ones, except users whose hash is still a legacy one: they cost the legacy verification until their first login ([Security](Security.md#known-limits)).
 
 ## Options that matter
 
