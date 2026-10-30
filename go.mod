@@ -8,7 +8,7 @@ require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/google/uuid v1.6.0
 	github.com/govengers/config/v2 v2.0.0
-	github.com/govengers/wide-event-logger v0.3.3-0.20261030221106-692edbe58656
+	github.com/govengers/wide-event-logger v1.0.0
 	github.com/lestrrat-go/jwx/v3 v3.4.0
 	github.com/pquerna/otp v1.5.0
 	github.com/prometheus/client_golang v1.25.0
