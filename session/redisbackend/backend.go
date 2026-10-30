@@ -22,7 +22,16 @@ const (
 )
 
 // Lua scripts keep each operation atomic on the slot of one session. They are read-only package values.
+// Every read counts a value only while the session's index lists it: Revoke finds the values through the
+// index, so a value whose index Redis evicted could not be revoked and must not authenticate. The index TTL
+// is never shorter than any of its values', so only an eviction separates them.
 var (
+	// getScript returns the value while the index lists it. KEYS: value, index.
+	getScript = redis.NewScript(`
+if redis.call('SISMEMBER', KEYS[2], KEYS[1]) == 0 then return false end
+return redis.call('GET', KEYS[1])
+`)
+
 	// putScript refuses a revoked session, stores the value and indexes it.
 	// KEYS: marker, value, index. ARGV: value, ttl in ms. Returns 0 when revoked, 1 when stored.
 	putScript = redis.NewScript(`
@@ -41,6 +50,7 @@ return 1
 	popScript = redis.NewScript(`
 local popped = redis.call('GET', KEYS[3])
 if popped then return popped end
+if redis.call('SISMEMBER', KEYS[2], KEYS[1]) == 0 then return false end
 local v = redis.call('GET', KEYS[1])
 if not v then return v end
 redis.call('DEL', KEYS[1])
@@ -52,9 +62,10 @@ return v
 	// swapScript replaces the value, keeping its expiry, when it still equals the expected one. A revoked
 	// session holds no value, so it never swaps. Like popScript it leaves a receipt under the caller's token,
 	// so a retry after a lost reply reports the swap the lost attempt made, even when the value changed since.
-	// KEYS: value, receipt. ARGV: expected value, new value, receipt ttl in ms. Returns 1 when swapped, else 0.
+	// KEYS: value, receipt, index. ARGV: expected value, new value, receipt ttl in ms. Returns 1 when swapped, else 0.
 	swapScript = redis.NewScript(`
 if redis.call('EXISTS', KEYS[2]) == 1 then return 1 end
+if redis.call('SISMEMBER', KEYS[3], KEYS[1]) == 0 then return 0 end
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
 redis.call('SET', KEYS[2], '1', 'PX', ARGV[3])
@@ -87,7 +98,8 @@ type Options struct {
 // Backend implements session.Backend on Redis. One string per value plus a set indexing the keys of
 // the session; the layout is <prefix>:{<sessionID>} (index), <prefix>:{<sessionID>}:<key> (value),
 // <prefix>:{<sessionID>}#revoked (revocation marker) and <prefix>:{<sessionID>}#popped:<token> and
-// #swapped:<token> (the result of one Pop or CompareAndSwap, kept one minute for its retry). It is safe for concurrent use.
+// #swapped:<token> (the result of one Pop or CompareAndSwap, kept one minute for its retry). A value the index
+// does not list (its index evicted) counts as absent. It is safe for concurrent use.
 type Backend struct {
 	client redis.UniversalClient
 	prefix string
@@ -135,8 +147,8 @@ func (b *Backend) Get(ctx context.Context, sessionID, key string) ([]byte, bool,
 	if err := validateSessionID(sessionID); err != nil {
 		return nil, false, err
 	}
-	value, err := b.client.Get(ctx, b.valueKey(sessionID, key)).Bytes()
-	return valueOrAbsent(value, err, "read session value")
+	value, err := getScript.Run(ctx, b.client, []string{b.valueKey(sessionID, key), b.indexKey(sessionID)}).Text()
+	return valueOrAbsent([]byte(value), err, "read session value")
 }
 
 // Pop returns the live value under (sessionID, key) and deletes it in one atomic step; a client retry of
@@ -156,7 +168,7 @@ func (b *Backend) CompareAndSwap(ctx context.Context, sessionID, key string, pre
 	if err := validateSessionID(sessionID); err != nil {
 		return false, err
 	}
-	keys := []string{b.valueKey(sessionID, key), b.receiptKey(sessionID, "swapped")}
+	keys := []string{b.valueKey(sessionID, key), b.receiptKey(sessionID, "swapped"), b.indexKey(sessionID)}
 	swapped, err := swapScript.Run(ctx, b.client, keys, previous, value, receiptTTL.Milliseconds()).Int()
 	if err != nil {
 		return false, dependency.Error("redis session backend: swap session value", err)

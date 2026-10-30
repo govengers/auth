@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
+	"github.com/govengers/auth"
 	"github.com/govengers/auth/internal/backendtest"
 	"github.com/govengers/auth/session"
 	"github.com/govengers/auth/session/redisbackend"
@@ -402,4 +405,54 @@ func TestConnectionFailureSurfacesAsError(t *testing.T) {
 			require.NoError(t, errors.Unwrap(err), "the go-redis chain is dropped")
 		})
 	}
+}
+
+// Revoke finds a session's values through its index; once Redis evicted the index, no read may still find them.
+func TestValuesOfAnEvictedIndexCountAsAbsent(t *testing.T) {
+	backend, server := newBackend(t, "")
+	ctx := t.Context()
+	require.NoError(t, backend.Put(ctx, "s", "get", []byte("value"), time.Hour))
+	require.NoError(t, backend.Put(ctx, "s", "pop", []byte("value"), time.Hour))
+	require.NoError(t, backend.Put(ctx, "s", "swap", []byte("value"), time.Hour))
+
+	server.Del("session:{s}") // stands in for an evicting maxmemory-policy
+
+	_, found, err := backend.Get(ctx, "s", "get")
+	require.NoError(t, err)
+	require.False(t, found, "Get")
+	_, found, err = backend.Pop(ctx, "s", "pop")
+	require.NoError(t, err)
+	require.False(t, found, "Pop")
+	swapped, err := backend.CompareAndSwap(ctx, "s", "swap", []byte("value"), []byte("changed"))
+	require.NoError(t, err)
+	require.False(t, swapped, "CompareAndSwap")
+}
+
+func TestLogoutAfterAnEvictedIndexRefusesTheOldCookie(t *testing.T) {
+	backend, server := newBackend(t, "")
+	store, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: bytes.Repeat([]byte{1, 2}, 16)})
+	require.NoError(t, err)
+	ctx := t.Context()
+	recorder := httptest.NewRecorder()
+	started, err := store.Start(ctx, recorder, httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil))
+	require.NoError(t, err)
+	require.NoError(t, started.SaveIdentity(ctx, &auth.Identity{Provider: "password", Subject: "user", Active: true}))
+	cookie := recorder.Result().Cookies()[0]
+	withCookie := func() *http.Request {
+		request := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+		request.AddCookie(cookie)
+		return request
+	}
+	for _, key := range server.Keys() {
+		if strings.HasSuffix(key, "}") {
+			server.Del(key) // the index: stands in for an evicting maxmemory-policy
+		}
+	}
+
+	require.NoError(t, store.End(ctx, httptest.NewRecorder(), withCookie()))
+
+	reopened, err := store.Open(withCookie())
+	require.NoError(t, err)
+	_, err = reopened.Identity(ctx)
+	require.ErrorIs(t, err, auth.ErrUnauthenticated)
 }
