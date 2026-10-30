@@ -9,7 +9,7 @@
 | Option | Default | Note |
 |---|---|---|
 | `Backend` | required | `session.NewMemoryBackend(nil)` or `redisbackend.New` |
-| `EncryptionKey` | required | exactly 32 bytes: `session.ParseKey(os.Getenv(...))`, generated with `openssl rand -base64 32`; same on every replica; changing it logs everyone out (no rotation list) |
+| `EncryptionKey` | required | exactly 32 bytes, not one byte repeated (an all-zero placeholder is refused): `session.ParseKey(os.Getenv(...))`, generated with `openssl rand -base64 32`; same on every replica; changing it logs everyone out (no rotation list) |
 | `CookieName` | `auth_session` | sent as `__Host-auth_session` while the cookie is Secure, host-only and on `/` (the default) |
 | `CookieDomain`, `CookiePath` | host-only, `/` | either one drops the `__Host-` prefix |
 | `SameSite` | `http.SameSiteLaxMode` | `None` for OIDC front-channel logout (https only); `Strict` only without OIDC and GitHub providers; `SameSiteDefaultMode` is refused |
@@ -46,7 +46,7 @@ Tested excerpt of a Guard in front of API and UI routes ([session/example_test.g
 
 ## Refresh
 
-The Guard calls a provider's `Refresher` for identities whose last refresh is older than `RefreshInterval`, once per interval per session, detached from the request (30 s bound). `auth.ErrUnauthenticated` or `auth.ErrForbidden` from it ends the session; any other error keeps the identity until `MaximumUnverifiedAge` since the last successful check, then ends it. A refresh never overwrites a change saved while it ran.
+The Guard calls a provider's `Refresher` for identities whose last refresh is older than `RefreshInterval`, once per interval per session, detached from the request (30 s bound). Only the login and the Guard's own refresh count: `SaveIdentity` and `SwapIdentity` verify nothing and keep the last refresh time, so frequent application saves cannot postpone the Refresher or the `MaximumUnverifiedAge` cutoff. `auth.ErrUnauthenticated` or `auth.ErrForbidden` from it ends the session; any other error keeps the identity until `MaximumUnverifiedAge` since the last successful check, then ends it. A refresh never overwrites a change saved while it ran. A backend that fails the refresh's claim (its first write) gets a 500 without a provider call, unless reading the session back shows the claim committed.
 
 - `password`: re-reads the user; a deleted user loses the session. Updates `Username` and `Email` only.
 - `github`: refetches teams; outside every allowed team or token revoked ends the session; admin role follows `AdminTeams`.
@@ -54,8 +54,13 @@ The Guard calls a provider's `Refresher` for identities whose last refresh is ol
 
 ## Backends
 
-- `MemoryBackend`: exactly one replica, lost on restart, non-production scale. Bounded by `MaximumSessions` (default 100000) and `MaximumBytes` of session IDs, keys and values (default 64 MiB; a replacement counts only what it adds): when full it drops expired entries, then evicts the entries expiring soonest, revocation markers included; a single value larger than `MaximumBytes` is refused.
-- `session/redisbackend`: any `redis.UniversalClient` (client, sentinel, cluster); you own and close the client; keys carry a hash tag, so `KeyPrefix` (default `session`) must not contain `{` or `}`. Logout and session rotation revoke on every replica; a revoked session never regains an identity and refuses writes while its revocation marker lives (Redis may evict it under its own eviction policy, as a full memory backend does). Tested excerpt ([session/redisbackend/example_test.go](../../session/redisbackend/example_test.go)):
+- `MemoryBackend`: exactly one replica, lost on restart, non-production scale. Bounded by `MaximumSessions` (default 100000) and `MaximumBytes` of session IDs, keys and values (default 64 MiB; a replacement counts only what it adds): when full it drops expired entries, then evicts the entries expiring soonest, revocation markers included (an expiry-ordered heap: O(log n) per evicted entry, never a scan of every session); a single value larger than `MaximumBytes` is refused. It is not built for anonymous login floods: every login start stores a session, so a flood keeps it full and evicts real sessions; rate-limit the login routes or use Redis.
+- `session/redisbackend`: any `redis.UniversalClient` (client, sentinel, cluster); you own and close the client; keys carry a hash tag, so `KeyPrefix` (default `session`) must not contain `{` or `}`. Logout and session rotation revoke on every replica; a revoked session never regains an identity and refuses writes while its revocation marker lives (Redis may evict it under its own eviction policy, as a full memory backend does). A value counts only while its session's index set lists it (the index lives at least as long as every value), because logout finds the values through the index: a session whose index Redis evicted reads as logged out, so its cookie can never outlive a logout. Run the session Redis with a `maxmemory-policy` of:
+  - `noeviction` (recommended, ideally on a Redis of its own): nothing is ever dropped; when memory is full, writes that need memory fail, so logins and saves answer 500 until memory frees up.
+  - `volatile-ttl`: every session key has a TTL, the shortest-lived go first (pending logins, one-minute retry receipts, sessions about to expire); an index outlives its values, so values go first. An evicted revocation marker lets the revoked session accept writes again, never an identity.
+  - any `allkeys-*` or other `volatile-*` policy evicts arbitrary keys: users are logged out at random (an evicted value or index), logins fail (an evicted login state), revocation markers vanish as above; never a resurrected session, but unpredictable.
+
+  Tested excerpt ([session/redisbackend/example_test.go](../../session/redisbackend/example_test.go)):
 
 ```go
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
