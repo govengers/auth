@@ -1513,6 +1513,7 @@ Decisions taken during implementation (29.10.2026, settled by the lead):
 | D39 | The public listener reads at most 64 KiB of request line and headers; the wide event's client-controlled fields are cut to 512 bytes. | net/http's 1 MiB default let a client push up to 1 MiB of header bytes into every 401 or unmatched-path event, which the sampler always keeps. |
 | D40 | After the agent-docs pass (30.10.2026): the binary's query redaction moved into the library as `ginadapter.RedactQuery`, which the binary's pre-enricher calls. | Library consumers on gin mounted the wide-event middleware without redaction, so callback `code` and `state` reached their logs. |
 | D41 | After the agent-docs pass (30.10.2026): `session.Store.SameSite()`; `oidc.New` and `github.New` refuse a store whose cookie is SameSite Strict. Password-only stores may keep Strict. | A Strict cookie is withheld on the redirect back from the IdP or GitHub, so every callback failed with `login_expired` at runtime instead of at startup (the binary already refused `SESSION_SAME_SITE=strict`, D32). |
+| D48 | The OIDC provider reads roles, client roles and groups from the access token only when its `sub` equals the verified ID token's `sub`; otherwise it ignores the access token as it ignores one that does not verify. | The access token's claims win over the ID token's, but nothing bound them to the user who logged in, so a token issued to another subject (an IdP bug, a confused token endpoint) would hand that subject's roles to this login. |
 
 ---
 

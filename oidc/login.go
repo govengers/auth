@@ -68,7 +68,7 @@ func (p *Provider) handleCallback(writer http.ResponseWriter, request *http.Requ
 }
 
 // verifyLogin exchanges code with the PKCE verifier, verifies the ID token and its nonce, checks the
-// email domain and reads the access token's claims.
+// email domain and reads the claims of an access token issued to the same subject.
 func (p *Provider) verifyLogin(ctx context.Context, code string, state oauthlogin.State) (verifiedLogin, error) {
 	token, err := p.exchange(ctx, code, state.Verifier)
 	if err != nil {
@@ -81,7 +81,7 @@ func (p *Provider) verifyLogin(ctx context.Context, code string, state oauthlogi
 	if err := checkEmailDomain(login.identityClaims, p.options.AllowedEmailDomains); err != nil {
 		return verifiedLogin{}, err
 	}
-	login.accessClaims = p.accessTokenClaims(ctx, token.AccessToken)
+	login.accessClaims = p.accessTokenClaims(ctx, token.AccessToken, login.subject)
 	return login, nil
 }
 
@@ -131,12 +131,13 @@ func identityTokenRefusal(err error) string {
 	return "ID token verification"
 }
 
-// accessTokenClaims returns the claims of a JWT access token signed by the issuer, or nil. Not every IdP
-// issues JWT access tokens (Google's are opaque), so a token that does not verify only means that the
-// roles and groups come from the ID token.
-func (p *Provider) accessTokenClaims(ctx context.Context, rawAccessToken string) map[string]any {
+// accessTokenClaims returns the claims of a JWT access token signed by the issuer for subject (the ID
+// token's sub), or nil. Not every IdP issues JWT access tokens (Google's are opaque), so a token that does
+// not verify only means that the roles and groups come from the ID token. A token for another subject is
+// ignored the same way: its roles are not this user's.
+func (p *Provider) accessTokenClaims(ctx context.Context, rawAccessToken, subject string) map[string]any {
 	accessToken, err := p.accessTokenVerifier.Verify(ctx, rawAccessToken)
-	if err != nil {
+	if err != nil || accessToken.Subject != subject {
 		return nil
 	}
 	var claims map[string]any
