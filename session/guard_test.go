@@ -1078,3 +1078,110 @@ func TestGuardRefreshIsDueDespiteApplicationSaves(t *testing.T) {
 		})
 	}
 }
+
+func TestGuardIdentifies(t *testing.T) {
+	fixture := newGuardFixture(t, GuardOptions{})
+	request := login(t, fixture.store, testIdentity())
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	request = request.WithContext(cancelled) // an upgrade request once its handler returned
+	apiKey := &auth.Identity{Provider: "apikey", Subject: "ci", Active: true}
+
+	identity, err := fixture.guard.Identify(auth.WithIdentity(t.Context(), apiKey), request)
+
+	require.NoError(t, err)
+	require.Equal(t, testIdentity(), identity, "the session's identity, not the context's")
+	require.Equal(t, []auth.Outcome{
+		{Provider: "password", Action: auth.ActionAuthenticate, Result: auth.ResultSuccess, Identity: testIdentity()},
+	}, fixture.observer.take())
+}
+
+func TestGuardIdentifyRefusesWithoutASession(t *testing.T) {
+	fixture := newGuardFixture(t, GuardOptions{})
+	endedRequest := login(t, fixture.store, testIdentity())
+	require.NoError(t, fixture.store.End(t.Context(), httptest.NewRecorder(), endedRequest))
+	testCases := []struct {
+		name    string
+		request *http.Request
+	}{
+		{name: "no cookie", request: newRequest(t)},
+		{name: "ended session", request: endedRequest},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			identity, err := fixture.guard.Identify(t.Context(), testCase.request)
+
+			require.ErrorIs(t, err, auth.ErrUnauthenticated)
+			require.Nil(t, identity)
+			outcomes := fixture.observer.take()
+			require.Len(t, outcomes, 1)
+			require.Equal(t, auth.Outcome{Provider: auth.ProviderSession, Action: auth.ActionAuthenticate, Result: auth.ResultDenied, Err: err}, outcomes[0])
+		})
+	}
+}
+
+func TestGuardIdentifyEndsAnExpiredImpersonation(t *testing.T) {
+	fixture := newImpersonationFixture(t, GuardOptions{}, ImpersonatorOptions{MaximumDuration: time.Minute})
+	request := login(t, fixture.store, testAdmin())
+	fixture.impersonate(t, request, "user-2")
+	fixture.clock.advance(time.Minute + time.Second)
+
+	identity, err := fixture.guard.Identify(t.Context(), request)
+
+	require.NoError(t, err)
+	require.Equal(t, testAdmin(), identity)
+	require.Equal(t, testAdmin(), storedIdentity(t, fixture.store, request))
+}
+
+func TestGuardIdentifyRefreshes(t *testing.T) {
+	refresher := &fakeRefresher{name: "password", refresh: func(identity *auth.Identity) (*auth.Identity, error) {
+		refreshed := identity.Clone()
+		refreshed.Username = "ada-renamed"
+		return refreshed, nil
+	}}
+	fixture := newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
+	request := login(t, fixture.store, testIdentity())
+	want := testIdentity()
+	want.Username = "ada-renamed"
+	fixture.clock.advance(2 * time.Minute)
+
+	identity, err := fixture.guard.Identify(t.Context(), request)
+
+	require.NoError(t, err)
+	require.Equal(t, want, identity)
+	require.Equal(t, want, storedIdentity(t, fixture.store, request), "the refresh was saved")
+	require.Equal(t, []auth.Outcome{
+		{Provider: "password", Action: auth.ActionRefresh, Result: auth.ResultSuccess, Identity: want},
+		{Provider: "password", Action: auth.ActionAuthenticate, Result: auth.ResultSuccess, Identity: want},
+	}, fixture.observer.take())
+	_, err = fixture.guard.Identify(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, 1, refresher.callCount(), "refreshedAt moved")
+}
+
+func TestGuardIdentifyRefreshRefusalEndsTheSession(t *testing.T) {
+	refusal := &auth.Error{Kind: auth.ErrForbidden, Reason: "not in an allowed team"}
+	refresher := &fakeRefresher{name: "password", refresh: func(*auth.Identity) (*auth.Identity, error) {
+		return nil, refusal
+	}}
+	fixture := newGuardFixture(t, GuardOptions{Refreshers: []Refresher{refresher}})
+	request := login(t, fixture.store, testIdentity())
+	fixture.clock.advance(2 * time.Minute)
+
+	identity, err := fixture.guard.Identify(t.Context(), request)
+
+	require.ErrorIs(t, err, refusal)
+	require.Nil(t, identity)
+	current, err := fixture.store.Open(request)
+	require.NoError(t, err)
+	_, err = current.Identity(t.Context())
+	require.ErrorIs(t, err, auth.ErrUnauthenticated, "session ended")
+	outcomes := fixture.observer.take()
+	require.Len(t, outcomes, 1)
+	require.Equal(t, auth.ActionRefresh, outcomes[0].Action)
+	require.Equal(t, auth.ResultDenied, outcomes[0].Result)
+	require.ErrorIs(t, outcomes[0].Err, refusal)
+	result := serveGuarded(fixture.guard.RequireAPI(), request)
+	require.Equal(t, http.StatusUnauthorized, result.recorder.Code, "the cookie names a revoked session")
+	require.Equal(t, 1, refresher.callCount(), "no refresh of an ended session")
+}

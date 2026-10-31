@@ -138,7 +138,9 @@ func (g *Guard) require(refuse refusalWriter) func(http.Handler) http.Handler {
 				next.ServeHTTP(writer, request)
 				return
 			}
-			identity, err := g.authenticate(writer, request)
+			identity, err := g.authenticate(request.Context(), request, func(ctx context.Context) error {
+				return g.options.Store.End(ctx, writer, request)
+			})
 			if err != nil {
 				refuse(writer, request, err)
 				return
@@ -146,6 +148,25 @@ func (g *Guard) require(refuse refusalWriter) func(http.Handler) http.Handler {
 			next.ServeHTTP(writer, request.WithContext(auth.WithIdentity(request.Context(), identity)))
 		})
 	}
+}
+
+// Identify returns the identity of the request's session without writing a response or a cookie: the
+// same lookup RequireAPI does, for a caller that has no response any more, such as a WebSocket re-validating
+// the cookies of its upgrade request for as long as the socket lives. It opens the session from the
+// request's cookies, ends an impersonation whose MaximumDuration is up (the identity is then the
+// impersonator's), runs a due refresh through the Refresher and reports to the Observer, exactly as the
+// middleware does; all of that writes the Store, never a cookie. The errors are the middleware's refusals:
+// an *auth.Error of kind ErrUnauthenticated without a valid session cookie or for an ended or expired
+// session, the Refresher's ErrUnauthenticated or ErrForbidden for a refused refresh, any other error for a
+// failing backend. A refused refresh ends the session in the Store as the middleware would; only the cookie
+// stays with the client, naming a revoked session that every later request is refused for, until a login
+// or logout replaces it or its Max-Age runs out.
+// An identity already in ctx is not consulted: Identify is a lookup, not middleware. The lookup runs on
+// ctx, not on the request's context, which an upgrade request no longer has once its handler returned.
+func (g *Guard) Identify(ctx context.Context, request *http.Request) (*auth.Identity, error) {
+	return g.authenticate(ctx, request, func(ctx context.Context) error {
+		return g.options.Store.revokeRequestSession(ctx, request)
+	})
 }
 
 func (g *Guard) redirectToLogin(writer http.ResponseWriter, request *http.Request, err error) {
@@ -166,8 +187,13 @@ func (g *Guard) returnPath(request *http.Request) string {
 	return returnPath
 }
 
-func (g *Guard) authenticate(writer http.ResponseWriter, request *http.Request) (*auth.Identity, error) {
-	ctx := request.Context()
+// sessionEnder ends the request's session when its refresh was refused: the middleware expires the cookie as
+// well (Store.End), Identify only revokes the session.
+type sessionEnder func(ctx context.Context) error
+
+// authenticate is the lookup behind the middleware and Identify, on ctx (the middleware's request context,
+// Identify's own) with end for a refused refresh.
+func (g *Guard) authenticate(ctx context.Context, request *http.Request, end sessionEnder) (*auth.Identity, error) {
 	current, err := g.options.Store.Open(request)
 	if err != nil {
 		return nil, g.reportFailure(ctx, auth.Outcome{Provider: auth.ProviderSession, Action: auth.ActionAuthenticate, Err: err})
@@ -185,7 +211,7 @@ func (g *Guard) authenticate(writer http.ResponseWriter, request *http.Request) 
 	}
 	identity := stored.Identity
 	if g.refreshDue(stored) {
-		if identity, err = g.refresh(writer, request, current, stored); err != nil {
+		if identity, err = g.refresh(ctx, current, stored, end); err != nil {
 			return nil, err
 		}
 	}
@@ -212,8 +238,7 @@ func (g *Guard) refreshDue(stored identityEnvelope) bool {
 // keep a refused identity alive with the claim taken. A claim the backend failed is read back: when the
 // stored value is the claim, it committed with its reply lost and the refresh runs (degraded); otherwise
 // the request fails without calling the provider, so a backend failing writes costs no provider call.
-func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, current Session, stored identityEnvelope) (*auth.Identity, error) {
-	ctx := request.Context()
+func (g *Guard) refresh(ctx context.Context, current Session, stored identityEnvelope, end sessionEnder) (*auth.Identity, error) {
 	refreshContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
 	defer cancel()
 	realIdentity := stored.Identity.Real()
@@ -233,7 +258,7 @@ func (g *Guard) refresh(writer http.ResponseWriter, request *http.Request, curre
 	case isRefusal(err):
 		revokeError := g.revokeAtProvider(ctx, realIdentity.Provider, current) // before End, which deletes what it reads
 		outcome.Err = errors.Join(err, revokeError)
-		if endError := g.endRefusedSession(writer, request.WithContext(refreshContext), current, claimed, stored.RefreshedAt); endError != nil {
+		if endError := g.endRefusedSession(refreshContext, end, current, claimed, stored.RefreshedAt); endError != nil {
 			// The session stays usable: a 500, not the refusal (kept as text only, so it cannot decide the answer).
 			outcome.Err = errors.Join(fmt.Errorf("end session refused by its refresh (%s): %w", err.Error(), endError), revokeError)
 		}
@@ -309,12 +334,11 @@ func (g *Guard) revokeAtProvider(ctx context.Context, provider string, current S
 	return nil
 }
 
-// endRefusedSession ends the session whose refresh was refused and returns the error of ending it. When
+// endRefusedSession ends the session whose refresh was refused through end and returns the error of ending it. When
 // that fails, the session stays usable, so it releases the claim (refreshedAt back to readAt): the next
 // request refreshes (and fails) again instead of passing on it.
-func (g *Guard) endRefusedSession(writer http.ResponseWriter, request *http.Request, current Session, claimed identityEnvelope, readAt time.Time) error {
-	ctx := request.Context()
-	if err := g.options.Store.End(ctx, writer, request); err != nil {
+func (g *Guard) endRefusedSession(ctx context.Context, end sessionEnder, current Session, claimed identityEnvelope, readAt time.Time) error {
+	if err := end(ctx); err != nil {
 		claimed.RefreshedAt = readAt
 		_, _, _ = current.swapEnvelope(ctx, claimed) // best effort: the request is a 500 already
 		return err
