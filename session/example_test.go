@@ -112,6 +112,36 @@ func ExampleGuard() {
 	// 200 {"provider":"password","subject":"user-1","username":"ada","active":true,"roles":[]}
 }
 
+// ExampleGuard_identify re-validates a long-lived connection by the cookies of its upgrade request, the
+// way a WebSocket does on every message: no response is written.
+func ExampleGuard_identify() {
+	store, err := newExampleStore()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	guard, err := session.NewGuard(&session.GuardOptions{Store: store})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	login := httptest.NewRecorder()
+	loginHandler(store).ServeHTTP(login, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/login", nil))
+	upgradeRequest := withCookies("/ws", login)
+
+	identity, err := guard.Identify(context.Background(), upgradeRequest) // later: on every message or a timer tick
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Println(identity.Subject)
+	_, err = guard.Identify(context.Background(), httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/ws", nil))
+	fmt.Println(err)
+	// Output:
+	// user-1
+	// unauthenticated: no valid session cookie
+}
+
 // adminLoginHandler stands in for a provider whose OnLogin grants the admin role.
 func adminLoginHandler(store *session.Store) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

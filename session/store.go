@@ -166,6 +166,13 @@ func (s *Store) Open(request *http.Request) (Session, error) {
 // client cannot keep it and a hung backend cannot hold the request) and expires the cookie. No cookie: only expires it.
 func (s *Store) End(ctx context.Context, writer http.ResponseWriter, request *http.Request) error {
 	http.SetCookie(writer, sessionCookie(s.options, "", -1))
+	return s.revokeRequestSession(ctx, request)
+}
+
+// revokeRequestSession is End without the cookie: it revokes the request's session, detached and bounded
+// the same way, for a caller that has no response to expire the cookie in (Guard.Identify). The cookie
+// then names a revoked session, which reads as logged out.
+func (s *Store) revokeRequestSession(ctx context.Context, request *http.Request) error {
 	id, found := s.sessionID(request)
 	if !found {
 		return nil

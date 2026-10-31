@@ -25,6 +25,7 @@ Application code rarely touches the store directly: `store.Open(request)` return
 - `RequireAPI()` answers 401 JSON without a session, 403 JSON for a refused identity.
 - `RequireUI()` answers 302 to `LoginURL?return_to=<path>` without a session; 403 JSON for a refused identity (a redirect would loop).
 - Both pass a request that already carries an identity (from `apikey` mounted in front) untouched.
+- `Identify(ctx, request)` is the same lookup without a response: it returns the identity of the request's session or the refusal the middleware would answer with (`auth.ErrUnauthenticated` without a valid session, the Refresher's refusal). For a caller that has no response writer any more, such as a WebSocket re-validating the cookies of its upgrade request on every message or a timer. It ends an expired impersonation and runs a due [refresh](#refresh) exactly like the middleware (store writes only); a refused refresh ends the session in the store, and only the cookie stays with the client, naming a revoked session until a login or logout replaces it. An identity already in `ctx` is not consulted, and the lookup runs on `ctx`, not on the request's context (an upgrade request's context is done once its handler returned).
 
 | Option | Default | Note |
 |---|---|---|
