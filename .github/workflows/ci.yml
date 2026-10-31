@@ -118,7 +118,7 @@ jobs:
       group: wiki
       cancel-in-progress: false
     permissions:
-      contents: write # push to the repository's wiki with the workflow token the checkout persisted
+      contents: write # push to the repository's wiki with the workflow token
     steps:
       - uses: actions/checkout@v7
         with:
@@ -126,6 +126,7 @@ jobs:
       - name: publish docs/wiki of this release
         env:
           TAG: ${{ github.ref_name }}
+          GITHUB_TOKEN: ${{ github.token }} # the checkout's credentials do not reach the wiki clone
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
