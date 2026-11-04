@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,8 +25,10 @@ import (
 	"github.com/govengers/auth/session"
 )
 
+// ServiceName is the metrics namespace and the traces' service.name.
+const ServiceName = "forwardauth"
+
 const (
-	metricsNamespace   = "forwardauth"
 	defaultHTTPTimeout = 10 * time.Second // the library's default for outbound HTTP (design 1.2)
 	redisDependency    = "redis"
 	redisNamespace     = "cache"
@@ -53,7 +56,7 @@ func NewDependencies(options *DependenciesOptions) (*Dependencies, error) {
 		return nil, errors.New("forwardauth dependencies: Registerer is required")
 	}
 	durations := prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: metricsNamespace, Subsystem: "dependency", Name: "request_duration_seconds",
+		Namespace: ServiceName, Subsystem: "dependency", Name: "request_duration_seconds",
 		Help: "Outbound call duration by dependency, operation and outcome.", Buckets: prometheus.DefBuckets,
 	}, []string{"dependency", "operation", "outcome"})
 	if err := options.Registerer.Register(durations); err != nil {
@@ -77,9 +80,14 @@ func (d *Dependencies) HTTPClient(name string) *http.Client {
 }
 
 // TraceRedis makes every command of client a client span, without the command text, which holds session
-// keys and values [TRC]. The readiness ping is traced too.
+// keys and values [TRC]. PING is not traced: only the boot and the readiness probe send it, and a probe
+// makes no span.
 func (d *Dependencies) TraceRedis(client redis.UniversalClient) error {
-	if err := redisotel.InstrumentTracing(client, redisotel.WithTracerProvider(d.tracerProvider), redisotel.WithDBStatement(false)); err != nil {
+	if err := redisotel.InstrumentTracing(client,
+		redisotel.WithTracerProvider(d.tracerProvider),
+		redisotel.WithDBStatement(false),
+		redisotel.WithCommandFilter(skipPing),
+	); err != nil {
 		return fmt.Errorf("trace the Redis client: %w", err)
 	}
 	return nil
@@ -122,6 +130,11 @@ func (d *Dependencies) record(ctx context.Context, call dependencyCall) {
 	if calls, found := ctx.Value(dependencyCallsKey{}).(*dependencyCalls); found {
 		calls.add(call)
 	}
+}
+
+// skipPing keeps redisotel's own filter (AUTH, HELLO with credentials) and drops PING.
+func skipPing(command redis.Cmder) bool {
+	return redisotel.DefaultCommandFilter(command) || strings.EqualFold(command.Name(), "ping")
 }
 
 type recordingTransport struct {

@@ -160,7 +160,7 @@ func run(logger *slog.Logger) error {
 	config.Print()
 	gin.SetMode(ginMode(configuration.DevMode)) // process-wide; release mode keeps gin's debug lines off stdout
 
-	traces, err := tracing.New(ctx, &tracing.Options{ServiceName: metricsNamespace, ServiceVersion: version}) // OTEL_* [TRC]
+	traces, err := tracing.New(ctx, &tracing.Options{ServiceName: forwardauth.ServiceName, ServiceVersion: version}) // OTEL_* [TRC]
 	if err != nil {
 		return err
 	}
@@ -202,10 +202,7 @@ type instruments struct {
 	logger       *slog.Logger
 }
 
-const (
-	metricsNamespace  = "forwardauth"
-	traceFlushTimeout = 5 * time.Second
-)
+const traceFlushTimeout = 5 * time.Second
 
 // flushTraces exports the spans still buffered, last in the drain; a failure is logged, the process is
 // ending anyway.
@@ -219,7 +216,7 @@ func flushTraces(traces *tracing.Provider, logger *slog.Logger) {
 
 // newServer builds every component after the session store and the server that serves them.
 func newServer(ctx context.Context, configuration *Configuration, sessions *sessionStore, reporting *instruments) (*forwardauth.Server, error) {
-	outcomeCounter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: reporting.registry, Namespace: metricsNamespace})
+	outcomeCounter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: reporting.registry, Namespace: forwardauth.ServiceName})
 	if err != nil {
 		return nil, err
 	}

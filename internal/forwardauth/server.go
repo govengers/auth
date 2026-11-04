@@ -104,7 +104,7 @@ func NewServer(options *ServerOptions) (*Server, error) {
 	// health and readiness are probes, recorded by no metric [MET-003]
 	metrics, err := telemetrygin.NewMetricsMiddleware(&telemetrygin.MetricsOptions{
 		Registerer: resolved.MetricsRegistry,
-		Namespace:  metricsNamespace,
+		Namespace:  ServiceName,
 		SkipRoutes: []string{resolved.PathPrefix + "/health", resolved.PathPrefix + "/ready"},
 	})
 	if err != nil {
@@ -255,7 +255,7 @@ func (s *Server) newEngine(metrics gin.HandlerFunc) (*gin.Engine, error) {
 		return nil, fmt.Errorf("forwardauth server: wide events: %w", err)
 	}
 	probes := []string{s.path("/health"), s.path("/ready")}
-	spans := otelgin.Middleware(metricsNamespace,
+	spans := otelgin.Middleware(ServiceName,
 		otelgin.WithTracerProvider(s.options.TracerProvider),
 		otelgin.WithPropagators(propagation.TraceContext{}),
 		otelgin.WithGinFilter(func(ginContext *gin.Context) bool { return !slices.Contains(probes, ginContext.FullPath()) }),

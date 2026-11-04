@@ -89,3 +89,10 @@ func TestTraceRedisInstrumentsTheClient(t *testing.T) {
 
 // unsupportedRedisClient hides the concrete client type from redisotel.
 type unsupportedRedisClient struct{ redis.UniversalClient }
+
+func TestSkipPingKeepsRedisotelsFilter(t *testing.T) {
+	ctx := t.Context()
+	require.True(t, skipPing(redis.NewStatusCmd(ctx, "ping")), "the readiness probe makes no span")
+	require.True(t, skipPing(redis.NewStatusCmd(ctx, "auth", "secret")), "redisotel's own filter")
+	require.False(t, skipPing(redis.NewStringCmd(ctx, "get", "session")))
+}

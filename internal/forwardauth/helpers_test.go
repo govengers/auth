@@ -89,7 +89,7 @@ type harnessOptions struct {
 func newHarness(t *testing.T, options harnessOptions) *harness {
 	t.Helper()
 	registry := prometheus.NewRegistry()
-	counter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: registry, Namespace: metricsNamespace})
+	counter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: registry, Namespace: ServiceName})
 	require.NoError(t, err)
 	observer, err := NewObserver(&ObserverOptions{OutcomeCounter: counter})
 	require.NoError(t, err)
