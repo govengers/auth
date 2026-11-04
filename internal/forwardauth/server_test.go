@@ -87,7 +87,7 @@ func TestNewServerValidatesOptions(t *testing.T) {
 
 		_, err = NewServer(options)
 
-		require.ErrorContains(t, err, "register the HTTP metrics")
+		require.ErrorContains(t, err, "register the forwardauth HTTP metrics")
 	})
 }
 
@@ -586,23 +586,6 @@ func TestNetHTTPErrorLinesOfBothListenersAreJSONThroughTheLogger(t *testing.T) {
 		require.Equal(t, "ERROR", line["level"])
 		require.Equal(t, "http: Accept error: "+listener, line["msg"])
 	}
-}
-
-func TestNewHTTPMetricsRequiresARegisterer(t *testing.T) {
-	for _, options := range []*httpMetricsOptions{nil, {pathPrefix: "/auth"}} {
-		metrics, err := newHTTPMetrics(options)
-
-		require.ErrorContains(t, err, "a registerer is required")
-		require.Nil(t, metrics)
-	}
-}
-
-func TestMethodLabelBoundsTheMethods(t *testing.T) {
-	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace} {
-		require.Equal(t, method, methodLabel(method))
-	}
-	require.Equal(t, "other", methodLabel("get"))
-	require.Equal(t, "other", methodLabel("PROPFIND"))
 }
 
 // TestMain fails the package when a test leaves a goroutine behind, such as a listener of Run [TST-009].

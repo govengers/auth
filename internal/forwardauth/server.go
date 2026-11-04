@@ -1,7 +1,7 @@
 // Package forwardauth is the server of the forward-auth binary (cmd/forwardauth): the gin engine with
 // the forward-auth checks Traefik calls, the provider routes, JWKS, identity, health and readiness
-// endpoints, wide events and HTTP metrics on every request, and the graceful run of the public and the
-// metrics listener.
+// endpoints, traces, wide events and HTTP metrics on every request, and the graceful run of the public and
+// the metrics listener.
 package forwardauth
 
 import (
@@ -22,10 +22,15 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/govengers/telemetry"
+	telemetrygin "github.com/govengers/telemetry/ginadapter"
 	wideevent "github.com/govengers/wide-event-logger"
 	wideeventgin "github.com/govengers/wide-event-logger/ginadapter"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/apikey"
@@ -73,6 +78,7 @@ type ServerOptions struct {
 	Logger            *slog.Logger                    // required: net/http's own error lines (accept errors, panics outside gin) [LOG-013]
 	SampleRate        int                             // required, >= 1: keep every Nth successful event
 	MetricsRegistry   *prometheus.Registry            // required; runtime collectors registered by main [MET-002]
+	TracerProvider    trace.TracerProvider            // optional; nil traces nothing [TRC]
 	ReadinessCheck    func(ctx context.Context) error // optional (Redis ping)
 	ShutdownDelay     time.Duration                   // 0..MaximumShutdownDelay; readiness answers 503 this long before the listeners drain
 	TrustedProxies    []string                        // optional; see ValidateTrustedProxies; empty trusts no proxy
@@ -95,9 +101,14 @@ func NewServer(options *ServerOptions) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	metrics, err := newHTTPMetrics(&httpMetricsOptions{registerer: resolved.MetricsRegistry, pathPrefix: resolved.PathPrefix})
+	// health and readiness are probes, recorded by no metric [MET-003]
+	metrics, err := telemetrygin.NewMetricsMiddleware(&telemetrygin.MetricsOptions{
+		Registerer: resolved.MetricsRegistry,
+		Namespace:  ServiceName,
+		SkipRoutes: []string{resolved.PathPrefix + "/health", resolved.PathPrefix + "/ready"},
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("forwardauth server: HTTP metrics: %w", err)
 	}
 	server := &Server{options: resolved, delay: time.Sleep}
 	server.ready.Store(true)
@@ -106,18 +117,16 @@ func NewServer(options *ServerOptions) (*Server, error) {
 	}
 	errorLog := slog.NewLogLogger(resolved.Logger.Handler(), slog.LevelError)
 	server.httpServer = newHTTPServer(resolved.Port, server.engine, errorLog)
-	server.metricsServer = newMetricsServer(resolved.MetricsPort, resolved.MetricsRegistry, errorLog)
+	server.metricsServer, err = telemetry.NewMetricsServer(&telemetry.MetricsServerOptions{
+		Registry: resolved.MetricsRegistry, Address: ":" + strconv.Itoa(resolved.MetricsPort), ErrorLog: errorLog,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("forwardauth server: metrics listener: %w", err)
+	}
 	return server, nil
 }
 
-// newMetricsServer serves only GET /metrics of registry.
-func newMetricsServer(port int, registry *prometheus.Registry, errorLog *log.Logger) *http.Server {
-	routes := http.NewServeMux()
-	routes.Handle("GET /metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{Registry: registry}))
-	return newHTTPServer(port, routes, errorLog)
-}
-
-// newHTTPServer bounds every phase of a connection, so slow or idle clients cannot hold it [LAY-006, MET-001],
+// newHTTPServer bounds every phase of a connection, so slow or idle clients cannot hold it [LAY-006],
 // and the request line with the headers to 64 KiB (net/http answers 431 above): Traefik forwards the
 // client's headers, large cookies fit, and net/http's 1 MiB default would let a client push that into
 // every always-kept event.
@@ -143,6 +152,9 @@ func resolveServerOptions(options *ServerOptions) (ServerOptions, error) {
 	resolved.TrustedProxies = slices.Clone(options.TrustedProxies)
 	if resolved.JWTHeader == "" {
 		resolved.JWTHeader = defaultJWTHeader
+	}
+	if resolved.TracerProvider == nil {
+		resolved.TracerProvider = noop.NewTracerProvider()
 	}
 	var problems []error
 	if err := ValidatePathPrefix(resolved.PathPrefix); err != nil {
@@ -219,14 +231,15 @@ func validPort(port int) bool {
 	return port >= 0 && port <= MaximumPort
 }
 
-// newEngine builds the gin engine: wide event outermost so it records the final status, then the HTTP
-// metrics, then the sums of the outbound calls, then the panic recovery, then the routes. A trailing
+// newEngine builds the gin engine: the request's span outermost, continuing the caller's W3C trace context,
+// so the wide event that comes next records its IDs; the wide event records the final status; then the
+// HTTP metrics, the sums of the outbound calls, the panic recovery and the routes. Probes make no span. A trailing
 // "/" is an unmatched route: gin's redirect would answer before the middleware, without event or
 // metric, and print the raw query in debug mode [LOG-009]. Routes match the path as sent (UseRawPath),
 // so a percent-encoded variant such as /auth/%75i is unmatched: a proxy matching the encoded path must
 // not reach a check or the probe it did not route there. The client IP comes from the forwarding headers
 // only behind TrustedProxies; gin.New trusts every peer.
-func (s *Server) newEngine(metrics *httpMetrics) (*gin.Engine, error) {
+func (s *Server) newEngine(metrics gin.HandlerFunc) (*gin.Engine, error) {
 	engine := gin.New()
 	engine.RedirectTrailingSlash = false
 	engine.UseRawPath = true
@@ -241,9 +254,16 @@ func (s *Server) newEngine(metrics *httpMetrics) (*gin.Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("forwardauth server: wide events: %w", err)
 	}
+	probes := []string{s.path("/health"), s.path("/ready")}
+	spans := otelgin.Middleware(ServiceName,
+		otelgin.WithTracerProvider(s.options.TracerProvider),
+		otelgin.WithPropagators(propagation.TraceContext{}),
+		otelgin.WithGinFilter(func(ginContext *gin.Context) bool { return !slices.Contains(probes, ginContext.FullPath()) }),
+	)
 	engine.Use(
+		spans,
 		wideEvents,
-		metrics.middleware,
+		metrics,
 		recordDependencies,
 		recovery,
 	)

@@ -5,17 +5,28 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/govengers/telemetry"
 	wideevent "github.com/govengers/wide-event-logger"
 	wideeventgin "github.com/govengers/wide-event-logger/ginadapter"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/redis/go-redis/extra/redisotel/v9"
+	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/session"
 )
+
+// ServiceName is the metrics namespace and the traces' service.name.
+const ServiceName = "forwardauth"
 
 const (
 	defaultHTTPTimeout = 10 * time.Second // the library's default for outbound HTTP (design 1.2)
@@ -26,18 +37,17 @@ const (
 // Dependencies records the outbound calls of the binary, the Redis session operations and the HTTP calls
 // of the provider and Keycloak, in forwardauth_dependency_request_duration_seconds and, during a request,
 // summed per dependency on its wide event [LOG-004, LOG-006, MET-006]. Calls outside a request (discovery
-// at boot, JWKS refreshes) reach only the metric. It is safe for concurrent use.
-//
-// There is no OpenTelemetry tracing [OBS-001]: a check is one hop from Traefik with at most a Redis call
-// and a provider call behind it, which the wide event already sums per dependency; the binary has no
-// trace backend or trace context to join. Add otelhttp and redisotel here when a deployment traces.
+// at boot, JWKS refreshes) reach only the metric. Every call is also a client span of TracerProvider
+// that carries the W3C trace context to the provider [TRC]. It is safe for concurrent use.
 type Dependencies struct {
-	durations *prometheus.HistogramVec
+	durations      *prometheus.HistogramVec
+	tracerProvider trace.TracerProvider
 }
 
 // DependenciesOptions configure Dependencies.
 type DependenciesOptions struct {
-	Registerer prometheus.Registerer // required: the registry /metrics serves [MET-002]
+	Registerer     prometheus.Registerer // required: the registry /metrics serves [MET-002]
+	TracerProvider trace.TracerProvider  // optional; nil traces nothing [TRC]
 }
 
 // NewDependencies registers the dependency histogram on options.Registerer.
@@ -46,13 +56,17 @@ func NewDependencies(options *DependenciesOptions) (*Dependencies, error) {
 		return nil, errors.New("forwardauth dependencies: Registerer is required")
 	}
 	durations := prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: metricsNamespace, Subsystem: "dependency", Name: "request_duration_seconds",
+		Namespace: ServiceName, Subsystem: "dependency", Name: "request_duration_seconds",
 		Help: "Outbound call duration by dependency, operation and outcome.", Buckets: prometheus.DefBuckets,
 	}, []string{"dependency", "operation", "outcome"})
 	if err := options.Registerer.Register(durations); err != nil {
 		return nil, fmt.Errorf("register the dependency metrics: %w", err)
 	}
-	return &Dependencies{durations: durations}, nil
+	tracerProvider := options.TracerProvider
+	if tracerProvider == nil {
+		tracerProvider = noop.NewTracerProvider()
+	}
+	return &Dependencies{durations: durations, tracerProvider: tracerProvider}, nil
 }
 
 // HTTPClient returns a client with the 10 s default timeout whose calls are recorded as dependency name
@@ -60,7 +74,23 @@ func NewDependencies(options *DependenciesOptions) (*Dependencies, error) {
 // the recorded error is the transport's reduced by dependency.TransportFailure: no URL, whose query may
 // carry personal data, and no byte of a malformed answer [LOG-009]. The caller gets the error unchanged.
 func (d *Dependencies) HTTPClient(name string) *http.Client {
-	return &http.Client{Timeout: defaultHTTPTimeout, Transport: &recordingTransport{dependencies: d, name: name}}
+	traced := otelhttp.NewTransport(http.DefaultTransport,
+		otelhttp.WithTracerProvider(d.tracerProvider), otelhttp.WithPropagators(propagation.TraceContext{}))
+	return &http.Client{Timeout: defaultHTTPTimeout, Transport: &recordingTransport{dependencies: d, name: name, base: traced}}
+}
+
+// TraceRedis makes every command of client a client span, without the command text, which holds session
+// keys and values [TRC]. PING is not traced: only the boot and the readiness probe send it, and a probe
+// makes no span.
+func (d *Dependencies) TraceRedis(client redis.UniversalClient) error {
+	if err := redisotel.InstrumentTracing(client,
+		redisotel.WithTracerProvider(d.tracerProvider),
+		redisotel.WithDBStatement(false),
+		redisotel.WithCommandFilter(skipPing),
+	); err != nil {
+		return fmt.Errorf("trace the Redis client: %w", err)
+	}
+	return nil
 }
 
 // Backend wraps backend so its operations are recorded as dependency "redis" (operation: put, get, pop,
@@ -102,16 +132,22 @@ func (d *Dependencies) record(ctx context.Context, call dependencyCall) {
 	}
 }
 
+// skipPing keeps redisotel's own filter (AUTH, HELLO with credentials) and drops PING.
+func skipPing(command redis.Cmder) bool {
+	return redisotel.DefaultCommandFilter(command) || strings.EqualFold(command.Name(), "ping")
+}
+
 type recordingTransport struct {
 	dependencies *Dependencies
 	name         string
+	base         http.RoundTripper // the traced default transport
 }
 
 func (t *recordingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	start := time.Now()
-	response, err := http.DefaultTransport.RoundTrip(request)
+	response, err := t.base.RoundTrip(request)
 	call := dependencyCall{
-		dependency: t.name, operation: methodLabel(request.Method), namespace: "http." + t.name,
+		dependency: t.name, operation: telemetry.MethodLabel(request.Method), namespace: "http." + t.name,
 		duration: time.Since(start), failed: err != nil,
 	}
 	if err != nil {

@@ -21,9 +21,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/govengers/config/v2"
+	"github.com/govengers/telemetry"
+	"github.com/govengers/telemetry/tracing"
 	wideevent "github.com/govengers/wide-event-logger"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/govengers/auth"
@@ -142,8 +143,9 @@ func main() {
 	}
 }
 
-// run boots in a fixed order [LAY-002]: configuration, metrics registry and dependency metrics, session
-// store, provider, Guard, API keys, signer, server; then it serves until SIGINT or SIGTERM.
+// run boots in a fixed order [LAY-002]: configuration, tracer provider, metrics registry and dependency
+// metrics, session store, provider, Guard, API keys, signer, server; then it serves until SIGINT or
+// SIGTERM, drains, closes Redis and flushes the spans.
 func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -158,8 +160,13 @@ func run(logger *slog.Logger) error {
 	config.Print()
 	gin.SetMode(ginMode(configuration.DevMode)) // process-wide; release mode keeps gin's debug lines off stdout
 
-	metricsRegistry := newMetricsRegistry()
-	dependencies, err := forwardauth.NewDependencies(&forwardauth.DependenciesOptions{Registerer: metricsRegistry})
+	traces, err := tracing.New(ctx, &tracing.Options{ServiceName: forwardauth.ServiceName, ServiceVersion: version}) // OTEL_* [TRC]
+	if err != nil {
+		return err
+	}
+	defer flushTraces(traces, logger)
+	metricsRegistry := telemetry.NewRegistry()
+	dependencies, err := forwardauth.NewDependencies(&forwardauth.DependenciesOptions{Registerer: metricsRegistry, TracerProvider: traces.TracerProvider()})
 	if err != nil {
 		return err
 	}
@@ -168,12 +175,12 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	defer sessions.close(logger)
-	server, err := newServer(ctx, configuration, sessions, &instruments{registry: metricsRegistry, dependencies: dependencies, logger: logger})
+	server, err := newServer(ctx, configuration, sessions, &instruments{registry: metricsRegistry, traces: traces, dependencies: dependencies, logger: logger})
 	if err != nil {
 		return err
 	}
 	logger.Info("forwardauth started", "version", version, "provider", configuration.Provider,
-		"port", configuration.Port, "metricsPort", configuration.MetricsPort, "redis", configuration.SessionRedisEnabled)
+		"port", configuration.Port, "metricsPort", configuration.MetricsPort, "redis", configuration.SessionRedisEnabled, "tracing", traces.Enabled())
 	err = server.Run(ctx)
 	logger.Info("forwardauth stopped")
 	return err
@@ -186,17 +193,30 @@ func ginMode(devMode bool) string {
 	return gin.ReleaseMode
 }
 
-// instruments are what the components report to: the registry /metrics serves, the recorder of outbound
-// calls and the logger of the lines outside a request.
+// instruments are what the components report to: the registry /metrics serves, the tracer provider, the
+// recorder of outbound calls and the logger of the lines outside a request.
 type instruments struct {
 	registry     *prometheus.Registry
+	traces       *tracing.Provider
 	dependencies *forwardauth.Dependencies
 	logger       *slog.Logger
 }
 
+const traceFlushTimeout = 5 * time.Second
+
+// flushTraces exports the spans still buffered, last in the drain; a failure is logged, the process is
+// ending anyway.
+func flushTraces(traces *tracing.Provider, logger *slog.Logger) {
+	flushContext, cancel := context.WithTimeout(context.Background(), traceFlushTimeout)
+	defer cancel()
+	if err := traces.Shutdown(flushContext); err != nil {
+		logger.Error("shutdown incomplete", "error", err.Error())
+	}
+}
+
 // newServer builds every component after the session store and the server that serves them.
-func newServer(ctx context.Context, configuration *Configuration, sessions *sessionStore, telemetry *instruments) (*forwardauth.Server, error) {
-	outcomeCounter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: telemetry.registry, Namespace: "forwardauth"})
+func newServer(ctx context.Context, configuration *Configuration, sessions *sessionStore, reporting *instruments) (*forwardauth.Server, error) {
+	outcomeCounter, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: reporting.registry, Namespace: forwardauth.ServiceName})
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +224,7 @@ func newServer(ctx context.Context, configuration *Configuration, sessions *sess
 	if err != nil {
 		return nil, err
 	}
-	selected, err := newProvider(ctx, configuration, sessions.store, observer, telemetry.dependencies)
+	selected, err := newProvider(ctx, configuration, sessions.store, observer, reporting.dependencies)
 	if err != nil {
 		return nil, err
 	}
@@ -248,24 +268,14 @@ func newServer(ctx context.Context, configuration *Configuration, sessions *sess
 		JWTHeader:        configuration.JWTHeader,
 		IdentityEndpoint: configuration.IdentityEndpointEnabled,
 		Emitter:          emitter,
-		Logger:           telemetry.logger,
+		Logger:           reporting.logger,
 		SampleRate:       configuration.WideEventSampleRate,
-		MetricsRegistry:  telemetry.registry,
-		ReadinessCheck:   sessions.readinessCheck(telemetry.dependencies),
+		MetricsRegistry:  reporting.registry,
+		TracerProvider:   reporting.traces.TracerProvider(),
+		ReadinessCheck:   sessions.readinessCheck(reporting.dependencies),
 		ShutdownDelay:    seconds(configuration.ShutdownDelaySeconds),
 		TrustedProxies:   configuration.TrustedProxies,
 	})
-}
-
-// newMetricsRegistry returns the registry /metrics serves, with the Go, process and build-info collectors [MET-002].
-func newMetricsRegistry() *prometheus.Registry {
-	metricsRegistry := prometheus.NewRegistry()
-	metricsRegistry.MustRegister(
-		collectors.NewGoCollector(),
-		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
-		collectors.NewBuildInfoCollector(),
-	)
-	return metricsRegistry
 }
 
 // newEmitter writes wide events as JSON lines on stdout, or readable for a developer in dev mode [LOG-013].

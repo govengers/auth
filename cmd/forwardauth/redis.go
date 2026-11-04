@@ -23,7 +23,7 @@ import (
 const redisStartupTimeout = 5 * time.Second
 
 // newBackend opens the Redis client when SESSION_REDIS_ENABLED, fails when Redis does not answer
-// [RES-007] and records its calls; otherwise it returns the in-memory backend (exactly one replica).
+// [RES-007] and records and traces its calls; otherwise it returns the in-memory backend (exactly one replica).
 func (s *sessionStore) newBackend(ctx context.Context, configuration *Configuration, dependencies *forwardauth.Dependencies) (session.Backend, error) {
 	if !configuration.SessionRedisEnabled {
 		return session.NewMemoryBackend(nil)
@@ -33,6 +33,9 @@ func (s *sessionStore) newBackend(ctx context.Context, configuration *Configurat
 		return nil, err
 	}
 	s.redis = client
+	if err := dependencies.TraceRedis(client); err != nil {
+		return nil, errors.Join(err, s.closeRedis())
+	}
 	pingContext, cancel := context.WithTimeout(ctx, redisStartupTimeout)
 	defer cancel()
 	if err := s.redis.Ping(pingContext).Err(); err != nil {

@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
+	"github.com/govengers/telemetry/tracing"
 	wideevent "github.com/govengers/wide-event-logger"
 
 	"github.com/govengers/auth"
@@ -50,12 +51,14 @@ func sampler(rate int) wideevent.Sampler {
 	)
 }
 
-// recordRequest is the wide-event pre-enricher: it records the version and what Traefik asks to forward.
+// recordRequest is the wide-event pre-enricher: it records the version, the IDs of the request's span
+// [TRC] and what Traefik asks to forward.
 // The middleware records the request itself, cuts its client-controlled fields and redacts the query
 // [LOG-009]. Only the path of X-Forwarded-Uri is recorded, never its query; each forward field is cut to
 // maximumFieldBytes: 401s and unmatched paths are always kept.
 func (s *Server) recordRequest(we *wideevent.Event, ginContext *gin.Context) {
 	we.String("service.version", s.options.Version)
+	tracing.RecordTraceID(ginContext.Request.Context(), we)
 	if method := ginContext.GetHeader("X-Forwarded-Method"); method != "" {
 		we.String("forward.method", truncated(method))
 	}
