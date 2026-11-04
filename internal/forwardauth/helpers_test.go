@@ -17,6 +17,7 @@ import (
 	wideevent "github.com/govengers/wide-event-logger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/apikey"
@@ -82,6 +83,7 @@ type harnessOptions struct {
 	emitter          wideevent.Emitter // replaces the event recorder
 	dependencies     *Dependencies     // records the session store's calls
 	trustedProxies   []string
+	tracerProvider   trace.TracerProvider
 }
 
 func newHarness(t *testing.T, options harnessOptions) *harness {
@@ -110,6 +112,7 @@ func newHarness(t *testing.T, options harnessOptions) *harness {
 		MetricsRegistry:  registry,
 		ReadinessCheck:   options.readinessCheck,
 		TrustedProxies:   options.trustedProxies,
+		TracerProvider:   options.tracerProvider,
 	}
 	if options.emitter != nil {
 		serverOptions.Emitter = options.emitter
