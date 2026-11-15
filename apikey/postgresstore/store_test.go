@@ -107,7 +107,7 @@ func TestIssueReturnsTheKeyOnceAndStoresOnlyItsHash(t *testing.T) {
 	fixture := newFixture(t)
 
 	text, key, err := fixture.store.Issue(t.Context(), fixture.owner, postgresstore.IssueRequest{
-		Name: "ci", Scopes: []auth.Permission{tasksRead}, ExpiresAt: start.Add(time.Hour),
+		Name: "ci", Scopes: []auth.Permission{tasksRead}, ExpiresAt: start.Add(time.Hour + time.Nanosecond), // below PostgreSQL's precision
 	})
 
 	require.NoError(t, err)
@@ -141,6 +141,8 @@ func TestIssueRefusesInvalidRequests(t *testing.T) {
 	}{
 		{name: "no name", request: postgresstore.IssueRequest{Name: " ", Scopes: []auth.Permission{tasksRead}}, reason: "name is required"},
 		{name: "long name", request: postgresstore.IssueRequest{Name: strings.Repeat("x", 201), Scopes: []auth.Permission{tasksRead}}, reason: "longer than 200"},
+		{name: "NUL byte in name", request: postgresstore.IssueRequest{Name: "a\x00b", Scopes: []auth.Permission{tasksRead}}, reason: "NUL byte"},
+		{name: "invalid UTF-8 name", request: postgresstore.IssueRequest{Name: "caf\xff", Scopes: []auth.Permission{tasksRead}}, reason: "not valid UTF-8"},
 		{name: "no scope", request: postgresstore.IssueRequest{Name: "ci"}, reason: "at least one scope"},
 		{name: "invalid scope", request: postgresstore.IssueRequest{Name: "ci", Scopes: []auth.Permission{{Resource: "Tasks", Access: auth.AccessRead}}}, reason: "resource must be"},
 		{name: "past expiry", request: postgresstore.IssueRequest{Name: "ci", Scopes: []auth.Permission{tasksRead}, ExpiresAt: start}, reason: "not in the future"},

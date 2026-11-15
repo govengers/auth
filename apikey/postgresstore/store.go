@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -102,6 +103,11 @@ type IssueRequest struct {
 // the owner's Roles, OIDCRoles, OIDCClientRoles, Groups and Teams, which no resource scope can narrow.
 // Provider is "apikey", Subject the key ID, UserID the owner's (Load's, else the owner ID), and the
 // identity never impersonates.
+//
+// Scopes bind permission checks only: UserID, Active, Attributes, Claims and Data stay the owner's, so a key
+// with the single scope "tasks:read" still passes IsAuthenticated, IsUser and HasUserID(owner). Guard every
+// route a key may reach with HasPermission, also routes an ownership check alone would cover (change my
+// profile, delete my account), or keep keys off them.
 type Store struct {
 	pool             *pgxpool.Pool
 	prefix           string
@@ -132,7 +138,8 @@ func New(options *Options) (*Store, error) {
 // Issue creates a key for ownerID and returns its text, which is never available again, and the stored key.
 // An invalid request is an *auth.Error of kind auth.ErrInvalidRequest naming the problem in its Reason.
 func (s *Store) Issue(ctx context.Context, ownerID uuid.UUID, request IssueRequest) (string, *Key, error) {
-	now := s.now().Truncate(time.Microsecond) // PostgreSQL's precision, so List returns the same CreatedAt
+	now := s.now().Truncate(time.Microsecond) // PostgreSQL's precision, so List returns the same times
+	request.ExpiresAt = request.ExpiresAt.Truncate(time.Microsecond)
 	if ownerID == uuid.Nil {
 		return "", nil, invalid("owner ID is nil")
 	}
@@ -195,6 +202,10 @@ func (s *Store) Revoke(ctx context.Context, ownerID, id uuid.UUID) error {
 // Resolve is the apikey.Resolver of the store: it returns the identity of a presented key (see Store), or an
 // error matching auth.ErrUnauthenticated for a key that is malformed, unknown, wrong, expired or whose owner
 // Load refuses. A key of the wrong shape is refused before any query. Errors never contain the key.
+//
+// Recording the use is part of the check: when the last-use write is due (LastUsedInterval) and fails, a
+// read-only database during a failover for instance, Resolve returns that error and the request is refused
+// although the key is valid. Keys therefore need a writable database, like logins do.
 func (s *Store) Resolve(ctx context.Context, key string) (*auth.Identity, error) {
 	id, secret, ok := s.parse(key)
 	if !ok {
@@ -286,6 +297,8 @@ func validate(request IssueRequest, now time.Time) error {
 		return invalid("name is required")
 	case len(request.Name) > maximumNameBytes:
 		return invalid(fmt.Sprintf("name is longer than %d bytes", maximumNameBytes))
+	case !utf8.ValidString(request.Name) || strings.ContainsRune(request.Name, 0):
+		return invalid("name is not valid UTF-8 or contains a NUL byte") // PostgreSQL text holds neither
 	case len(request.Scopes) == 0:
 		return invalid("at least one scope is required")
 	case !request.ExpiresAt.IsZero() && !request.ExpiresAt.After(now):

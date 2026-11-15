@@ -17,7 +17,7 @@
 - [Sessions](docs/wiki/Sessions.md): `Store`, `Guard` (`RequireAPI`, `RequireUI`, `Identify` for sockets), cookie naming, refresh, impersonation (`Impersonator`), memory, Redis and PostgreSQL backends.
 - [Authorization](docs/wiki/Authorization.md): identity fields, roles, permissions, checks, net/http check middleware, own checks.
 - [JWT](docs/wiki/JWT.md): `jwt.Verifier` in backends, `jwt.Signer`.
-- [API-Keys](docs/wiki/API-Keys.md): static keys, `Resolver`, ordering with the Guard, per-owner keys on PostgreSQL (`postgresstore`: issue, list, revoke, scopes cap the owner).
+- [API-Keys](docs/wiki/API-Keys.md): static keys, `Resolver`, ordering with the Guard, per-owner keys on PostgreSQL (`postgresstore`: issue, list, revoke, scopes cap the owner's permissions only, not ownership checks).
 - [Gin](docs/wiki/Gin.md): `ginadapter`, wide events, `prometheusadapter`.
 - [Errors-and-Observability](docs/wiki/Errors-and-Observability.md): `auth.Error`, `ResponseFor`, `Observer`, `Outcome`.
 - [Forward-Auth](docs/wiki/Forward-Auth.md): the image in short: what it does, minimum configuration, the Traefik rules that matter.
