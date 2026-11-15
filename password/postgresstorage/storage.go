@@ -34,6 +34,7 @@ const (
 
 const userExists = `SELECT EXISTS (SELECT 1 FROM govengers_auth_password_credentials WHERE user_id = $1)`
 
+//nolint:gosec // G101: SQL naming the password_hash column, no credential
 const updatePasswordHash = `
 UPDATE govengers_auth_password_credentials SET password_hash = $3 WHERE user_id = $1 AND password_hash = $2`
 
