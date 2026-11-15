@@ -25,7 +25,7 @@ func Run(t *testing.T, newStorage func(t *testing.T) password.Storage) {
 		run  func(t *testing.T, storage password.Storage)
 	}{
 		{name: "create user refuses used IDs, usernames and emails ignoring case", run: testCreateUser},
-		{name: "lookups ignore case", run: testLookups},
+		{name: "lookups ignore case and find nothing for identifiers no user can have", run: testLookups},
 		{name: "storage shares nothing with callers", run: testSharesNothingWithCallers},
 		{name: "update password hash is a compare and swap", run: testUpdatePasswordHash},
 		{name: "totp attempts count down and reset", run: testTOTPAttempts},
@@ -96,6 +96,14 @@ func testLookups(t *testing.T, storage password.Storage) {
 	require.ErrorIs(t, err, password.ErrUserNotFound)
 	_, err = storage.GetUserByID(t.Context(), uuid.New())
 	require.ErrorIs(t, err, password.ErrUserNotFound)
+
+	// The provider passes identifiers as typed: one no user can have is not found, never an error.
+	for _, identifier := range []string{"ad\x00a", "ad\x00a@example.com", "caf\xff", "caf\xff@example.com"} {
+		_, err = storage.GetUserByUsername(t.Context(), identifier)
+		require.ErrorIs(t, err, password.ErrUserNotFound, "username %q", identifier)
+		_, err = storage.GetUserByEmail(t.Context(), identifier)
+		require.ErrorIs(t, err, password.ErrUserNotFound, "email %q", identifier)
+	}
 }
 
 func testSharesNothingWithCallers(t *testing.T, storage password.Storage) {

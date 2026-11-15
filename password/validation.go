@@ -11,6 +11,10 @@ import (
 	"github.com/govengers/auth"
 )
 
+// maximumEmailLength is the longest address SMTP carries (RFC 5321); it also keeps an email within what a
+// database index can hold.
+const maximumEmailLength = 254
+
 var (
 	usernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_]{3,50}$`)
 	emailPattern    = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
@@ -87,8 +91,8 @@ func validateRegistration(registration registerRequest, options Options) error {
 		return &auth.Error{Kind: auth.ErrInvalidRequest, Reason: "registration with an email while email login is disabled"}
 	case registration.Username != nil && !usernamePattern.MatchString(*registration.Username):
 		return &auth.Error{Kind: auth.ErrInvalidRequest, Code: codeInvalidUsername, Reason: "username is not 3-50 of [a-zA-Z0-9_]"}
-	case registration.Email != nil && !emailPattern.MatchString(*registration.Email):
-		return &auth.Error{Kind: auth.ErrInvalidRequest, Code: codeInvalidEmail, Reason: "malformed email"}
+	case registration.Email != nil && (len(*registration.Email) > maximumEmailLength || !emailPattern.MatchString(*registration.Email)):
+		return &auth.Error{Kind: auth.ErrInvalidRequest, Code: codeInvalidEmail, Reason: "malformed email or longer than 254 bytes"}
 	}
 	if err := options.Policy.Validate(registration.Password); err != nil {
 		return &auth.Error{Kind: auth.ErrInvalidRequest, Code: codeWeakPassword, Reason: err.Error()}

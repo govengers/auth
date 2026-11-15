@@ -34,8 +34,10 @@ CREATE TABLE govengers_auth_password_credentials (
     CHECK (username IS NOT NULL OR email IS NOT NULL)
 );
 
+-- COLLATE "C": lower() folds ASCII only, whatever the database's default collation (a Turkish one folds
+-- "I" to a dotless i); registration allows ASCII usernames and emails only.
 CREATE UNIQUE INDEX govengers_auth_password_credentials_username
-    ON govengers_auth_password_credentials (lower(username));
+    ON govengers_auth_password_credentials (lower(username COLLATE "C"));
 CREATE UNIQUE INDEX govengers_auth_password_credentials_email
-    ON govengers_auth_password_credentials (lower(email));
+    ON govengers_auth_password_credentials (lower(email COLLATE "C"));
 `

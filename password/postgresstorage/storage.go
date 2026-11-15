@@ -3,7 +3,9 @@ package postgresstorage
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -27,8 +29,9 @@ SELECT user_id, username, email, password_hash, totp_enabled, totp_secret, backu
 FROM govengers_auth_password_credentials `
 
 const (
-	selectUserByUsername = selectUser + `WHERE lower(username) = lower($1)`
-	selectUserByEmail    = selectUser + `WHERE lower(email) = lower($1)`
+	// COLLATE "C" folds ASCII only, on every database whatever its default collation, as the indexes do.
+	selectUserByUsername = selectUser + `WHERE lower(username COLLATE "C") = lower($1 COLLATE "C")`
+	selectUserByEmail    = selectUser + `WHERE lower(email COLLATE "C") = lower($1 COLLATE "C")`
 	selectUserByID       = selectUser + `WHERE user_id = $1`
 )
 
@@ -85,7 +88,7 @@ func New(options *Options) (*Storage, error) {
 	return &Storage{pool: options.Pool}, nil
 }
 
-// CreateUser inserts user; a used ID, username or email (ignoring case) is password.ErrUserExists, decided by
+// CreateUser inserts user; a used ID, username or email (ignoring ASCII case) is password.ErrUserExists, decided by
 // the table's unique indexes.
 func (s *Storage) CreateUser(ctx context.Context, user *password.User) error {
 	if user == nil {
@@ -103,14 +106,14 @@ func (s *Storage) CreateUser(ctx context.Context, user *password.User) error {
 	return nil
 }
 
-// GetUserByUsername returns the user with username, ignoring case, or password.ErrUserNotFound.
+// GetUserByUsername returns the user with username, ignoring ASCII case, or password.ErrUserNotFound.
 func (s *Storage) GetUserByUsername(ctx context.Context, username string) (*password.User, error) {
-	return s.queryUser(ctx, selectUserByUsername, username)
+	return s.queryIdentifier(ctx, selectUserByUsername, username)
 }
 
-// GetUserByEmail returns the user with email, ignoring case, or password.ErrUserNotFound.
+// GetUserByEmail returns the user with email, ignoring ASCII case, or password.ErrUserNotFound.
 func (s *Storage) GetUserByEmail(ctx context.Context, email string) (*password.User, error) {
-	return s.queryUser(ctx, selectUserByEmail, email)
+	return s.queryIdentifier(ctx, selectUserByEmail, email)
 }
 
 // GetUserByID returns the user with id, or password.ErrUserNotFound.
@@ -191,6 +194,15 @@ func (s *Storage) requireUser(ctx context.Context, id uuid.UUID) error {
 		return password.ErrUserNotFound
 	}
 	return nil
+}
+
+// queryIdentifier looks up a login identifier as typed: one PostgreSQL text cannot hold (a NUL byte, invalid
+// UTF-8) names no stored user, so it is password.ErrUserNotFound without a query instead of an encoding error.
+func (s *Storage) queryIdentifier(ctx context.Context, statement, identifier string) (*password.User, error) {
+	if !utf8.ValidString(identifier) || strings.ContainsRune(identifier, 0) {
+		return nil, password.ErrUserNotFound
+	}
+	return s.queryUser(ctx, statement, identifier)
 }
 
 func (s *Storage) queryUser(ctx context.Context, statement string, argument any) (*password.User, error) {

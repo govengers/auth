@@ -35,7 +35,8 @@ type Storage interface {
 	// ErrUserExists; let a unique constraint decide it (e.g. on lower(email)), not a lookup before the insert.
 	CreateUser(ctx context.Context, user *User) error
 	// GetUserByUsername returns the user with username, ignoring case (e.g. WHERE lower(username) = lower($1)),
-	// or ErrUserNotFound. The provider passes identifiers as typed.
+	// or ErrUserNotFound. The provider passes identifiers as typed: one no user can have (a NUL byte, invalid
+	// UTF-8, which PostgreSQL refuses as text) is ErrUserNotFound too, never an error.
 	GetUserByUsername(ctx context.Context, username string) (*User, error)
 	// GetUserByEmail returns the user with email, ignoring case, or ErrUserNotFound.
 	GetUserByEmail(ctx context.Context, email string) (*User, error)

@@ -49,6 +49,25 @@ func TestApplicationColumnsDoNotBreakTheStorage(t *testing.T) {
 	require.Equal(t, user, read)
 }
 
+// Case folding is ASCII on every database: under a Turkish collation lower('I') is a dotless i, which would
+// make ADMIN and admin two users. The columns stand in for a database whose default collation is Turkish.
+func TestCaseFoldingIgnoresTheCollation(t *testing.T) {
+	pool := postgrestest.New(t, postgresstorage.MigrationV1, `
+ALTER TABLE govengers_auth_password_credentials
+    ALTER COLUMN username TYPE text COLLATE "tr-x-icu", ALTER COLUMN email TYPE text COLLATE "tr-x-icu"`)
+	storage, err := postgresstorage.New(&postgresstorage.Options{Pool: pool})
+	require.NoError(t, err)
+	username, email := "ADMIN", "ADMIN@EXAMPLE.COM"
+	require.NoError(t, storage.CreateUser(t.Context(), &password.User{ID: uuid.New(), Username: &username, Email: &email, PasswordHash: "hash"}))
+
+	_, err = storage.GetUserByUsername(t.Context(), "admin")
+	require.NoError(t, err)
+	_, err = storage.GetUserByEmail(t.Context(), "admin@example.com")
+	require.NoError(t, err)
+	lower := "admin"
+	require.ErrorIs(t, storage.CreateUser(t.Context(), &password.User{ID: uuid.New(), Username: &lower, PasswordHash: "hash"}), password.ErrUserExists)
+}
+
 func TestCreateUserRefusesAUserWithoutUsernameAndEmail(t *testing.T) {
 	storage := newStorage(t)
 
