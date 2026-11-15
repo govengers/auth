@@ -31,26 +31,26 @@ func TestServer(t *testing.T) {
 	t.Cleanup(replicaTwo.Close)
 	browser := newClient(t, replicaOne)
 
-	require.Equal(t, http.StatusCreated, send(t, browser, http.MethodPost, replicaOne.URL+"/auth/password/register", `{"username":"ada","password":"ada's long passphrase"}`, "").status)
-	require.Equal(t, http.StatusOK, send(t, browser, http.MethodGet, replicaTwo.URL+"/api/tasks", "", "").status, "the other replica reads the session")
-	issued := send(t, browser, http.MethodPost, replicaOne.URL+"/api/keys", `{"name":"ci","scopes":["tasks:read"]}`, "")
+	require.Equal(t, http.StatusCreated, send(t, browser, http.MethodPost, replicaOne.URL+"/auth/password/register", `{"username":"ada","password":"ada's long passphrase"}`).status)
+	require.Equal(t, http.StatusOK, send(t, browser, http.MethodGet, replicaTwo.URL+"/api/tasks", "").status, "the other replica reads the session")
+	issued := send(t, browser, http.MethodPost, replicaOne.URL+"/api/keys", `{"name":"ci","scopes":["tasks:read"]}`)
 	require.Equal(t, http.StatusCreated, issued.status)
 	var key keyBody
 	require.NoError(t, json.Unmarshal([]byte(issued.body), &key))
 
-	script := newClient(t, replicaTwo)
-	require.Equal(t, http.StatusOK, send(t, script, http.MethodGet, replicaTwo.URL+"/api/tasks", "", key.Key).status)
-	require.Equal(t, http.StatusForbidden, send(t, script, http.MethodPost, replicaTwo.URL+"/api/tasks", "", key.Key).status, "the key is read-only")
-	require.Equal(t, http.StatusCreated, send(t, browser, http.MethodPost, replicaOne.URL+"/api/tasks", "", "").status, "the session is not")
-	require.Equal(t, http.StatusUnauthorized, send(t, script, http.MethodPost, replicaTwo.URL+"/api/keys", `{"name":"x","scopes":["*:write"]}`, key.Key).status, "a key cannot issue keys")
-	require.Contains(t, send(t, browser, http.MethodGet, replicaOne.URL+"/api/keys", "", "").body, key.ID.String())
+	script := withKey(newClient(t, replicaTwo), key.Key)
+	require.Equal(t, http.StatusOK, send(t, script, http.MethodGet, replicaTwo.URL+"/api/tasks", "").status)
+	require.Equal(t, http.StatusForbidden, send(t, script, http.MethodPost, replicaTwo.URL+"/api/tasks", "").status, "the key is read-only")
+	require.Equal(t, http.StatusCreated, send(t, browser, http.MethodPost, replicaOne.URL+"/api/tasks", "").status, "the session is not")
+	require.Equal(t, http.StatusUnauthorized, send(t, script, http.MethodPost, replicaTwo.URL+"/api/keys", `{"name":"x","scopes":["*:write"]}`).status, "a key cannot issue keys")
+	require.Contains(t, send(t, browser, http.MethodGet, replicaOne.URL+"/api/keys", "").body, key.ID.String())
 
-	require.Equal(t, http.StatusNoContent, send(t, browser, http.MethodDelete, replicaOne.URL+"/api/keys/"+key.ID.String(), "", "").status)
-	require.Equal(t, http.StatusUnauthorized, send(t, script, http.MethodGet, replicaTwo.URL+"/api/tasks", "", key.Key).status)
-	require.Equal(t, http.StatusNotFound, send(t, browser, http.MethodDelete, replicaOne.URL+"/api/keys/"+key.ID.String(), "", "").status)
+	require.Equal(t, http.StatusNoContent, send(t, browser, http.MethodDelete, replicaOne.URL+"/api/keys/"+key.ID.String(), "").status)
+	require.Equal(t, http.StatusUnauthorized, send(t, script, http.MethodGet, replicaTwo.URL+"/api/tasks", "").status)
+	require.Equal(t, http.StatusNotFound, send(t, browser, http.MethodDelete, replicaOne.URL+"/api/keys/"+key.ID.String(), "").status)
 
-	require.Equal(t, http.StatusNoContent, send(t, browser, http.MethodPost, replicaTwo.URL+"/auth/password/logout", "", "").status)
-	require.Equal(t, http.StatusUnauthorized, send(t, browser, http.MethodGet, replicaOne.URL+"/api/tasks", "", "").status, "logged out on every replica")
+	require.Equal(t, http.StatusNoContent, send(t, browser, http.MethodPost, replicaTwo.URL+"/auth/password/logout", "").status)
+	require.Equal(t, http.StatusUnauthorized, send(t, browser, http.MethodGet, replicaOne.URL+"/api/tasks", "").status, "logged out on every replica")
 	_, err = first.backend.Sweep(t.Context())
 	require.NoError(t, err)
 }
@@ -76,16 +76,30 @@ type reply struct {
 	body   string
 }
 
-// send sends a request with a JSON body (none when empty) and an API key (none when empty).
-func send(t *testing.T, client *http.Client, method, target, jsonBody, key string) reply {
+// keyTransport presents an API key on every request, like a script.
+type keyTransport struct {
+	key  string
+	next http.RoundTripper
+}
+
+func (k *keyTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	request = request.Clone(request.Context())
+	request.Header.Set("Authorization", "Bearer "+k.key)
+	return k.next.RoundTrip(request)
+}
+
+func withKey(client *http.Client, key string) *http.Client {
+	client.Transport = &keyTransport{key: key, next: client.Transport}
+	return client
+}
+
+// send sends a request with a JSON body (none when empty).
+func send(t *testing.T, client *http.Client, method, target, jsonBody string) reply {
 	t.Helper()
 	request, err := http.NewRequestWithContext(t.Context(), method, target, strings.NewReader(jsonBody))
 	require.NoError(t, err)
 	if jsonBody != "" {
 		request.Header.Set("Content-Type", "application/json")
-	}
-	if key != "" {
-		request.Header.Set("Authorization", "Bearer "+key)
 	}
 	response, err := client.Do(request)
 	require.NoError(t, err)

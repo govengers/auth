@@ -203,7 +203,9 @@ func newServer(options *serverOptions) (*server, error) {
 	}
 
 	// keyOrSession accepts a key or a session; sessionOnly a session (a key must not issue keys).
-	keyOrSession := func(handler http.Handler) http.Handler { return authenticator.Middleware()(guard.RequireAPI()(handler)) }
+	keyOrSession := func(handler http.Handler) http.Handler {
+		return authenticator.Middleware()(guard.RequireAPI()(handler))
+	}
 	sessionOnly := guard.RequireAPI()
 	keyRoutes := &keyRoutes{keys: keys}
 	serveMux := http.NewServeMux()
