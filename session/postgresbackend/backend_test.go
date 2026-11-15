@@ -104,6 +104,33 @@ func TestSweepDeletesOnlyExpiredRows(t *testing.T) {
 	require.NoError(t, backend.Put(ctx, "revoked", "key", []byte("value"), time.Hour), "the swept marker refuses nothing")
 }
 
+// A Sweep skips an expired value whose row another transaction holds (a Revoke deleting it) instead of
+// waiting for it in an order that can deadlock with that Revoke; the next sweep takes it.
+func TestSweepSkipsLockedValues(t *testing.T) {
+	backend, clock, pool := newBackend(t)
+	ctx := t.Context()
+	require.NoError(t, backend.Put(ctx, "locked", "short", []byte("value"), time.Minute))
+	require.NoError(t, backend.Put(ctx, "locked", "long", []byte("value"), time.Hour))
+	require.NoError(t, backend.Put(ctx, "free", "short", []byte("value"), time.Minute))
+	clock.advance(2 * time.Minute)
+	transaction, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = transaction.Rollback(ctx) }() // after the Commit below a no-op
+	_, err = transaction.Exec(ctx, `SELECT 1 FROM govengers_auth_session_values WHERE session_id = 'locked' AND key = 'short' FOR UPDATE`)
+	require.NoError(t, err)
+
+	sweepContext, cancel := context.WithTimeout(ctx, 10*time.Second) // ends a sweep that waits for the lock
+	defer cancel()
+	deleted, err := backend.Sweep(sweepContext)
+
+	require.NoError(t, err)
+	require.Equal(t, int64(2), deleted, "the free value and its session")
+	require.NoError(t, transaction.Commit(ctx))
+	deleted, err = backend.Sweep(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), deleted, "the value that was locked")
+}
+
 // A Put racing a Sweep of its expired session row either lands in a fresh row or raises the row's expiry
 // before the Sweep re-checks it: the value is never deleted with the old row.
 func TestSweepRacingPutKeepsTheValue(t *testing.T) {

@@ -59,7 +59,13 @@ WITH deleted AS (
 UPDATE govengers_auth_sessions SET revoked_until = least(latest.expires_at, $3)
 FROM latest WHERE session_id = $1 AND latest.expires_at IS NOT NULL`
 
-const sweepValues = `DELETE FROM govengers_auth_session_values WHERE expires_at <= $1`
+// sweepValues never waits for a row lock: a Revoke holds its session's row and deletes the values in key
+// order, so a sweep waiting for one of them in scan order could deadlock with it. A locked row goes with the
+// next sweep.
+const sweepValues = `
+DELETE FROM govengers_auth_session_values WHERE (session_id, key) IN (
+    SELECT session_id, key FROM govengers_auth_session_values WHERE expires_at <= $1 FOR UPDATE SKIP LOCKED
+)`
 
 // sweepSessions deletes the sessions whose values and marker have all expired: a session row's expiry is
 // never before its values' or its marker's. A Put racing it holds the row lock; the delete then re-checks
@@ -159,7 +165,8 @@ func (b *Backend) Revoke(ctx context.Context, sessionID string, ttl time.Duratio
 }
 
 // Sweep deletes expired values and the sessions whose values and revocation marker have all expired, and
-// returns the number of rows it deleted. Expired rows never count as live, so Sweep only frees space:
+// returns the number of rows it deleted; an expired value another transaction holds locked is left to the
+// next Sweep. Expired rows never count as live, so Sweep only frees space:
 // schedule it (e.g. every few minutes from one replica, a govengers/jobs schedule) on a busy backend.
 func (b *Backend) Sweep(ctx context.Context) (int64, error) {
 	now := b.now()
