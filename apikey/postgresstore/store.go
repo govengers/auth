@@ -133,6 +133,9 @@ func New(options *Options) (*Store, error) {
 // An invalid request is an *auth.Error of kind auth.ErrInvalidRequest naming the problem in its Reason.
 func (s *Store) Issue(ctx context.Context, ownerID uuid.UUID, request IssueRequest) (string, *Key, error) {
 	now := s.now().Truncate(time.Microsecond) // PostgreSQL's precision, so List returns the same CreatedAt
+	if ownerID == uuid.Nil {
+		return "", nil, invalid("owner ID is nil")
+	}
 	if err := validate(request, now); err != nil {
 		return "", nil, err
 	}

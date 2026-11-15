@@ -152,6 +152,9 @@ func TestIssueRefusesInvalidRequests(t *testing.T) {
 			require.ErrorContains(t, err, testCase.reason)
 		})
 	}
+	_, _, err := fixture.store.Issue(t.Context(), uuid.Nil, postgresstore.IssueRequest{Name: "ci", Scopes: []auth.Permission{tasksRead}})
+	require.ErrorIs(t, err, auth.ErrInvalidRequest)
+	require.ErrorContains(t, err, "owner ID is nil")
 }
 
 func TestResolveNarrowsTheOwnerToTheKeysScopes(t *testing.T) {
