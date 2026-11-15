@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -36,6 +37,9 @@ const (
 
 // forwardingHeaders are set by reverse proxies; a request carrying one came through a proxy, whatever its peer.
 var forwardingHeaders = []string{"Forwarded", "Via", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Port", "X-Forwarded-Proto", "X-Forwarded-Server", "X-Real-IP"}
+
+// hostName is what an AllowedHosts entry that is no IP address must be after normalizeHost: an exact name.
+var hostName = regexp.MustCompile(`^[a-z0-9_]([a-z0-9._-]*[a-z0-9_])?$`)
 
 // User is one entry of the login list.
 type User struct {
@@ -67,8 +71,9 @@ type Options struct {
 	// only for a development stack where the browser reaches the server through a container network (docker
 	// port publishing, a devcontainer) or a local proxy. The Host check stays: it is the DNS-rebinding defence.
 	AllowRemote bool
-	// AllowedHosts are host names (without port, case-insensitive) the Host check accepts besides localhost,
-	// *.localhost and loopback addresses, e.g. "app.test" for a stack behind a named local proxy.
+	// AllowedHosts are exact host names or IP addresses (no port, no wildcard, case-insensitive, an IPv6 address
+	// with or without brackets) the Host check accepts besides localhost, *.localhost and loopback addresses,
+	// e.g. "app.test" for a stack behind a named local proxy or "backend" for a compose service name.
 	AllowedHosts []string
 	Observer     auth.Observer // optional; every request is reported under provider "dev_login"
 }
@@ -99,11 +104,12 @@ func New(options *Options) (*Provider, error) {
 		return nil, fmt.Errorf("dev login: PathPrefix %q must be a clean path below \"/\" of unreserved URL characters, without a trailing slash", resolved.PathPrefix)
 	}
 	resolved.AllowedHosts = make([]string, 0, len(options.AllowedHosts))
-	for _, host := range options.AllowedHosts {
-		if host == "" || strings.ContainsAny(host, ":/ ") {
-			return nil, fmt.Errorf("dev login: AllowedHosts entry %q must be a host name without port", host)
+	for _, entry := range options.AllowedHosts {
+		host := normalizeHost(entry)
+		if _, err := netip.ParseAddr(host); err != nil && !hostName.MatchString(host) {
+			return nil, fmt.Errorf("dev login: AllowedHosts entry %q must be an exact host name or IP address, without port or wildcard", entry)
 		}
-		resolved.AllowedHosts = append(resolved.AllowedHosts, normalizeHost(host))
+		resolved.AllowedHosts = append(resolved.AllowedHosts, host)
 	}
 	reporter, err := failure.NewReporter(&failure.ReporterOptions{Provider: auth.ProviderDev, Observer: resolved.Observer})
 	if err != nil {
@@ -198,12 +204,21 @@ func (p *Provider) isLocalHost(host string) bool {
 		host = name
 	}
 	host = normalizeHost(host)
-	return host == "localhost" || strings.HasSuffix(host, ".localhost") || isLoopback(strings.Trim(host, "[]")) ||
+	return host == "localhost" || strings.HasSuffix(host, ".localhost") || isLoopback(host) ||
 		slices.Contains(p.options.AllowedHosts, host)
 }
 
+// normalizeHost lower-cases host and drops a trailing dot and IPv6 brackets; an IP address gets its canonical
+// form, so "[FD00:0::5]" and "fd00::5" compare equal.
 func normalizeHost(host string) string {
-	return strings.ToLower(strings.TrimSuffix(host, "."))
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	if address, err := netip.ParseAddr(host); err == nil {
+		return address.String()
+	}
+	return host
 }
 
 func isLoopback(host string) bool {

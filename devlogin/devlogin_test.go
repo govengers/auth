@@ -145,6 +145,11 @@ func TestNewRefusesWithoutEnabled(t *testing.T) {
 		{name: "bad prefix", options: &Options{Enabled: true, Sessions: store, Users: users, Load: loadTestUser, PathPrefix: "/dev/"}, wantError: "PathPrefix"},
 		{name: "empty allowed host", options: &Options{Enabled: true, Sessions: store, Users: users, Load: loadTestUser, AllowedHosts: []string{""}}, wantError: "AllowedHosts"},
 		{name: "allowed host with port", options: &Options{Enabled: true, Sessions: store, Users: users, Load: loadTestUser, AllowedHosts: []string{"app.test:443"}}, wantError: "AllowedHosts"},
+		{name: "allowed host only a dot", options: &Options{Enabled: true, Sessions: store, Users: users, Load: loadTestUser, AllowedHosts: []string{"."}}, wantError: "AllowedHosts"},
+		{name: "allowed host wildcard", options: &Options{Enabled: true, Sessions: store, Users: users, Load: loadTestUser, AllowedHosts: []string{"*.test"}}, wantError: "AllowedHosts"},
+		{name: "allowed host with a tab", options: &Options{Enabled: true, Sessions: store, Users: users, Load: loadTestUser, AllowedHosts: []string{"app.test\t"}}, wantError: "AllowedHosts"},
+		{name: "allowed IPv6 host with port", options: &Options{Enabled: true, Sessions: store, Users: users, Load: loadTestUser, AllowedHosts: []string{"[fd00::5]:8080"}}, wantError: "AllowedHosts"},
+		{name: "allowed host with path", options: &Options{Enabled: true, Sessions: store, Users: users, Load: loadTestUser, AllowedHosts: []string{"app.test/x"}}, wantError: "AllowedHosts"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -301,6 +306,11 @@ func TestLocalOnly(t *testing.T) {
 		{name: "allowed host behind a local proxy", remote: "172.17.0.1:1", host: "App.Test.:443", header: "X-Forwarded-For", allowRemote: true, allowedHost: "app.test", wantLocal: true},
 		{name: "allowed host, loopback peer", remote: "127.0.0.1:1", host: "app.test", allowedHost: "App.Test", wantLocal: true},
 		{name: "other host than the allowed one", remote: "127.0.0.1:1", host: "attacker.example", allowedHost: "app.test"},
+		{name: "no host", remote: "127.0.0.1:1", host: ""},
+		{name: "allowed IPv6 address", remote: "127.0.0.1:1", host: "[fd00::5]:8080", allowedHost: "[FD00:0::5]", wantLocal: true},
+		{name: "allowed bare IPv6 address, host without port", remote: "127.0.0.1:1", host: "[fd00::5]", allowedHost: "fd00::5", wantLocal: true},
+		{name: "allowed IPv4 address", remote: "127.0.0.1:1", host: "192.0.2.7:8080", allowedHost: "192.0.2.7", wantLocal: true},
+		{name: "allowed compose service name", remote: "127.0.0.1:1", host: "backend_1:8080", allowedHost: "backend_1", wantLocal: true},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

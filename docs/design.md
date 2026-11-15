@@ -1173,7 +1173,7 @@ type Options struct {
 	Load         Loader         // required
 	PathPrefix   string         // default "/auth/dev"
 	AllowRemote  bool           // drops the peer and forwarding-header checks; the Host check stays
-	AllowedHosts []string       // further Host names (no port, case-insensitive) the Host check accepts
+	AllowedHosts []string       // further exact Host names or IP addresses (no port, no wildcard, case-insensitive) the Host check accepts
 	Observer     auth.Observer
 }
 func New(options *Options) (*Provider, error)
