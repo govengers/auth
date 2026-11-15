@@ -62,7 +62,7 @@ Tested in [apikey/postgresstore/example_test.go](../../apikey/postgresstore/exam
 - The key acts as its owner capped by its scopes: `Permissions` become what both the owner's permissions and the scopes grant (`*:write` and `tasks:read` give `tasks:read`; `tasks:write` and `*:read` give `tasks:read`), so a key never grants more than its owner has, also after the owner lost a permission. A key without the scope `*:write` drops the owner's `Roles`, `OIDCRoles`, `OIDCClientRoles`, `Groups` and `Teams`, which no resource scope can narrow: a read-only key of an admin is not an admin. `Provider` is `apikey`, `Subject` the key ID (the audit trail names the key), `UserID` the owner's, `Impersonator` nil.
 - `LastUsedAt` is written at most once per `LastUsedInterval` (default 1 minute) per key: a busy key costs one write per interval.
 - `Revoke(ctx, ownerID, id)` deletes the row (`postgresstore.ErrKeyNotFound` when the owner has no such key); nothing is cached, so the next request with the key is refused on every replica. `List(ctx, ownerID)` returns the owner's keys without secrets, expired ones included.
-- `Issue` refuses an empty or over 200-byte name, no or an invalid scope, and a past expiry with an `*auth.Error` of kind `auth.ErrInvalidRequest`; let only a session (not a key) reach your issue route, or a key could mint a wider one.
+- `Issue` refuses a nil owner ID, an empty or over 200-byte name, no or an invalid scope, and a past expiry with an `*auth.Error` of kind `auth.ErrInvalidRequest`; let only a session (not a key) reach your issue route, or a key could mint a wider one.
 
 ## Gotchas
 
