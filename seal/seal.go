@@ -145,7 +145,12 @@ func (s *Sealer) Reseal(data AssociatedData, sealed string) (value string, resea
 }
 
 func (s *Sealer) seal(keyID string, data AssociatedData, plaintext []byte) (string, error) {
-	aead, err := encryption.DerivedCipher(s.secrets[keyID], cipherInfo+" "+string(data.encode(keyID)))
+	secret, found := s.secrets[keyID]
+	if !found {
+		// a Sealer not built by New has no key; HKDF would accept the empty one
+		return "", errors.New("seal: the Sealer has no key; build it with New")
+	}
+	aead, err := encryption.DerivedCipher(secret, cipherInfo+" "+string(data.encode(keyID)))
 	if err != nil {
 		return "", fmt.Errorf("seal: %w", err)
 	}
@@ -178,7 +183,8 @@ func (s *Sealer) open(data AssociatedData, sealed string) ([]byte, string, error
 // parse splits "v1.<key ID>.<ciphertext>" into the key ID and the decoded ciphertext.
 func parse(sealed string) (string, []byte, error) {
 	parts := strings.Split(sealed, ".")
-	if len(parts) != 3 || parts[0] != version || !isKeyID(parts[1]) {
+	// the base64 decoder skips \r and \n even in strict mode, so a changed value would still open
+	if len(parts) != 3 || parts[0] != version || !isKeyID(parts[1]) || strings.ContainsAny(parts[2], "\r\n") {
 		return "", nil, ErrInvalid
 	}
 	ciphertext, err := base64.RawURLEncoding.Strict().DecodeString(parts[2])

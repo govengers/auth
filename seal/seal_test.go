@@ -85,6 +85,8 @@ func TestOpenRefusesMalformedAndTamperedValues(t *testing.T) {
 		{name: "invalid key ID", sealed: strings.Replace(sealed, "k1", "k 1", 1)},
 		{name: "not base64", sealed: "v1.k1.!!!!"},
 		{name: "padded base64", sealed: sealed + "="},
+		{name: "trailing line feed", sealed: sealed + "\n"},
+		{name: "carriage return inside", sealed: sealed[:10] + "\r" + sealed[10:]},
 		{name: "too short for a nonce", sealed: "v1.k1.AAAA"},
 		{name: "flipped bit", sealed: flipped},
 	}
@@ -96,6 +98,12 @@ func TestOpenRefusesMalformedAndTamperedValues(t *testing.T) {
 			require.NotContains(t, err.Error(), "secret\"")
 		})
 	}
+}
+
+func TestZeroSealerRefusesToSeal(t *testing.T) {
+	sealed, err := (&Sealer{}).Seal(totpOfAlice, []byte("secret"))
+	require.ErrorContains(t, err, "build it with New")
+	require.Empty(t, sealed)
 }
 
 func TestOpenNamesAnUnknownKey(t *testing.T) {
