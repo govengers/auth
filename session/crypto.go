@@ -1,11 +1,10 @@
 package session
 
 import (
-	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hkdf"
-	"crypto/sha256"
 	"fmt"
+
+	"github.com/govengers/auth/internal/encryption"
 )
 
 // seal encrypts one session value with AES-256-GCM and a random 12-byte nonce (prepended). The
@@ -29,20 +28,11 @@ func open(storeKey []byte, sessionID, key string, sealed []byte) ([]byte, bool) 
 	return plaintext, err == nil
 }
 
-// sessionCipher uses a key derived per session (HKDF-SHA256), so the limit of 2^32 random nonces per
-// GCM key applies to one session instead of to everything a long-lived store key ever encrypts.
+// sessionCipher uses a key derived per session, so the GCM nonce limit applies to one session.
 func sessionCipher(storeKey []byte, sessionID string) (cipher.AEAD, error) {
-	key, err := hkdf.Key(sha256.New, storeKey, nil, "govengers/auth session "+sessionID, encryptionKeyLength)
+	aead, err := encryption.DerivedCipher(storeKey, "govengers/auth session "+sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("derive session key: %w", err)
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, fmt.Errorf("create session cipher: %w", err)
-	}
-	aead, err := cipher.NewGCMWithRandomNonce(block)
-	if err != nil {
-		return nil, fmt.Errorf("create session cipher: %w", err)
+		return nil, fmt.Errorf("session cipher: %w", err)
 	}
 	return aead, nil
 }
