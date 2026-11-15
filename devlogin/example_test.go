@@ -72,5 +72,5 @@ func Example() {
 	serveMux.ServeHTTP(recorder, request)
 	fmt.Println(recorder.Code, strings.TrimSpace(recorder.Body.String()))
 	// Output:
-	// 200 {"provider":"dev","subject":"ada","userId":"6f1c2a4e-8d3b-4f5a-9c7e-1b2d3e4f5a6b","username":"ada","active":true,"roles":["admin"]}
+	// 200 {"provider":"dev_login","subject":"ada","userId":"6f1c2a4e-8d3b-4f5a-9c7e-1b2d3e4f5a6b","username":"ada","active":true,"roles":["admin"]}
 }

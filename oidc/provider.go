@@ -37,7 +37,7 @@ const (
 var (
 	namePattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 	// reservedNames are other providers' Identity.Provider or Outcome.Provider values.
-	reservedNames = []string{auth.ProviderPassword, auth.ProviderGitHub, auth.ProviderAPIKey, auth.ProviderSession, auth.ProviderJWT, auth.ProviderDev}
+	reservedNames = []string{auth.ProviderPassword, auth.ProviderGitHub, auth.ProviderAPIKey, auth.ProviderSession, auth.ProviderJWT}
 	defaultScopes = []string{gooidc.ScopeOpenID, "profile", "email"}
 )
 
