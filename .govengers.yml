@@ -1,5 +1,10 @@
 profile: library
 exceptions:
+  - rule: DES-003
+    reason: >-
+      Only internal/postgrestest, test code: it keeps the one embedded PostgreSQL of a test binary in a package
+      variable. TestMain has no other channel to the tests, and a server per test is the slow path TST-002 steers
+      away from. The library has no mutable package state.
   - rule: DES-008
     reason: >-
       Only password kindOf (password/validation.go). The login request has one "identifier" field, the

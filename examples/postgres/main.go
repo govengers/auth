@@ -14,9 +14,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"slices"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 	"github.com/govengers/config/v2"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/apikey"
@@ -40,6 +43,9 @@ const (
 	contentTypeHeader = "Content-Type"
 	embeddedPort      = 5433
 	sweepInterval     = 10 * time.Minute
+	shutdownTimeout   = 10 * time.Second
+	// migrationLock serializes the migrations of replicas starting at once (pg_advisory_xact_lock).
+	migrationLock = 7_046_150_420
 )
 
 // migrations stand in for the application's goose migrations: each library constant is one migration.
@@ -100,51 +106,82 @@ func run() error {
 		return err
 	}
 	defer pool.Close()
-	if err := migrate(ctx, pool); err != nil {
+	if err := migrate(ctx, pool, migrations); err != nil {
 		return err
 	}
 	server, err := newServer(&serverOptions{EncryptionKey: key, InsecureCookie: insecureCookie, Pool: pool})
 	if err != nil {
 		return err
 	}
-	go sweep(ctx, server.backend)
 	httpServer := newHTTPServer(address, server.handler)
-	go func() {
-		<-ctx.Done()
-		_ = httpServer.Close() // shutting down
-	}()
-	if err := httpServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-		return err
+	group, groupContext := errgroup.WithContext(ctx)
+	group.Go(recovering(func() error { return sweep(groupContext, server.backend) }))
+	serve(groupContext, group, httpServer)
+	return group.Wait()
+}
+
+// migrate applies the migrations all or none, in one transaction, so a start that stops halfway leaves no
+// half-migrated database for the next start to skip; a real application runs them from goose.
+func migrate(ctx context.Context, pool *pgxpool.Pool, migrations []string) error {
+	err := pgx.BeginFunc(ctx, pool, func(transaction pgx.Tx) error {
+		if _, err := transaction.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLock); err != nil {
+			return err
+		}
+		var applied bool
+		if err := transaction.QueryRow(ctx, `SELECT to_regclass('govengers_auth_sessions') IS NOT NULL`).Scan(&applied); err != nil || applied {
+			return err
+		}
+		for _, migration := range migrations {
+			if _, err := transaction.Exec(ctx, migration); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("migrate: %w", err)
 	}
 	return nil
 }
 
-// migrate applies the library migrations once; a real application runs them from goose.
-func migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	var applied bool
-	if err := pool.QueryRow(ctx, `SELECT to_regclass('govengers_auth_sessions') IS NOT NULL`).Scan(&applied); err != nil || applied {
-		return err
-	}
-	for _, migration := range migrations {
-		if err := pgx.BeginFunc(ctx, pool, func(transaction pgx.Tx) error {
-			_, err := transaction.Exec(ctx, migration)
-			return err
-		}); err != nil {
-			return fmt.Errorf("migrate: %w", err)
+// serve runs server in group until ctx is cancelled (a signal, or another member of group failed), then
+// waits up to shutdownTimeout for running requests.
+func serve(ctx context.Context, group *errgroup.Group, server *http.Server) {
+	group.Go(recovering(func() error {
+		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			return err // the address is taken, for instance
 		}
+		return nil
+	}))
+	group.Go(recovering(func() error {
+		<-ctx.Done()
+		shutdownContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		defer cancel()
+		return server.Shutdown(shutdownContext)
+	}))
+}
+
+// recovering turns a panic in work into an error for its errgroup (CON-001), which then stops the others.
+func recovering(work func() error) func() error {
+	return func() (err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				err = fmt.Errorf("panic: %v\n%s", recovered, debug.Stack())
+			}
+		}()
+		return work()
 	}
-	return nil
 }
 
 // sweep deletes expired sessions every sweepInterval; with several replicas, run it from one (a govengers/jobs
 // schedule does that).
-func sweep(ctx context.Context, backend *postgresbackend.Backend) {
+func sweep(ctx context.Context, backend *postgresbackend.Backend) error {
 	ticker := time.NewTicker(sweepInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-ticker.C:
 			if _, err := backend.Sweep(ctx); err != nil {
 				slog.Error("sweep expired sessions", "error", err)
@@ -284,8 +321,15 @@ type keyBody struct {
 	Key    string            `json:"key,omitempty"` // only in the answer to POST
 }
 
+// issue requires Content-Type application/json: a page on another origin cannot send it without a CORS
+// preflight, so a form or a text/plain fetch riding on the session cookie cannot issue a key (CSRF). The
+// other key routes are a GET, which the page cannot read, and a DELETE, which needs a preflight too.
 func (k *keyRoutes) issue(writer http.ResponseWriter, request *http.Request) {
 	var body issueBody
+	if mediaType, _, err := mime.ParseMediaType(request.Header.Get(contentTypeHeader)); err != nil || mediaType != "application/json" {
+		auth.WriteError(writer, &auth.Error{Kind: auth.ErrInvalidRequest, Reason: "content type must be application/json"})
+		return
+	}
 	if err := json.NewDecoder(io.LimitReader(request.Body, 64<<10)).Decode(&body); err != nil {
 		auth.WriteError(writer, &auth.Error{Kind: auth.ErrInvalidRequest, Err: err})
 		return

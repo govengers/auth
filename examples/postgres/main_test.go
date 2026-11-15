@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/govengers/auth/internal/postgrestest"
 )
@@ -57,8 +59,57 @@ func TestServer(t *testing.T) {
 
 func TestMigrateIsIdempotent(t *testing.T) {
 	pool := postgrestest.New(t)
-	require.NoError(t, migrate(t.Context(), pool))
-	require.NoError(t, migrate(t.Context(), pool))
+	require.NoError(t, migrate(t.Context(), pool, migrations))
+	require.NoError(t, migrate(t.Context(), pool, migrations))
+}
+
+// A start that fails halfway through the migrations leaves none applied, so the next start applies all.
+func TestMigrateAppliesAllOrNone(t *testing.T) {
+	pool := postgrestest.New(t)
+	require.ErrorContains(t, migrate(t.Context(), pool, []string{migrations[0], "SELECT broken"}), "migrate")
+	var applied bool
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT to_regclass('govengers_auth_sessions') IS NOT NULL`).Scan(&applied))
+	require.False(t, applied, "the first migration was rolled back")
+
+	require.NoError(t, migrate(t.Context(), pool, migrations))
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT to_regclass('govengers_auth_api_keys') IS NOT NULL`).Scan(&applied))
+	require.True(t, applied)
+}
+
+// The key issuing route accepts JSON only: a cross-origin form or text/plain fetch carrying the session
+// cookie needs no CORS preflight and must not issue a key.
+func TestIssueRefusesARequestThatIsNotJSON(t *testing.T) {
+	pool := postgrestest.New(t, migrations...)
+	server, err := newServer(&serverOptions{EncryptionKey: encryptionKey, Pool: pool})
+	require.NoError(t, err)
+	replica := httptest.NewTLSServer(server.handler)
+	t.Cleanup(replica.Close)
+	browser := newClient(t, replica)
+	require.Equal(t, http.StatusCreated, send(t, browser, http.MethodPost, replica.URL+"/auth/password/register", `{"username":"ada","password":"ada's long passphrase"}`).status)
+
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, replica.URL+"/api/keys", strings.NewReader(`{"name":"injected","scopes":["*:write"]}`))
+	require.NoError(t, err)
+	request.Header.Set("Content-Type", "text/plain")
+	response, err := browser.Do(request)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+
+	require.Equal(t, http.StatusBadRequest, response.StatusCode)
+	require.Equal(t, "[]\n", send(t, browser, http.MethodGet, replica.URL+"/api/keys", "").body, "no key was issued")
+}
+
+func TestRecoveringTurnsAPanicIntoAnError(t *testing.T) {
+	err := recovering(func() error { panic("sweep failed") })()
+	require.ErrorContains(t, err, "panic: sweep failed")
+	require.NoError(t, recovering(func() error { return nil })())
+}
+
+func TestServeStopsWhenTheContextEnds(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	group, groupContext := errgroup.WithContext(ctx)
+	serve(groupContext, group, newHTTPServer("127.0.0.1:0", http.NotFoundHandler()))
+	cancel()
+	require.NoError(t, group.Wait())
 }
 
 // newClient returns a client of server with its own cookie jar, like one browser.
