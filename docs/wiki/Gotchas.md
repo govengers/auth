@@ -32,12 +32,16 @@ The rules agents and humans get wrong most often, one line each with the page th
 - Front-channel logout needs `SameSite: None`; `oidc.New` and `github.New` refuse a `Strict` store (the callback would arrive without the cookie). [Sessions](Sessions.md#gotchas)
 - No component follows redirects of IdP, token, JWKS, Keycloak or GitHub endpoints (`redirect refused`); configure the final URLs. [OIDC](OIDC.md#gotchas)
 - Issuer, discovered endpoints, Keycloak and GitHub URLs must be `https`; `http` only on loopback hosts. [OIDC](OIDC.md#options-that-matter)
+- `postgresbackend` never deletes expired rows by itself: schedule `backend.Sweep(ctx)` on one replica. [Sessions](Sessions.md#backends)
+- The `MigrationV1` constants of the `postgres*` packages run in your goose migrations; nothing creates the tables at startup. [Sessions](Sessions.md#backends)
+- Mount a key issuing route behind the session Guard only: behind `apikey` too, a key could mint a key with wider scopes than its own. [API-Keys](API-Keys.md#per-user-keys-on-postgresql)
+- A `postgresstore` key without the scope `*:write` drops the owner's roles: a read-only key of an admin is not an admin. [API-Keys](API-Keys.md#per-user-keys-on-postgresql)
 
 ## Known limits
 
 - No rate limiting: rate-limit the password login, `POST {prefix}/register` (an anonymous Argon2id, like login) and TOTP routes at the edge. [Password](Password.md#gotchas)
 - No retries, no idle timeout, no key rotation list; changing `EncryptionKey` logs everyone out. [Sessions](Sessions.md#store)
-- `MemoryBackend` is for one replica at non-production scale; use `redisbackend` in production. [Sessions](Sessions.md#backends)
+- `MemoryBackend` is for one replica at non-production scale; use `redisbackend` or `postgresbackend` in production. [Sessions](Sessions.md#backends)
 - A stale `SaveIdentity` from your code can race a Guard refresh; use `Session.SwapIdentity`. [Sessions](Sessions.md#store)
 - Google needs an admission (`AllowedEmailDomains`, `OnLogin` or `AllowAnyAccount`), else `oidc.New` refuses; an allowed Workspace domain also requires `hd`, so a consumer Google account with a company address is 403. [OIDC](OIDC.md#gotchas)
 - Full list: [Security](Security.md).

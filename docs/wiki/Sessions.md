@@ -8,7 +8,7 @@
 
 | Option | Default | Note |
 |---|---|---|
-| `Backend` | required | `session.NewMemoryBackend(nil)` or `redisbackend.New` |
+| `Backend` | required | `session.NewMemoryBackend(nil)`, `redisbackend.New` or `postgresbackend.New` |
 | `EncryptionKey` | required | exactly 32 bytes, not one byte repeated (an all-zero placeholder is refused): `session.ParseKey(os.Getenv(...))`, generated with `openssl rand -base64 32`; same on every replica; changing it logs everyone out (no rotation list) |
 | `CookieName` | `auth_session` | sent as `__Host-auth_session` while the cookie is Secure, host-only and on `/` (the default) |
 | `CookieDomain`, `CookiePath` | host-only, `/` | either one drops the `__Host-` prefix |
@@ -119,11 +119,29 @@ Tested ([session/example_test.go](../../session/example_test.go), `ExampleImpers
 	store, err := session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: key})
 ```
 
+- `session/postgresbackend`: PostgreSQL 18 on your `*pgxpool.Pool` (you own and close it). Run `postgresbackend.MigrationV1` in one of your goose migrations; nothing runs DDL at startup. One row per session in `govengers_auth_sessions` (when its last value expires, the revocation marker) and one per value in `govengers_auth_session_values`; Put takes the session row's lock, so a Put racing a logout either lands first and is revoked with the rest, or is refused. Expiry is decided on the application's clock (keep replicas on NTP). Expired rows never count but stay until `backend.Sweep(ctx)` deletes them: schedule it on one replica (a govengers/jobs schedule every few minutes); it returns the number of rows deleted. Relies on READ COMMITTED, PostgreSQL's default: under a REPEATABLE READ server or role default, racing writes of one value fail with an error instead of waiting (never with a wrong result); `Revoke` pins READ COMMITTED itself. Every `Get` is one indexed primary-key read. Compared with Redis: no eviction policy to choose, no second datastore, a write per login and refresh in your database.
+
+  Wiring ([session/postgresbackend/example_test.go](../../session/postgresbackend/example_test.go)):
+
+```go
+	backend, err := postgresbackend.New(&postgresbackend.Options{Pool: pool})
+	if err != nil {
+		return
+	}
+	key, err := session.ParseKey(os.Getenv("SESSION_ENCRYPTION_KEY"))
+	if err != nil {
+		return
+	}
+	_, _ = session.NewStore(&session.StoreOptions{Backend: backend, EncryptionKey: key})
+
+	_, _ = backend.Sweep(ctx) // from the scheduled job
+```
+
 - Own database: implement the five methods of [`session.Backend`](../../session/backend.go) (`Put`, `Get`, `Pop`, `CompareAndSwap`, `Revoke`) with their atomicity contracts. The built-in backends run the conformance suite [internal/backendtest](../../internal/backendtest/backendtest.go); it is internal to the module, so copy it into your tests.
 
 ## Gotchas
 
-- Instances sharing `EncryptionKey`, Redis `KeyPrefix` and cookie name accept each other's sessions: give every application its own key and prefix.
+- Instances sharing `EncryptionKey`, Redis `KeyPrefix` (or PostgreSQL schema) and cookie name accept each other's sessions: give every application its own key and prefix or schema.
 - Plain `http` on a host other than `localhost`/loopback: browsers drop the `Secure` cookie and every login loops; set `InsecureCookie` for local development only.
 - `SameSite: http.SameSiteStrictMode` is for password-only stores: the browser withholds it on the redirect back from the IdP, so `oidc.New` and `github.New` refuse such a store.
 - No idle timeout: a session lives until logout, `MaximumAge` or a refusing refresh.
