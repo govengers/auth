@@ -3,7 +3,7 @@
 > Authentication and authorization for Go services: password (Argon2id, TOTP), OIDC (Keycloak enrichment, Google), GitHub OAuth with teams, API keys and JWT all produce one `auth.Identity`; redirect and password logins keep it in a server-side session that one `session.Guard` turns into a request context identity (401 JSON for APIs, 302 to the login for UIs); authorization is `authorization.Check`, a `func(context.Context) error` over that identity. Core packages are `net/http` only; gin and Prometheus live in adapter packages. Also ships the forward-auth image `ghcr.io/govengers/forwardauth` for Traefik.
 
 - Module: `github.com/govengers/auth` (v1), Go 1.26, Apache 2.0.
-- Packages: `auth` (root), `session`, `session/redisbackend`, `session/postgresbackend`, `password`, `password/postgresstorage`, `password/passwordtest`, `oidc`, `oidc/keycloak`, `github`, `apikey`, `apikey/postgresstore`, `jwt`, `authorization`, `ginadapter`, `prometheusadapter`; binary `cmd/forwardauth`.
+- Packages: `auth` (root), `session`, `session/redisbackend`, `session/postgresbackend`, `password`, `password/postgresstorage`, `password/passwordtest`, `oidc`, `oidc/keycloak`, `github`, `apikey`, `apikey/postgresstore`, `jwt`, `authorization`, `ginadapter`, `prometheusadapter`, `devlogin`, `seal`; binary `cmd/forwardauth`.
 - Constructors are `New(options *Options) (*X, error)` and validate at startup; components never log and never start goroutines, they report to an optional `auth.Observer`.
 - Errors: `*auth.Error` with `errors.Is` kinds `auth.ErrUnauthenticated`, `ErrForbidden`, `ErrInvalidRequest`, `ErrConflict`; one JSON body `{"code","message"}`.
 - Standards: govengers/standards, `library` profile (`.govengers.yml`); service rules also apply to `cmd/forwardauth` and `internal/forwardauth`.
@@ -22,6 +22,8 @@
 - [Errors-and-Observability](docs/wiki/Errors-and-Observability.md): `auth.Error`, `ResponseFor`, `Observer`, `Outcome`.
 - [Forward-Auth](docs/wiki/Forward-Auth.md): the image in short: what it does, minimum configuration, the Traefik rules that matter.
 - [Forward-Auth-Configuration](docs/wiki/Forward-Auth-Configuration.md): docker compose, TLS and Kubernetes wiring, routes, every environment variable, the JWT claims, operations.
+- [Dev-Login](docs/wiki/Dev-Login.md): `devlogin`, one-click login as any user for local development; the guards that keep it out of production.
+- [Seal](docs/wiki/Seal.md): `seal`, AES-256-GCM sealing of small secrets at rest (TOTP secrets, webhook secrets, third-party tokens), key rotation.
 - [Security](docs/wiki/Security.md): cookie, session, OAuth, redirect, credential and JWT guarantees, known limits.
 - [Gotchas](docs/wiki/Gotchas.md): the non-obvious rules, one line each.
 
@@ -37,7 +39,7 @@
 
 - [README.md](README.md): overview, features, quick start, package table.
 - [GitHub Releases](https://github.com/govengers/auth/releases): changelog and release notes.
-- [docs/design.md](docs/design.md): binding design, package APIs, flows F1-F15, error taxonomy (section 5), decisions D1-D67.
+- [docs/design.md](docs/design.md): binding design, package APIs, flows F1-F15, error taxonomy (section 5), decisions D1-D69.
 - [docs/migration.md](docs/migration.md): migration from go-basicauth, oidc-fwd-auth and github-fwd-auth, Storage SQL.
 - [pkg.go.dev](https://pkg.go.dev/github.com/govengers/auth): API reference.
 

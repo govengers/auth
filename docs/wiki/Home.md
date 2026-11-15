@@ -28,6 +28,8 @@ Core packages never log and never start goroutines; they report outcomes to an o
 | `authorization` | `Check` primitives and `All`, `Any`, `Not`, `Real` | [Authorization](Authorization.md) |
 | `ginadapter` | net/http middleware and provider routes on gin, `Require`, wide-event `Observe` | [Gin](Gin.md) |
 | `prometheusadapter` | `Observer` counting outcomes on your registry | [Gin](Gin.md#prometheus) |
+| `devlogin` | one-click login as any user, local development only | [Dev-Login](Dev-Login.md) |
+| `seal` | AES-256-GCM sealing of small secrets at rest, key rotation | [Seal](Seal.md) |
 | `cmd/forwardauth` | the image `ghcr.io/govengers/forwardauth` for apps you do not change | [Forward-Auth](Forward-Auth.md) |
 
 Importing one provider compiles none of the others' dependencies. Heavy dependencies per package: `session/redisbackend` go-redis, the three `postgres*` packages pgx v5, `password` x/crypto and otp, `oidc` go-oidc, `jwt` jwx v3, `ginadapter` gin and wide-event-logger, `prometheusadapter` client_golang.
@@ -42,6 +44,8 @@ Importing one provider compiles none of the others' dependencies. Heavy dependen
 - You cannot change the app, or it is not Go: the [forward-auth image](Forward-Auth.md).
 - More than one replica: `session/redisbackend`, or `session/postgresbackend` when PostgreSQL is already there.
 - Admins act as a user (support): `session.Impersonator` on the same `Guard`. [Sessions](Sessions.md#impersonation)
+- One-click login as a seed user while developing locally: `devlogin`, behind your own development flag. [Dev-Login](Dev-Login.md)
+- TOTP secrets, webhook secrets or third-party tokens in your database: `seal`. [Seal](Seal.md)
 - Several login methods at once: one `Store` and one `Guard`, every provider on that store; an OIDC provider per IdP with distinct `Name`s.
 
 ## Wiring order (session-based providers)
@@ -64,6 +68,8 @@ Importing one provider compiles none of the others' dependencies. Heavy dependen
 - [API-Keys](API-Keys.md): static keys, `Resolver`, per-user keys on PostgreSQL.
 - [Gin](Gin.md): `ginadapter`, `prometheusadapter`.
 - [Errors-and-Observability](Errors-and-Observability.md): `auth.Error`, status mapping, `Observer`, wide events.
+- [Dev-Login](Dev-Login.md): `devlogin` for local development and its guards.
+- [Seal](Seal.md): sealing secrets at rest, key rotation.
 - [Forward-Auth](Forward-Auth.md): the image and its Traefik wiring.
 - [Forward-Auth-Configuration](Forward-Auth-Configuration.md): compose, TLS and Kubernetes wiring, routes, environment variables, operations.
 - [Security](Security.md): guarantees and known limits.
