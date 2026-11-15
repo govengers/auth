@@ -29,7 +29,7 @@ if config.DevLogin {
 
 - `Enabled` must be `true`: `New` fails otherwise. Without your flag there is no provider and no route; a disabled dev login answers 404 because it does not exist.
 - `Users` returns the list (`ID`, `Name`, optional `Description` such as "admin"). Keep it short: seed users, not your whole table.
-- `Load` returns the identity a real login of that user gets: `UserID`, `Username`, `Roles`, `Active: true`, whatever your `OnLogin` hook would set. Return `nil, nil` for an unknown ID. The provider overwrites `Provider` with `"dev"` and `Subject` with the ID, so audit logs and the wide event show that the session came from the dev login, and the password provider's `Refresher` never claims it.
+- `Load` returns the identity a real login of that user gets: `UserID`, `Username`, `Roles`, `Active: true`, whatever your `OnLogin` hook would set. Return `nil, nil` for an unknown ID. The provider overwrites `Provider` with `"dev_login"` (`auth.ProviderDev`) and `Subject` with the ID, so audit logs and the wide event show that the session came from the dev login, and the password provider's `Refresher` never claims it.
 
 ## Routes
 
@@ -53,15 +53,17 @@ if config.DevLogin {
 
 Every route refuses a request unless all of these hold:
 
+- the `Host` header is `localhost`, `*.localhost`, a loopback address or one of `AllowedHosts`, which stops a DNS-rebinding page from using your local server under its own name;
 - the TCP peer is a loopback address (`127.0.0.0/8`, `::1`);
-- the `Host` header is `localhost`, `*.localhost` or a loopback address, which stops a DNS-rebinding page from using your local server under its own name;
-- no `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host` or `X-Real-IP` header is present, which catches a reverse proxy on the same machine (its requests come from loopback for every client).
+- no `Forwarded`, `Via`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Port`, `X-Forwarded-Proto`, `X-Forwarded-Server` or `X-Real-IP` header is present, which catches a reverse proxy on the same machine that announces itself (its requests come from loopback for every client).
 
-A Vite dev server proxying to the Go server on the same machine passes (Vite sends no forwarding header by default). Stacks where the browser's request arrives from a container network (docker port publishing, devcontainers) or through a local TLS proxy need `AllowRemote: true`; keep the insecure-cookie guard in `main` then, it is the remaining barrier.
+`AllowRemote: true` drops the last two conditions and keeps the Host check. Stacks where the browser's request arrives from a container network (docker port publishing, devcontainers) need it; the browser still sends `Host: localhost` there. A stack behind a named local proxy (say `https://app.test`) also lists that name in `AllowedHosts`. Keep the insecure-cookie guard in `main` in both cases, it is the remaining barrier.
+
+The check is a seat belt, not a boundary. It cannot see a proxy on the same machine that rewrites `Host` to its loopback upstream and sends no forwarding header; every client of such a proxy passes as local. Known shapes: `httputil.ReverseProxy` with a `Rewrite` that calls `SetURL` (it strips forwarding headers), nginx `proxy_pass http://127.0.0.1:8080` without `proxy_set_header`, and a Vite or Quasar dev server proxy with `changeOrigin: true` that listens on the LAN (`--host`), which lets every LAN client in. A Vite dev server on localhost proxying to the Go server passes, as intended.
 
 ## Observability
 
-Every request reports one `auth.Outcome` with provider `dev`: action `list_users`, `login` or `logout`. With `prometheusadapter` that is `<namespace>_auth_outcomes_total{provider="dev",...}`; with `ginadapter.Observe` the wide event names the provider. Alert on any `provider="dev"` outcome in a production metric source.
+Every request reports one `auth.Outcome` with provider `dev_login`: action `list_users`, `login` or `logout`. With `prometheusadapter` that is `<namespace>_auth_outcomes_total{provider="dev_login",...}`; with `ginadapter.Observe` the wide event names the provider. Alert on any `provider="dev_login"` outcome in a production metric source.
 
 ## Gotchas
 

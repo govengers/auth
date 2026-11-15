@@ -143,6 +143,8 @@ func TestNewRefusesWithoutEnabled(t *testing.T) {
 		{name: "no users", options: &Options{Enabled: true, Sessions: store, Load: loadTestUser}, wantError: "need Sessions, Users and Load"},
 		{name: "no load", options: &Options{Enabled: true, Sessions: store, Users: users}, wantError: "need Sessions, Users and Load"},
 		{name: "bad prefix", options: &Options{Enabled: true, Sessions: store, Users: users, Load: loadTestUser, PathPrefix: "/dev/"}, wantError: "PathPrefix"},
+		{name: "empty allowed host", options: &Options{Enabled: true, Sessions: store, Users: users, Load: loadTestUser, AllowedHosts: []string{""}}, wantError: "AllowedHosts"},
+		{name: "allowed host with port", options: &Options{Enabled: true, Sessions: store, Users: users, Load: loadTestUser, AllowedHosts: []string{"app.test:443"}}, wantError: "AllowedHosts"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -275,6 +277,7 @@ func TestLocalOnly(t *testing.T) {
 		host        string
 		header      string
 		allowRemote bool
+		allowedHost string
 		wantLocal   bool
 	}{
 		{name: "IPv4 loopback, localhost", remote: "127.0.0.1:1", host: "localhost:8080", wantLocal: true},
@@ -291,11 +294,22 @@ func TestLocalOnly(t *testing.T) {
 		{name: "proxied, X-Forwarded-For", remote: "127.0.0.1:1", host: "localhost", header: "X-Forwarded-For"},
 		{name: "proxied, Forwarded", remote: "127.0.0.1:1", host: "localhost", header: "Forwarded"},
 		{name: "proxied, X-Real-IP", remote: "127.0.0.1:1", host: "localhost", header: "X-Real-IP"},
-		{name: "remote peer allowed", remote: "172.17.0.1:1", host: "app.example", header: "X-Forwarded-For", allowRemote: true, wantLocal: true},
+		{name: "proxied, Via", remote: "127.0.0.1:1", host: "localhost", header: "Via"},
+		{name: "proxied, X-Forwarded-Proto", remote: "127.0.0.1:1", host: "localhost", header: "X-Forwarded-Proto"},
+		{name: "remote peer allowed", remote: "172.17.0.1:1", host: "localhost:8080", header: "X-Forwarded-For", allowRemote: true, wantLocal: true},
+		{name: "remote peer allowed, DNS rebinding host", remote: "172.17.0.1:1", host: "attacker.example:8080", allowRemote: true},
+		{name: "allowed host behind a local proxy", remote: "172.17.0.1:1", host: "App.Test.:443", header: "X-Forwarded-For", allowRemote: true, allowedHost: "app.test", wantLocal: true},
+		{name: "allowed host, loopback peer", remote: "127.0.0.1:1", host: "app.test", allowedHost: "App.Test", wantLocal: true},
+		{name: "other host than the allowed one", remote: "127.0.0.1:1", host: "attacker.example", allowedHost: "app.test"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			devFixture := newFixture(t, func(options *Options) { options.AllowRemote = testCase.allowRemote })
+			devFixture := newFixture(t, func(options *Options) {
+				options.AllowRemote = testCase.allowRemote
+				if testCase.allowedHost != "" {
+					options.AllowedHosts = []string{testCase.allowedHost}
+				}
+			})
 			for _, route := range []struct{ method, path, body string }{
 				{http.MethodGet, "/auth/dev/users", ""},
 				{http.MethodPost, "/auth/dev/login", `{"id":"ada"}`},

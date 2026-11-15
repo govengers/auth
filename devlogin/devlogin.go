@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,7 +35,7 @@ const (
 )
 
 // forwardingHeaders are set by reverse proxies; a request carrying one came through a proxy, whatever its peer.
-var forwardingHeaders = []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Real-IP"}
+var forwardingHeaders = []string{"Forwarded", "Via", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Port", "X-Forwarded-Proto", "X-Forwarded-Server", "X-Real-IP"}
 
 // User is one entry of the login list.
 type User struct {
@@ -48,7 +49,7 @@ type UserLister func(ctx context.Context) ([]User, error)
 
 // Loader returns the identity a login of the user id gets, as the application's other logins would build it
 // (UserID, roles, Active), or nil without an error when there is no such user. Provider and Subject are
-// replaced by "dev" and id. An *auth.Error refuses the login with its status. It must be safe for concurrent use.
+// replaced by "dev_login" (auth.ProviderDev) and id. An *auth.Error refuses the login with its status. It must be safe for concurrent use.
 type Loader func(ctx context.Context, id string) (*auth.Identity, error)
 
 // Options configures New.
@@ -61,12 +62,15 @@ type Options struct {
 	Load     Loader         // required
 	// PathPrefix defaults to "/auth/dev"; segments of A-Z a-z 0-9 . _ ~ -, no trailing "/".
 	PathPrefix string
-	// AllowRemote turns off the local-only check: by default every route refuses a request whose peer is not
-	// a loopback address, whose Host is not localhost or a loopback address, or that carries a proxy's
-	// forwarding header. Set it only for a development stack where the browser reaches the server through
-	// a container network or a local proxy.
+	// AllowRemote drops the peer and forwarding-header parts of the local-only check: by default every route
+	// refuses a request whose peer is not a loopback address or that carries a proxy's forwarding header. Set it
+	// only for a development stack where the browser reaches the server through a container network (docker
+	// port publishing, a devcontainer) or a local proxy. The Host check stays: it is the DNS-rebinding defence.
 	AllowRemote bool
-	Observer    auth.Observer // optional; every request is reported under provider "dev"
+	// AllowedHosts are host names (without port, case-insensitive) the Host check accepts besides localhost,
+	// *.localhost and loopback addresses, e.g. "app.test" for a stack behind a named local proxy.
+	AllowedHosts []string
+	Observer     auth.Observer // optional; every request is reported under provider "dev_login"
 }
 
 // Provider serves the development login: GET {prefix}/users lists the users, POST {prefix}/login with
@@ -94,6 +98,13 @@ func New(options *Options) (*Provider, error) {
 	if !redirect.IsPathPrefix(resolved.PathPrefix) {
 		return nil, fmt.Errorf("dev login: PathPrefix %q must be a clean path below \"/\" of unreserved URL characters, without a trailing slash", resolved.PathPrefix)
 	}
+	resolved.AllowedHosts = make([]string, 0, len(options.AllowedHosts))
+	for _, host := range options.AllowedHosts {
+		if host == "" || strings.ContainsAny(host, ":/ ") {
+			return nil, fmt.Errorf("dev login: AllowedHosts entry %q must be a host name without port", host)
+		}
+		resolved.AllowedHosts = append(resolved.AllowedHosts, normalizeHost(host))
+	}
 	reporter, err := failure.NewReporter(&failure.ReporterOptions{Provider: auth.ProviderDev, Observer: resolved.Observer})
 	if err != nil {
 		return nil, fmt.Errorf("dev login: %w", err)
@@ -101,7 +112,7 @@ func New(options *Options) (*Provider, error) {
 	return &Provider{options: resolved, reporter: reporter}, nil
 }
 
-// Name returns "dev", the Identity.Provider of every identity this provider creates.
+// Name returns "dev_login" (auth.ProviderDev), the Identity.Provider of every identity this provider creates.
 func (p *Provider) Name() string {
 	return auth.ProviderDev
 }
@@ -148,19 +159,27 @@ func (p *Provider) route(method, path string, action auth.Action, handle func(wr
 	return auth.Route{Method: method, Path: p.options.PathPrefix + path, Handler: handler}
 }
 
-// checkLocal refuses a request that did not come straight from this machine, unless AllowRemote. Behind a
-// reverse proxy on the same host the peer is loopback for everyone, which the forwarding headers and the Host
-// check catch for the common proxies; Enabled stays the guard that matters.
+// checkLocal refuses a request that did not come straight from this machine (AllowRemote: whose Host does not
+// name it). It is a seat belt, not a boundary: a reverse proxy on the same host that rewrites Host to its
+// loopback upstream and sets no forwarding header (httputil.ReverseProxy with Rewrite, nginx proxy_pass
+// without proxy_set_header, a dev server proxy with changeOrigin listening on the LAN) passes it for every
+// client it serves. Enabled stays the guard that matters.
 func (p *Provider) checkLocal(request *http.Request) error {
-	if p.options.AllowRemote || isLocal(request) {
+	if p.isLocal(request) {
 		return nil
 	}
 	return &auth.Error{Kind: auth.ErrForbidden, Code: codeNotLocal, Reason: "dev login from a non-local request"}
 }
 
-func isLocal(request *http.Request) bool {
+func (p *Provider) isLocal(request *http.Request) bool {
+	if !p.isLocalHost(request.Host) {
+		return false
+	}
+	if p.options.AllowRemote {
+		return true
+	}
 	peer, _, err := net.SplitHostPort(request.RemoteAddr)
-	if err != nil || !isLoopback(peer) || !isLocalHost(request.Host) {
+	if err != nil || !isLoopback(peer) {
 		return false
 	}
 	for _, header := range forwardingHeaders {
@@ -171,14 +190,20 @@ func isLocal(request *http.Request) bool {
 	return true
 }
 
-// isLocalHost reports whether the Host header names this machine. A DNS rebinding page reaches a local server
-// under its own host name, so a server answering any Host would hand it the user list and a session.
-func isLocalHost(host string) bool {
+// isLocalHost reports whether the Host header names this machine or one of AllowedHosts. A DNS rebinding page
+// reaches a local server under its own host name, so a server answering any Host would hand it the user list
+// and a session.
+func (p *Provider) isLocalHost(host string) bool {
 	if name, _, err := net.SplitHostPort(host); err == nil {
 		host = name
 	}
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	return host == "localhost" || strings.HasSuffix(host, ".localhost") || isLoopback(strings.Trim(host, "[]"))
+	host = normalizeHost(host)
+	return host == "localhost" || strings.HasSuffix(host, ".localhost") || isLoopback(strings.Trim(host, "[]")) ||
+		slices.Contains(p.options.AllowedHosts, host)
+}
+
+func normalizeHost(host string) string {
+	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
 
 func isLoopback(host string) bool {
