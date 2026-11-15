@@ -9,6 +9,7 @@ package postgrestest
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -99,6 +100,9 @@ func New(t *testing.T, migrations ...string) *pgxpool.Pool {
 }
 
 func (s *server) start() {
+	if s.err = os.MkdirAll(instancesDirectory(), 0o700); s.err != nil {
+		return
+	}
 	stopOrphans()
 	binaries, err := unpackedBinaries()
 	if err != nil {
@@ -110,7 +114,7 @@ func (s *server) start() {
 		s.err = err
 		return
 	}
-	if s.directory, s.err = os.MkdirTemp("", instancePrefix); s.err != nil {
+	if s.directory, s.err = os.MkdirTemp(instancesDirectory(), instancePrefix); s.err != nil {
 		return
 	}
 	if s.err = os.WriteFile(filepath.Join(s.directory, ownerFile), []byte(strconv.Itoa(os.Getpid())), 0o600); s.err != nil {
@@ -139,7 +143,7 @@ const (
 // stopOrphans stops the instances of test binaries that died before Main could stop them (a
 // killed binary, a test timeout) and removes their directories, so they do not pile up.
 func stopOrphans() {
-	directories, _ := filepath.Glob(filepath.Join(os.TempDir(), instancePrefix+"*")) // a bad pattern is impossible here
+	directories, _ := filepath.Glob(filepath.Join(instancesDirectory(), instancePrefix+"*")) // a bad pattern is impossible here
 	for _, directory := range directories {
 		owner, err := os.ReadFile(filepath.Join(directory, ownerFile)) //nolint:gosec // G304: a directory of this harness, found by its own prefix
 		if err != nil || alive(string(owner)) {
@@ -184,12 +188,12 @@ func signal(processID string, sent os.Signal) error {
 // several packages run in parallel, so each unpacks into its own directory and renames it into
 // place; the loser drops its copy.
 func unpackedBinaries() (string, error) {
-	final := filepath.Join(os.TempDir(), "govengers-auth-postgres-"+string(version))
+	final := filepath.Join(stateDirectory(), "govengers-auth-postgres-"+string(version))
 	if _, err := os.Stat(filepath.Join(final, "bin", "pg_ctl")); err == nil {
 		return final, nil
 	}
 	defer closeDownloadConnections()
-	scratch, err := os.MkdirTemp("", "govengers-auth-postgres-unpack-")
+	scratch, err := os.MkdirTemp(stateDirectory(), "govengers-auth-postgres-unpack-")
 	if err != nil {
 		return "", err
 	}
@@ -216,6 +220,27 @@ func unpackedBinaries() (string, error) {
 		}
 	}
 	return final, nil
+}
+
+// stateDirectory holds the unpacked binaries and the instance directories: embedded-postgres' own archive
+// cache, which the govengers CI restores. A CI run then neither unpacks again (about 40 s under -race) nor
+// finds a directory listing that differs from the run that cached the test results (the orphan sweep reads
+// it), so go test reuses the results of unchanged packages.
+func stateDirectory() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return os.TempDir()
+	}
+	return filepath.Join(home, ".embedded-postgres-go")
+}
+
+// instancesDirectory holds the instance directories of this package's test binaries only: go test hashes
+// the listing the orphan sweep reads, and a shared directory would list the instances of packages running
+// in parallel. go test runs a package's binary in the package directory.
+func instancesDirectory() string {
+	workingDirectory, _ := os.Getwd() // an empty name still gives a usable directory
+	digest := sha256.Sum256([]byte(workingDirectory))
+	return filepath.Join(stateDirectory(), "auth-instances", hex.EncodeToString(digest[:8]))
 }
 
 // closeDownloadConnections closes the keep-alive connection embedded-postgres leaves open after
