@@ -68,9 +68,12 @@ UPDATE govengers_auth_api_keys SET revoked_at = $3
 WHERE id = $1 AND ($2::uuid IS NULL OR owner_id = $2) AND revoked_at IS NULL
 RETURNING ` + keyColumns
 
-// selectOwnedKey reads a key of the owner $2 or (NULL) of any owner: the answer to a revocation that found
-// the key revoked already.
-const selectOwnedKey = `SELECT ` + keyColumns + ` FROM govengers_auth_api_keys WHERE id = $1 AND ($2::uuid IS NULL OR owner_id = $2)`
+// selectRevokedKey reads a revoked key of the owner $2 or (NULL) of any owner: the answer to a revocation that
+// found the key revoked already. A key it finds unrevoked committed after the update's snapshot, so the update
+// did not see it either: no row, ErrKeyNotFound.
+const selectRevokedKey = `
+SELECT ` + keyColumns + ` FROM govengers_auth_api_keys
+WHERE id = $1 AND ($2::uuid IS NULL OR owner_id = $2) AND revoked_at IS NOT NULL`
 
 // purgeKeys deletes the keys that ended (revoked, or expired) before $1; LEAST ignores a NULL.
 const purgeKeys = `DELETE FROM govengers_auth_api_keys WHERE LEAST(revoked_at, expires_at) < $1`
@@ -276,7 +279,7 @@ func (s *Store) revoke(ctx context.Context, owner any, id uuid.UUID) (*Key, bool
 	if !errors.Is(err, ErrKeyNotFound) {
 		return key, err == nil, err
 	}
-	key, err = s.queryOne(ctx, "revoke key", selectOwnedKey, id, owner)
+	key, err = s.queryOne(ctx, "revoke key", selectRevokedKey, id, owner)
 	return key, false, err
 }
 

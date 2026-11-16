@@ -438,6 +438,76 @@ func TestAdministratorView(t *testing.T) {
 	require.ErrorIs(t, err, postgresstore.ErrKeyNotFound)
 }
 
+// A Revoke waiting on the row lock of a revocation that then commits answers revoked=false with the other
+// call's time, so only the first writes an audit entry.
+func TestARevocationWaitingForAnotherSeesItsTime(t *testing.T) {
+	fixture := newFixture(t)
+	_, key := fixture.issue(t, tasksRead)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	transaction, err := fixture.pool.Begin(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = transaction.Rollback(context.Background()) }) // a no-op after the commit
+	fixture.now = start.Add(time.Minute)
+	first, revoked, err := fixture.store.WithExecutor(transaction).Revoke(ctx, fixture.owner, key.ID)
+	require.NoError(t, err)
+	require.True(t, revoked)
+	fixture.now = start.Add(time.Hour) // before the goroutine starts, so it reads this time without a race
+
+	type result struct {
+		key     *postgresstore.Key
+		revoked bool
+		err     error
+	}
+	waiter := make(chan result, 1)
+	go func() {
+		key, revoked, err := fixture.store.Revoke(ctx, fixture.owner, key.ID)
+		waiter <- result{key, revoked, err}
+	}()
+	for waiting := false; !waiting; {
+		require.NoError(t, fixture.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock')`).Scan(&waiting))
+	}
+	require.NoError(t, transaction.Commit(ctx))
+
+	second := <-waiter
+	require.NoError(t, second.err)
+	require.False(t, second.revoked, "the other call revoked it")
+	require.True(t, first.RevokedAt.Equal(second.key.RevokedAt), "the time of the revocation that committed")
+}
+
+// commitBefore runs commit before the executor's second QueryRow.
+type commitBefore struct {
+	postgresstore.Executor
+	calls  int
+	commit func()
+}
+
+func (e *commitBefore) QueryRow(ctx context.Context, statement string, arguments ...any) pgx.Row {
+	if e.calls++; e.calls == 2 {
+		e.commit()
+	}
+	return e.Executor.QueryRow(ctx, statement, arguments...)
+}
+
+// A key that commits between Revoke's update and its second statement was not there for the update:
+// ErrKeyNotFound, never an unrevoked key with revoked=false.
+func TestRevokeOfAKeyCommittingMeanwhileIsNotFound(t *testing.T) {
+	fixture := newFixture(t)
+	transaction, err := fixture.pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = transaction.Rollback(context.Background()) }) // a no-op after the commit
+	_, key, err := fixture.store.WithExecutor(transaction).Issue(t.Context(), fixture.owner, postgresstore.IssueRequest{Name: "ci", Scopes: []auth.Permission{tasksRead}})
+	require.NoError(t, err)
+	executor := &commitBefore{Executor: fixture.pool, commit: func() { require.NoError(t, transaction.Commit(t.Context())) }}
+
+	_, _, err = fixture.store.WithExecutor(executor).Revoke(t.Context(), fixture.owner, key.ID)
+	require.ErrorIs(t, err, postgresstore.ErrKeyNotFound)
+	require.Equal(t, 2, executor.calls, "the update and the second statement")
+	got, err := fixture.store.Get(t.Context(), key.ID)
+	require.NoError(t, err)
+	require.True(t, got.RevokedAt.IsZero(), "the key committed after the update")
+}
+
 // singleConnectionPool is a pool that holds at most one connection: a statement that does not run on the
 // transaction holding it waits for the context's deadline.
 func singleConnectionPool(t *testing.T) *pgxpool.Pool {
