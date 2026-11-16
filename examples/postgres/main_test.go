@@ -115,47 +115,59 @@ func TestServeStopsWhenTheContextEnds(t *testing.T) {
 	require.NoError(t, group.Wait())
 }
 
-// A login whose query waits for a lock outlives the grace period: serve must cancel it, or the query keeps its
-// connection and pool.Close, which run defers, never returns.
+// A request whose query waits for a lock outlives the grace period: serve must cancel it, or the query keeps its
+// connection and pool.Close, which run defers, never returns. server.Close alone cancels only requests whose body
+// was read to the end; a handler (or a middleware such as the Guard) that queries first needs serve's BaseContext.
 func TestServeCancelsTheRequestsThatOutliveTheGrace(t *testing.T) {
-	pool := postgrestest.New(t, `CREATE TABLE locked (id int)`)
-	holder, err := pool.Begin(t.Context())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = holder.Rollback(context.WithoutCancel(t.Context())) })
-	_, err = holder.Exec(t.Context(), `LOCK TABLE locked IN ACCESS EXCLUSIVE MODE`)
-	require.NoError(t, err)
-	queried := make(chan error, 1)
-	handler := http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
-		var body map[string]string
-		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-			queried <- err
-			return
-		}
-		_, err := pool.Exec(request.Context(), `SELECT count(*) FROM locked`)
-		queried <- err
-	})
-	ctx, cancel := context.WithCancel(t.Context())
-	group, groupContext := errgroup.WithContext(ctx)
-	listener := listen(t)
-	serve(groupContext, group, newHTTPServer(handler), listener, time.Millisecond)
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+listener.Addr().String(), strings.NewReader(`{"identifier":"ada"}`))
-	require.NoError(t, err)
-	go func() { // the answer never comes: serve closes the connection
-		response, err := http.DefaultClient.Do(request)
-		if err == nil {
-			_ = response.Body.Close()
-		}
-	}()
-	waitForLockWaiter(t, pool)
+	handlers := map[string]func(request *http.Request, query func() error) error{
+		"reads the body first": func(request *http.Request, query func() error) error {
+			var body map[string]string
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				return err
+			}
+			return query()
+		},
+		"queries before reading the body": func(_ *http.Request, query func() error) error { return query() },
+	}
+	for name, handle := range handlers {
+		t.Run(name, func(t *testing.T) {
+			pool := postgrestest.New(t, `CREATE TABLE locked (id int)`)
+			holder, err := pool.Begin(t.Context())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = holder.Rollback(context.WithoutCancel(t.Context())) })
+			_, err = holder.Exec(t.Context(), `LOCK TABLE locked IN ACCESS EXCLUSIVE MODE`)
+			require.NoError(t, err)
+			queried := make(chan error, 1)
+			handler := http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+				queried <- handle(request, func() error {
+					_, err := pool.Exec(request.Context(), `SELECT count(*) FROM locked`)
+					return err
+				})
+			})
+			ctx, cancel := context.WithCancel(t.Context())
+			group, groupContext := errgroup.WithContext(ctx)
+			listener := listen(t)
+			serve(groupContext, group, newHTTPServer(handler), listener, time.Millisecond)
+			request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+listener.Addr().String(), strings.NewReader(`{"identifier":"ada"}`))
+			require.NoError(t, err)
+			go func() { // the answer never comes: serve closes the connection
+				response, err := http.DefaultClient.Do(request)
+				if err == nil {
+					_ = response.Body.Close()
+				}
+			}()
+			waitForLockWaiter(t, pool)
 
-	cancel()
+			cancel()
 
-	require.ErrorIs(t, group.Wait(), context.DeadlineExceeded)
-	select {
-	case err := <-queried:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(10 * time.Second):
-		t.Fatal("the request still runs after serve returned")
+			require.ErrorIs(t, group.Wait(), context.DeadlineExceeded)
+			select {
+			case err := <-queried:
+				require.ErrorIs(t, err, context.Canceled)
+			case <-time.After(10 * time.Second):
+				t.Fatal("the request still runs after serve returned")
+			}
+		})
 	}
 }
 
@@ -167,11 +179,14 @@ func listen(t *testing.T) net.Listener {
 	return listener
 }
 
-// waitForLockWaiter returns once a backend of pool's database waits for a lock.
+// waitForLockWaiter returns once a backend of pool's database waits for a lock on the table locked, and fails the
+// test when none does within a few seconds.
 func waitForLockWaiter(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	_, err := pool.Exec(t.Context(), `DO $$ BEGIN
-		WHILE NOT EXISTS (SELECT FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock') LOOP
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := pool.Exec(ctx, `DO $$ BEGIN
+		WHILE NOT EXISTS (SELECT FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM locked%') LOOP
 			PERFORM pg_stat_clear_snapshot();
 			PERFORM pg_sleep(0.005);
 		END LOOP;
