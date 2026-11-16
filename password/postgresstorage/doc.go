@@ -19,6 +19,11 @@
 // way (credentials referencing users, created after the profile row). The library never deletes a user:
 // delete the credentials row in your own statement.
 //
-// The package never logs and never starts goroutines. Errors of pgx are reported by message only; callers
-// match on the password package's sentinels. The Storage is safe for concurrent use.
+// Every statement runs on Options.Pool, or on the caller's transaction through Storage.WithExecutor: create
+// the credentials in the same commit as the profile row and the audit entry.
+//
+// The package never logs and never starts goroutines. Callers match on the password package's sentinels; a
+// database error keeps pgx's error in its chain, so a caller maps it (errors.As with *pgconn.PgError: a
+// serialization failure to retry, or the foreign key of the application's profile table); that chain is part
+// of the API. The Storage is safe for concurrent use.
 package postgresstorage

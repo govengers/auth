@@ -13,18 +13,17 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/password"
 	"github.com/govengers/auth/seal"
 )
 
-// uniqueViolation is the SQLSTATE of a duplicate user ID, username or email.
-const uniqueViolation = "23505"
-
+// insertUser inserts nothing for a used user ID, username or email (any unique index decides) instead of
+// failing, so a duplicate leaves the caller's transaction usable.
 const insertUser = `
 INSERT INTO govengers_auth_password_credentials
     (user_id, username, email, password_hash, totp_enabled, totp_secret, backup_code_hashes)
-VALUES ($1, $2, $3, $4, $5, $6, $7)`
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT DO NOTHING`
 
 const selectUser = `
 SELECT user_id, username, email, password_hash, totp_enabled, totp_secret, backup_code_hashes
@@ -94,6 +93,14 @@ const (
 	resealBatchSize = 100
 )
 
+// Executor runs the storage's statements: a *pgxpool.Pool, a *pgx.Conn, a pgx.Tx, or the query handle of a
+// govengers/livewire unit of work (postgresadapter.TransactionFrom). See Storage.WithExecutor.
+type Executor interface {
+	Exec(ctx context.Context, statement string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, statement string, arguments ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, statement string, arguments ...any) pgx.Row
+}
+
 // Options configures New.
 type Options struct {
 	Pool *pgxpool.Pool // required; its search_path must reach the table of MigrationV1; the caller owns and closes it
@@ -104,10 +111,12 @@ type Options struct {
 	Sealer *seal.Sealer
 }
 
-// Storage implements password.Storage on PostgreSQL. It is safe for concurrent use.
+// Storage implements password.Storage on PostgreSQL. Its statements run on Options.Pool, or on the caller's
+// transaction through WithExecutor. It is safe for concurrent use.
 type Storage struct {
-	pool   *pgxpool.Pool
-	sealer *seal.Sealer
+	pool     *pgxpool.Pool
+	database Executor // the pool, or the executor of a WithExecutor view
+	sealer   *seal.Sealer
 }
 
 var _ password.Storage = (*Storage)(nil)
@@ -117,11 +126,31 @@ func New(options *Options) (*Storage, error) {
 	if options == nil || options.Pool == nil {
 		return nil, errors.New("postgres password storage: Options.Pool is required")
 	}
-	return &Storage{pool: options.Pool, sealer: options.Sealer}, nil
+	return &Storage{pool: options.Pool, database: options.Pool, sealer: options.Sealer}, nil
+}
+
+// WithExecutor returns a view of the storage whose every statement, reads included, runs on executor, usually
+// the caller's transaction: an application creates a user's credentials in the same commit as its profile
+// row and audit entry, and a call inside a transaction never waits for a second connection of the pool. A
+// nil executor is the pool. The view shares the storage's options (the Sealer); the storage itself keeps
+// using the pool.
+//
+// On a transaction the compare-and-swap methods see its isolation (READ COMMITTED needed, see the package
+// documentation), and what the transaction does is undone by its rollback: keep the provider on the storage
+// itself, so a TOTP attempt it counts is never rolled back with an application's failure. An error returned
+// from the database aborts the transaction; the sentinels of password (ErrUserExists, ErrUserNotFound,
+// ErrTOTPAttemptsExhausted) leave it usable.
+func (s *Storage) WithExecutor(executor Executor) *Storage {
+	view := *s
+	view.database = executor
+	if executor == nil {
+		view.database = s.pool
+	}
+	return &view
 }
 
 // CreateUser inserts user; a used ID, username or email (ignoring ASCII case) is password.ErrUserExists, decided by
-// the table's unique indexes.
+// the table's unique indexes (ON CONFLICT DO NOTHING, so a caller's transaction stays usable).
 func (s *Storage) CreateUser(ctx context.Context, user *password.User) error {
 	if user == nil {
 		return errors.New("postgres password storage: create user: user is nil")
@@ -130,14 +159,13 @@ func (s *Storage) CreateUser(ctx context.Context, user *password.User) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, insertUser, user.ID, user.Username, user.Email, user.PasswordHash,
+	tag, err := s.database.Exec(ctx, insertUser, user.ID, user.Username, user.Email, user.PasswordHash,
 		user.TOTPEnabled, secret, orEmpty(user.BackupCodeHashes))
-	var postgresError *pgconn.PgError
-	if errors.As(err, &postgresError) && postgresError.Code == uniqueViolation {
-		return password.ErrUserExists
-	}
 	if err != nil {
-		return dependency.Error("postgres password storage: create user", err)
+		return fmt.Errorf("postgres password storage: create user: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return password.ErrUserExists
 	}
 	return nil
 }
@@ -167,7 +195,7 @@ func (s *Storage) UpdatePasswordHash(ctx context.Context, id uuid.UUID, currentH
 // password.ErrTOTPAttemptsExhausted.
 func (s *Storage) ConsumeTOTPAttempt(ctx context.Context, id uuid.UUID, maximum int) (int, error) {
 	var remaining int
-	err := s.pool.QueryRow(ctx, consumeTOTPAttempt, id, maximum).Scan(&remaining)
+	err := s.database.QueryRow(ctx, consumeTOTPAttempt, id, maximum).Scan(&remaining)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := s.requireUser(ctx, id); err != nil {
 			return 0, err
@@ -175,7 +203,7 @@ func (s *Storage) ConsumeTOTPAttempt(ctx context.Context, id uuid.UUID, maximum 
 		return 0, password.ErrTOTPAttemptsExhausted
 	}
 	if err != nil {
-		return 0, dependency.Error("postgres password storage: consume TOTP attempt", err)
+		return 0, fmt.Errorf("postgres password storage: consume TOTP attempt: %w", err)
 	}
 	return remaining, nil
 }
@@ -214,9 +242,9 @@ func (s *Storage) ClearTOTP(ctx context.Context, id uuid.UUID) error {
 // update runs a statement on the user id ($1) and reports whether it changed the row; when it did not, a
 // missing user is password.ErrUserNotFound and anything else a condition that did not hold.
 func (s *Storage) update(ctx context.Context, operation, statement string, id uuid.UUID, arguments ...any) (bool, error) {
-	tag, err := s.pool.Exec(ctx, statement, append([]any{id}, arguments...)...)
+	tag, err := s.database.Exec(ctx, statement, append([]any{id}, arguments...)...)
 	if err != nil {
-		return false, dependency.Error("postgres password storage: "+operation, err)
+		return false, fmt.Errorf("postgres password storage: %s: %w", operation, err)
 	}
 	if tag.RowsAffected() > 0 {
 		return true, nil
@@ -227,8 +255,8 @@ func (s *Storage) update(ctx context.Context, operation, statement string, id uu
 // requireUser returns password.ErrUserNotFound when no user has id.
 func (s *Storage) requireUser(ctx context.Context, id uuid.UUID) error {
 	var exists bool
-	if err := s.pool.QueryRow(ctx, userExists, id).Scan(&exists); err != nil {
-		return dependency.Error("postgres password storage: look up user", err)
+	if err := s.database.QueryRow(ctx, userExists, id).Scan(&exists); err != nil {
+		return fmt.Errorf("postgres password storage: look up user: %w", err)
 	}
 	if !exists {
 		return password.ErrUserNotFound
@@ -248,13 +276,13 @@ func (s *Storage) queryIdentifier(ctx context.Context, statement, identifier str
 
 func (s *Storage) queryUser(ctx context.Context, statement string, argument any) (*password.User, error) {
 	var user password.User
-	err := s.pool.QueryRow(ctx, statement, argument).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash,
+	err := s.database.QueryRow(ctx, statement, argument).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash,
 		&user.TOTPEnabled, &user.TOTPSecret, &user.BackupCodeHashes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, password.ErrUserNotFound
 	}
 	if err != nil {
-		return nil, dependency.Error("postgres password storage: read user", err)
+		return nil, fmt.Errorf("postgres password storage: read user: %w", err)
 	}
 	if len(user.BackupCodeHashes) == 0 {
 		user.BackupCodeHashes = nil // the empty array of a user without codes, as password.User has it
@@ -280,16 +308,16 @@ func (s *Storage) ResealTOTPSecrets(ctx context.Context) (int, error) {
 	changed := 0
 	var after *uuid.UUID
 	for {
-		rows, err := s.pool.Query(ctx, selectTOTPSecrets, after, resealBatchSize)
+		rows, err := s.database.Query(ctx, selectTOTPSecrets, after, resealBatchSize)
 		if err != nil {
-			return changed, dependency.Error("postgres password storage: reseal TOTP secrets: read", err)
+			return changed, fmt.Errorf("postgres password storage: reseal TOTP secrets: read: %w", err)
 		}
 		page, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (storedSecret, error) {
 			var stored storedSecret
 			return stored, row.Scan(&stored.id, &stored.secret)
 		})
 		if err != nil {
-			return changed, dependency.Error("postgres password storage: reseal TOTP secrets: read", err)
+			return changed, fmt.Errorf("postgres password storage: reseal TOTP secrets: read: %w", err)
 		}
 		for _, stored := range page {
 			replaced, err := s.resealSecret(ctx, stored.id, stored.secret)
@@ -331,9 +359,9 @@ func (s *Storage) resealSecret(ctx context.Context, id uuid.UUID, stored string)
 	if err != nil {
 		return false, fmt.Errorf("postgres password storage: reseal TOTP secret of user %s: %w", id, err)
 	}
-	tag, err := s.pool.Exec(ctx, replaceTOTPSecret, id, stored, next)
+	tag, err := s.database.Exec(ctx, replaceTOTPSecret, id, stored, next)
 	if err != nil {
-		return false, dependency.Error("postgres password storage: reseal TOTP secret", err)
+		return false, fmt.Errorf("postgres password storage: reseal TOTP secret: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil
 }
