@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -113,10 +114,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	httpServer := newHTTPServer(address, server.handler)
+	listener, err := new(net.ListenConfig).Listen(ctx, "tcp", address)
+	if err != nil {
+		return err
+	}
 	group, groupContext := errgroup.WithContext(ctx)
 	group.Go(recovering(func() error { return sweep(groupContext, server.backend) }))
-	serve(groupContext, group, httpServer)
+	serve(groupContext, group, newHTTPServer(server.handler), listener, shutdownTimeout)
 	return group.Wait()
 }
 
@@ -144,20 +148,31 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, migrations []string) error
 	return nil
 }
 
-// serve runs server in group until ctx is cancelled (a signal, or another member of group failed), then
-// waits up to shutdownTimeout for running requests.
-func serve(ctx context.Context, group *errgroup.Group, server *http.Server) {
+// serve runs server on listener in group until ctx is cancelled (a signal, or another member of group failed),
+// then waits up to grace for running requests. Requests still running after that are cancelled, their queries
+// with them, and their connections closed: a request blocked on a database lock would otherwise hold its pool
+// connection, and the deferred pool.Close waits for every connection to come back. The request contexts derive
+// from one of serve's own, since closing a connection cancels a request only once its body was read to the end.
+func serve(ctx context.Context, group *errgroup.Group, server *http.Server, listener net.Listener, grace time.Duration) {
+	requests, cancelRequests := context.WithCancel(context.WithoutCancel(ctx))
+	server.BaseContext = func(net.Listener) context.Context { return requests }
 	group.Go(recovering(func() error {
-		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-			return err // the address is taken, for instance
+		if err := server.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
+			return err
 		}
 		return nil
 	}))
 	group.Go(recovering(func() error {
+		defer cancelRequests()
 		<-ctx.Done()
-		shutdownContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		shutdownContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), grace)
 		defer cancel()
-		return server.Shutdown(shutdownContext)
+		err := server.Shutdown(shutdownContext)
+		if err != nil {
+			cancelRequests()
+			_ = server.Close() // err already says why; Close only adds the listener's error
+		}
+		return err
 	}))
 }
 
@@ -191,9 +206,8 @@ func sweep(ctx context.Context, backend *postgresbackend.Backend) error {
 }
 
 // newHTTPServer bounds what one client can hold: slow or endless requests, idle connections, header bytes.
-func newHTTPServer(address string, handler http.Handler) *http.Server {
+func newHTTPServer(handler http.Handler) *http.Server {
 	return &http.Server{
-		Addr:              address,
 		Handler:           handler,
 		MaxHeaderBytes:    64 << 10,
 		ReadHeaderTimeout: 10 * time.Second,

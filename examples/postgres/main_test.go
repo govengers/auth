@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
@@ -107,9 +110,73 @@ func TestRecoveringTurnsAPanicIntoAnError(t *testing.T) {
 func TestServeStopsWhenTheContextEnds(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	group, groupContext := errgroup.WithContext(ctx)
-	serve(groupContext, group, newHTTPServer("127.0.0.1:0", http.NotFoundHandler()))
+	serve(groupContext, group, newHTTPServer(http.NotFoundHandler()), listen(t), shutdownTimeout)
 	cancel()
 	require.NoError(t, group.Wait())
+}
+
+// A login whose query waits for a lock outlives the grace period: serve must cancel it, or the query keeps its
+// connection and pool.Close, which run defers, never returns.
+func TestServeCancelsTheRequestsThatOutliveTheGrace(t *testing.T) {
+	pool := postgrestest.New(t, `CREATE TABLE locked (id int)`)
+	holder, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = holder.Rollback(context.WithoutCancel(t.Context())) })
+	_, err = holder.Exec(t.Context(), `LOCK TABLE locked IN ACCESS EXCLUSIVE MODE`)
+	require.NoError(t, err)
+	queried := make(chan error, 1)
+	handler := http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			queried <- err
+			return
+		}
+		_, err := pool.Exec(request.Context(), `SELECT count(*) FROM locked`)
+		queried <- err
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	group, groupContext := errgroup.WithContext(ctx)
+	listener := listen(t)
+	serve(groupContext, group, newHTTPServer(handler), listener, time.Millisecond)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+listener.Addr().String(), strings.NewReader(`{"identifier":"ada"}`))
+	require.NoError(t, err)
+	go func() { // the answer never comes: serve closes the connection
+		response, err := http.DefaultClient.Do(request)
+		if err == nil {
+			_ = response.Body.Close()
+		}
+	}()
+	waitForLockWaiter(t, pool)
+
+	cancel()
+
+	require.ErrorIs(t, group.Wait(), context.DeadlineExceeded)
+	select {
+	case err := <-queried:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request still runs after serve returned")
+	}
+}
+
+func listen(t *testing.T) net.Listener {
+	t.Helper()
+	listener, err := new(net.ListenConfig).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	return listener
+}
+
+// waitForLockWaiter returns once a backend of pool's database waits for a lock.
+func waitForLockWaiter(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	_, err := pool.Exec(t.Context(), `DO $$ BEGIN
+		WHILE NOT EXISTS (SELECT FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock') LOOP
+			PERFORM pg_stat_clear_snapshot();
+			PERFORM pg_sleep(0.005);
+		END LOOP;
+	END $$`)
+	require.NoError(t, err)
 }
 
 // newClient returns a client of server with its own cookie jar, like one browser.
