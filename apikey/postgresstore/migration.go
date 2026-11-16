@@ -10,8 +10,10 @@ package postgresstore
 // module add MigrationV2 and so on; never edit an applied migration. It runs inside the migration's
 // transaction (SET LOCAL) and passes squawk.
 //
-// owner_id has no foreign key: add one to your users table in your own migration (ON DELETE CASCADE ends a
-// deleted user's keys with the user).
+// owner_id has no foreign key: add one to your users table in your own migration; Issue answers an owner it
+// refuses with ErrOwnerNotFound. Prefer ON DELETE RESTRICT (deactivate users instead of deleting them):
+// ON DELETE CASCADE deletes a deleted user's keys with the user, and audit entries naming those keys no longer
+// lead to an owner. Run MigrationV2 after it.
 const MigrationV1 = `
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
@@ -28,4 +30,15 @@ CREATE TABLE govengers_auth_api_keys (
 );
 
 CREATE INDEX govengers_auth_api_keys_owner ON govengers_auth_api_keys (owner_id, created_at);
+`
+
+// MigrationV2 adds revoked_at to govengers_auth_api_keys: Revoke marks a key instead of deleting it, so the key
+// ID an audit entry names still leads to its owner; Purge deletes ended keys after a retention. Run it in a
+// goose migration after MigrationV1, the same way. Adding a nullable column without a default rewrites
+// nothing.
+const MigrationV2 = `
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
+
+ALTER TABLE govengers_auth_api_keys ADD COLUMN revoked_at timestamptz;
 `
