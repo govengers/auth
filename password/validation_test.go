@@ -101,6 +101,8 @@ func TestPolicyValidate(t *testing.T) {
 func TestValidateRegistration(t *testing.T) {
 	username, email := "ada", "ada@example.com"
 	badUsername, badEmail := "a", "ada@example"
+	longestEmail := strings.Repeat("a", 254-len("@example.com")) + "@example.com"
+	tooLongEmail := "a" + longestEmail
 	defaults := Options{Policy: Policy{MinimumLength: 12}}
 	testCases := []struct {
 		name         string
@@ -123,6 +125,8 @@ func TestValidateRegistration(t *testing.T) {
 		},
 		{name: "invalid username", registration: registerRequest{Username: &badUsername, Password: testPassword}, options: defaults, wantKind: auth.ErrInvalidRequest, wantCode: "invalid_username"},
 		{name: "invalid email", registration: registerRequest{Email: &badEmail, Password: testPassword}, options: defaults, wantKind: auth.ErrInvalidRequest, wantCode: "invalid_email"},
+		{name: "longest email", registration: registerRequest{Email: &longestEmail, Password: testPassword}, options: defaults},
+		{name: "too long email", registration: registerRequest{Email: &tooLongEmail, Password: testPassword}, options: defaults, wantKind: auth.ErrInvalidRequest, wantCode: "invalid_email"},
 		{name: "weak password", registration: registerRequest{Username: &username, Password: "short"}, options: defaults, wantKind: auth.ErrInvalidRequest, wantCode: "weak_password"},
 	}
 	for _, testCase := range testCases {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -135,8 +136,13 @@ func (p *Provider) verifyDummy(password string) {
 	_, _, _ = p.verifyHash(password, p.dummyHash)
 }
 
-// lookup returns the user an identifier names; a kind of identifier that is disabled finds nobody.
+// lookup returns the user an identifier names; a kind of identifier that is disabled finds nobody, and so does one
+// with a NUL byte, which no user can have and PostgreSQL refuses as text: a probe of the login form must not be a
+// 500 on any Storage. Invalid UTF-8 cannot arrive, JSON decoding replaces it with U+FFFD.
 func (p *Provider) lookup(ctx context.Context, identifier string) (*User, error) {
+	if strings.ContainsRune(identifier, 0) {
+		return nil, ErrUserNotFound
+	}
 	switch kindOf(identifier) {
 	case identifierEmail:
 		if p.options.DisableEmailLogin {

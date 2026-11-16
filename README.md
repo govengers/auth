@@ -15,12 +15,12 @@ One Go library for login and access control: password, OIDC (incl. Keycloak) and
 
 ## Features
 
-- Password login with Argon2id, TOTP with backup codes, optional registration, bcrypt upgrade; users stay in your database.
+- Password login with Argon2id, TOTP with backup codes, optional registration, bcrypt upgrade; users stay in your database (a PostgreSQL `Storage` ships).
 - OIDC code flow with PKCE and nonce, RP-initiated and front-channel logout, Keycloak Admin API enrichment, Google.
 - GitHub OAuth with allowed, admin and relevant teams, re-checked every minute.
-- Server-side sessions (memory or Redis), the cookie holds a random ID only.
+- Server-side sessions (memory, Redis or PostgreSQL), the cookie holds a random ID only.
 - Authorization checks over roles, groups, teams and resource permissions (`builds:write`), composable with `All`, `Any`, `Not`.
-- API keys, RS512 JWT signing and verification.
+- API keys: static, or per-user keys issued into PostgreSQL and capped by their scopes; RS512 JWT signing and verification.
 - `net/http` core; gin, wide events and Prometheus in adapter packages. No logging, no goroutines.
 
 ## Install
@@ -61,7 +61,7 @@ Provider, Guard and routes, from [examples/password/main.go](examples/password/m
 	serveMux.Handle("GET /{$}", guard.RequireUI()(http.HandlerFunc(home)))
 ```
 
-Complete, tested servers: [password](examples/password/main.go), [OIDC with Keycloak](examples/oidc/main.go), [GitHub on gin](examples/github/main.go).
+Complete, tested servers: [password](examples/password/main.go), [password, sessions and API keys on PostgreSQL](examples/postgres/main.go), [OIDC with Keycloak](examples/oidc/main.go), [GitHub on gin](examples/github/main.go).
 
 ## Packages
 
@@ -70,11 +70,15 @@ Complete, tested servers: [password](examples/password/main.go), [OIDC with Keyc
 | [`auth`](docs/wiki/Errors-and-Observability.md) | `Identity`, `Permission`, context helpers, `Error` and the JSON error shape, `Observer`, `Hook`, `Route` |
 | [`session`](docs/wiki/Sessions.md) | server-side sessions: `Store`, `Guard` (`RequireAPI`, `RequireUI`), memory backend, refresh |
 | [`session/redisbackend`](docs/wiki/Sessions.md#backends) | session backend on Redis, shared by replicas |
+| [`session/postgresbackend`](docs/wiki/Sessions.md#backends) | session backend on PostgreSQL, shared by replicas, with `Sweep` |
 | [`password`](docs/wiki/Password.md) | password login, TOTP, registration; you implement `Storage` |
+| [`password/postgresstorage`](docs/wiki/Password.md#storage-on-postgresql) | `Storage` on PostgreSQL |
+| [`password/passwordtest`](docs/wiki/Password.md#storage) | conformance suite for your own `Storage` |
 | [`oidc`](docs/wiki/OIDC.md) | OIDC login and logout |
 | [`oidc/keycloak`](docs/wiki/OIDC.md#keycloak-enrichment) | Keycloak Admin API enrichment as an `OnLogin` hook |
 | [`github`](docs/wiki/GitHub.md) | GitHub OAuth with teams and an API client for the user |
 | [`apikey`](docs/wiki/API-Keys.md) | static and application-issued API keys |
+| [`apikey/postgresstore`](docs/wiki/API-Keys.md#per-user-keys-on-postgresql) | per-owner keys on PostgreSQL: issue, list, revoke, `Resolve` |
 | [`jwt`](docs/wiki/JWT.md) | RS512 `Signer` with JWKS, `Verifier` with middleware |
 | [`authorization`](docs/wiki/Authorization.md) | `Check` primitives and combinators |
 | [`ginadapter`](docs/wiki/Gin.md) | net/http middleware and routes on gin, `Require`, wide-event `Observe` |

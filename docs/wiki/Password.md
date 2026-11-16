@@ -34,12 +34,25 @@ From [examples/password/main.go](../../examples/password/main.go) (tested by its
 
 ## Storage
 
-You implement [`password.Storage`](../../password/storage.go) (11 methods) on your users table; `password.NewMemoryStorage()` is for tests and examples only. Contracts that matter:
+You implement [`password.Storage`](../../password/storage.go) (11 methods) on your users table, or use the PostgreSQL one below; `password.NewMemoryStorage()` is for tests and examples only. Contracts that matter:
 
 - Usernames and emails are unique and matched ignoring case (unique indexes on `lower(...)`); a duplicate is `password.ErrUserExists` from the unique constraint, not from a lookup before the insert.
+- The provider passes login identifiers as typed, always valid UTF-8 (JSON decoding replaces invalid bytes). One with a NUL byte, which PostgreSQL refuses as `text`, never reaches your storage: the provider answers it as an unknown user, so a scanner probing the login form gets a 401, not a 500. Registration caps emails at 254 bytes (RFC 5321), which also keeps them below the btree row limit.
 - `UpdatePasswordHash`, `ConsumeTOTPAttempt`, `ConsumeTOTPStep`, `ConsumeBackupCode` and `SetTOTP` are each one atomic statement (compare-and-swap); `SetTOTP` returns `(bool, error)` and enables only while TOTP is off.
 - Not found is `password.ErrUserNotFound`.
 - SQL for every method: [docs/migration.md](../migration.md#recipe). Create users with `password.Hash(plain, password.DefaultParameters())`; keep roles and flags in your own columns.
+- Run the conformance suite [`password/passwordtest`](../../password/passwordtest/passwordtest.go) on your implementation: `passwordtest.Run(t, func(t *testing.T) password.Storage { return newStorage(t) })`, a fresh empty storage per subtest.
+
+### Storage on PostgreSQL
+
+`password/postgresstorage` implements every method on PostgreSQL 18 (`postgresstorage.New(&postgresstorage.Options{Pool: pool})`). Run `postgresstorage.MigrationV1` in one of your goose migrations; it creates `govengers_auth_password_credentials` (user ID, username, email, hash, TOTP state, attempt counter, last TOTP step) with unique indexes on `lower(username COLLATE "C")` and `lower(email COLLATE "C")`.
+
+- Case is folded for ASCII letters only, on every database whatever its default collation: under a Turkish default, plain `lower()` would make `ADMIN` and `admin` two users. Registration allows ASCII usernames and emails only; a user your code creates with non-ASCII letters is matched case-sensitively for those letters (`MemoryStorage` folds them).
+- The table holds credentials, not the profile. Keep the profile in your own table under the same ID (`auth.Identity.UserID`) and join on it. With password-only users, reference the credentials (`id uuid PRIMARY KEY REFERENCES govengers_auth_password_credentials (user_id) ON DELETE CASCADE`) and create the profile row in `OnLogin` (`INSERT ... ON CONFLICT DO NOTHING`); when users also come from OIDC or GitHub, point the foreign key the other way or leave it out.
+- The storage names every column it reads and writes, so columns your migrations add (nullable or with a default) do not break it; your own table is still the better home.
+- The library never deletes users: delete the credentials row in your own statement.
+- Relies on READ COMMITTED, PostgreSQL's default: the compare-and-swap statements re-check their condition on the row a concurrent call left. Under a REPEATABLE READ server or role default a race fails with an error instead (never a wrong result).
+- The TOTP secret is stored as the provider hands it over (plaintext base32), like every `Storage`.
 
 ## Routes
 

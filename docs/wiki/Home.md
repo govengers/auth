@@ -15,34 +15,38 @@ Core packages never log and never start goroutines; they report outcomes to an o
 | (root) `auth` | `Identity`, `Permission`, `IdentityFrom`, `Error` + `WriteError` + `ResponseFor`, `Observer`, `Hook`, `Route`, `RegisterRoutes`, `IdentityHandler` | [Errors-and-Observability](Errors-and-Observability.md), [Authorization](Authorization.md) |
 | `session` | `Store` (cookie + server-side values), `Guard` (`RequireAPI`, `RequireUI`), `Impersonator`, `MemoryBackend`, `Refresher` | [Sessions](Sessions.md) |
 | `session/redisbackend` | session backend shared by replicas | [Sessions](Sessions.md) |
+| `session/postgresbackend` | session backend on PostgreSQL shared by replicas, `Sweep` for expired rows | [Sessions](Sessions.md#backends) |
 | `password` | username/email + password login, TOTP, registration; you implement `Storage` | [Password](Password.md) |
+| `password/postgresstorage` | `password.Storage` on PostgreSQL | [Password](Password.md#storage-on-postgresql) |
+| `password/passwordtest` | conformance suite for your own `Storage` | [Password](Password.md#storage) |
 | `oidc` | OIDC code flow login (Keycloak, Google, any IdP) and logout | [OIDC](OIDC.md) |
 | `oidc/keycloak` | roles, groups and attributes from the Keycloak Admin API as an `OnLogin` hook | [OIDC](OIDC.md#keycloak-enrichment) |
 | `github` | GitHub OAuth login, access by team, GitHub API calls as the user | [GitHub](GitHub.md) |
 | `apikey` | static or application-issued API keys | [API-Keys](API-Keys.md) |
+| `apikey/postgresstore` | per-owner keys on PostgreSQL, capped by their scopes; the `Resolver` | [API-Keys](API-Keys.md#per-user-keys-on-postgresql) |
 | `jwt` | sign identities (forward auth) and verify them in a backend | [JWT](JWT.md) |
 | `authorization` | `Check` primitives and `All`, `Any`, `Not`, `Real` | [Authorization](Authorization.md) |
 | `ginadapter` | net/http middleware and provider routes on gin, `Require`, wide-event `Observe` | [Gin](Gin.md) |
 | `prometheusadapter` | `Observer` counting outcomes on your registry | [Gin](Gin.md#prometheus) |
 | `cmd/forwardauth` | the image `ghcr.io/govengers/forwardauth` for apps you do not change | [Forward-Auth](Forward-Auth.md) |
 
-Importing one provider compiles none of the others' dependencies. Heavy dependencies per package: `session/redisbackend` go-redis, `password` x/crypto and otp, `oidc` go-oidc, `jwt` jwx v3, `ginadapter` gin and wide-event-logger, `prometheusadapter` client_golang.
+Importing one provider compiles none of the others' dependencies. Heavy dependencies per package: `session/redisbackend` go-redis, the three `postgres*` packages pgx v5, `password` x/crypto and otp, `oidc` go-oidc, `jwt` jwx v3, `ginadapter` gin and wide-event-logger, `prometheusadapter` client_golang.
 
 ## Which package for which need
 
-- Users and password hashes live in your database: `password` + `session`. Example: [examples/password](../../examples/password/main.go).
+- Users and password hashes live in your database: `password` + `session`. Example: [examples/password](../../examples/password/main.go); on PostgreSQL with `password/postgresstorage`, `session/postgresbackend` and per-user API keys: [examples/postgres](../../examples/postgres/main.go).
 - Users log in at Keycloak, Google or another OIDC IdP: `oidc` + `session`; add `oidc/keycloak` for composite roles and groups from the Admin API. Example: [examples/oidc](../../examples/oidc/main.go).
 - Users log in with GitHub, access by team: `github` + `session`. Example on gin: [examples/github](../../examples/github/main.go).
-- Machines call your API: `apikey` in front of the Guard.
+- Machines call your API: `apikey` in front of the Guard; keys your users issue for scripts and agents: `apikey/postgresstore`.
 - Your service sits behind the forward-auth image (or any `jwt.Signer`): `jwt.Verifier`, no sessions.
 - You cannot change the app, or it is not Go: the [forward-auth image](Forward-Auth.md).
-- More than one replica: `session/redisbackend`.
+- More than one replica: `session/redisbackend`, or `session/postgresbackend` when PostgreSQL is already there.
 - Admins act as a user (support): `session.Impersonator` on the same `Guard`. [Sessions](Sessions.md#impersonation)
 - Several login methods at once: one `Store` and one `Guard`, every provider on that store; an OIDC provider per IdP with distinct `Name`s.
 
 ## Wiring order (session-based providers)
 
-1. Backend: `session.NewMemoryBackend(nil)` (one replica) or `redisbackend.New`.
+1. Backend: `session.NewMemoryBackend(nil)` (one replica), `redisbackend.New` or `postgresbackend.New`.
 2. `session.NewStore` with a 32-byte `EncryptionKey` (`session.ParseKey`).
 3. Provider `New` with `Sessions: store`.
 4. `session.NewGuard` with `LoginURL: provider.LoginURL()` and the provider in `Refreshers` (password, GitHub).
@@ -57,7 +61,7 @@ Importing one provider compiles none of the others' dependencies. Heavy dependen
 - [Sessions](Sessions.md): `Store`, `Guard`, backends, refresh, cookies.
 - [Authorization](Authorization.md): identity fields, roles, permissions, checks, own checks.
 - [JWT](JWT.md): `Signer`, `Verifier`, backend verification.
-- [API-Keys](API-Keys.md): static keys and `Resolver`.
+- [API-Keys](API-Keys.md): static keys, `Resolver`, per-user keys on PostgreSQL.
 - [Gin](Gin.md): `ginadapter`, `prometheusadapter`.
 - [Errors-and-Observability](Errors-and-Observability.md): `auth.Error`, status mapping, `Observer`, wide events.
 - [Forward-Auth](Forward-Auth.md): the image and its Traefik wiring.

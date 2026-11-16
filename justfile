@@ -5,7 +5,7 @@ govulncheck := "go run golang.org/x/vuln/cmd/govulncheck@v1.9.0"
 coverage_threshold := "80"
 image := "ghcr.io/govengers/forwardauth"
 version := `git describe --tags --always --dirty 2>/dev/null || echo dev`
-excluded := "/cmd/|/examples/|/internal/fakeprovider/|/test/"
+excluded := "/cmd/|/examples/|/internal/fakeprovider/|/internal/postgrestest/|/test/"
 
 default:
     @just --list
