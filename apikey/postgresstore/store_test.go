@@ -11,16 +11,23 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/govengers/postgrestest"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/apikey"
 	"github.com/govengers/auth/apikey/postgresstore"
-	"github.com/govengers/auth/internal/postgrestest"
 )
 
-func TestMain(m *testing.M) { postgrestest.Main(m) }
+// postgres gives every test a database of its own with MigrationV1 applied.
+var postgres = postgrestest.New(&postgrestest.Options{
+	Migrate:     postgrestest.Statements(postgresstore.MigrationV1),
+	Fingerprint: postgresstore.MigrationV1,
+})
+
+func TestMain(m *testing.M) { goleak.VerifyTestMain(postgres.Main(m)) }
 
 var (
 	tasksRead  = auth.Permission{Resource: "tasks", Access: auth.AccessRead}
@@ -41,7 +48,7 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	pool := postgrestest.New(t, postgresstore.MigrationV1)
+	pool := postgres.Pool(t)
 	fixture := &fixture{pool: pool, now: start, owner: uuid.New()}
 	fixture.owners = map[uuid.UUID]*auth.Identity{fixture.owner: {
 		Provider:    "password",
@@ -75,7 +82,7 @@ func (f *fixture) issue(t *testing.T, scopes ...auth.Permission) (string, *postg
 }
 
 func TestNew(t *testing.T) {
-	pool := postgrestest.New(t)
+	pool := postgres.Pool(t)
 	load := func(context.Context, uuid.UUID) (*auth.Identity, error) { return nil, nil }
 	testCases := []struct {
 		name      string
@@ -245,7 +252,7 @@ func TestResolveRefusals(t *testing.T) {
 }
 
 func TestResolveReportsLoadFailures(t *testing.T) {
-	pool := postgrestest.New(t, postgresstore.MigrationV1)
+	pool := postgres.Pool(t)
 	owner := uuid.New()
 	var loadError error
 	var loaded *auth.Identity

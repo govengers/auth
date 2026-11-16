@@ -6,19 +6,26 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/govengers/postgrestest"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
-	"github.com/govengers/auth/internal/postgrestest"
 	"github.com/govengers/auth/password"
 	"github.com/govengers/auth/password/passwordtest"
 	"github.com/govengers/auth/password/postgresstorage"
 )
 
-func TestMain(m *testing.M) { postgrestest.Main(m) }
+// postgres gives every test a database of its own with MigrationV1 applied.
+var postgres = postgrestest.New(&postgrestest.Options{
+	Migrate:     postgrestest.Statements(postgresstorage.MigrationV1),
+	Fingerprint: postgresstorage.MigrationV1,
+})
+
+func TestMain(m *testing.M) { goleak.VerifyTestMain(postgres.Main(m)) }
 
 func newStorage(t *testing.T) *postgresstorage.Storage {
 	t.Helper()
-	storage, err := postgresstorage.New(&postgresstorage.Options{Pool: postgrestest.New(t, postgresstorage.MigrationV1)})
+	storage, err := postgresstorage.New(&postgresstorage.Options{Pool: postgres.Pool(t)})
 	require.NoError(t, err)
 	return storage
 }
@@ -36,8 +43,9 @@ func TestNew(t *testing.T) {
 
 // An application adds its own columns to the credentials table; the storage keeps working.
 func TestApplicationColumnsDoNotBreakTheStorage(t *testing.T) {
-	pool := postgrestest.New(t, postgresstorage.MigrationV1,
-		`ALTER TABLE govengers_auth_password_credentials ADD COLUMN locale text NOT NULL DEFAULT 'en'`)
+	pool := postgres.Pool(t)
+	_, err := pool.Exec(t.Context(), `ALTER TABLE govengers_auth_password_credentials ADD COLUMN locale text NOT NULL DEFAULT 'en'`)
+	require.NoError(t, err)
 	storage, err := postgresstorage.New(&postgresstorage.Options{Pool: pool})
 	require.NoError(t, err)
 	username := "ada"
@@ -52,9 +60,11 @@ func TestApplicationColumnsDoNotBreakTheStorage(t *testing.T) {
 // Case folding is ASCII on every database: under a Turkish collation lower('I') is a dotless i, which would
 // make ADMIN and admin two users. The columns stand in for a database whose default collation is Turkish.
 func TestCaseFoldingIgnoresTheCollation(t *testing.T) {
-	pool := postgrestest.New(t, postgresstorage.MigrationV1, `
+	pool := postgres.Pool(t)
+	_, err := pool.Exec(t.Context(), `
 ALTER TABLE govengers_auth_password_credentials
     ALTER COLUMN username TYPE text COLLATE "tr-x-icu", ALTER COLUMN email TYPE text COLLATE "tr-x-icu"`)
+	require.NoError(t, err)
 	storage, err := postgresstorage.New(&postgresstorage.Options{Pool: pool})
 	require.NoError(t, err)
 	username, email := "ADMIN", "ADMIN@EXAMPLE.COM"
@@ -89,7 +99,7 @@ func TestCreateUserRefusesAUserWithoutUsernameAndEmail(t *testing.T) {
 }
 
 func TestErrorsAreReportedWithoutTheirChain(t *testing.T) {
-	pool := postgrestest.New(t, postgresstorage.MigrationV1)
+	pool := postgres.Pool(t)
 	storage, err := postgresstorage.New(&postgresstorage.Options{Pool: pool})
 	require.NoError(t, err)
 	pool.Close()
