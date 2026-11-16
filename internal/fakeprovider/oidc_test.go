@@ -223,7 +223,7 @@ func TestTheIssuerKeepsNoSliceOrMapOfTheCaller(t *testing.T) {
 		RedirectURIs: []string{redirectURI}, PostLogoutRedirectURIs: []string{"http://app.test/bye"},
 		User: fakeprovider.OIDCUser{
 			Subject: "sub-alice", RealmRoles: []string{"admin"}, ClientRoles: []string{"editor"}, Groups: []string{"/staff"},
-			Attributes: map[string][]string{"team": {"chassis"}},
+			Attributes: map[string][]string{"team": {"support"}},
 		},
 		KeycloakRealm: "staff", KeycloakClientID: "service", KeycloakClientSecret: "service-secret",
 	}
@@ -241,7 +241,7 @@ func TestTheIssuerKeepsNoSliceOrMapOfTheCaller(t *testing.T) {
 	require.Equal(t, map[string]any{"client": map[string]any{"roles": []any{"editor"}}}, accessClaims["resource_access"])
 	require.Equal(t, []any{"/staff"}, accessClaims["groups"])
 	require.Equal(t, "http://app.test/bye", get(t, issuer.IssuerURL()+"/end_session?post_logout_redirect_uri=http://app.test/bye").location)
-	require.Equal(t, map[string]any{"team": []any{"chassis"}}, keycloakAttributes(t, issuer))
+	require.Equal(t, map[string]any{"team": []any{"support"}}, keycloakAttributes(t, issuer))
 }
 
 func TestRevokedKeycloakTokensAreRefused(t *testing.T) {
