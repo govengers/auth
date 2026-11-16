@@ -12,21 +12,30 @@ import (
 	"testing"
 	"time"
 
+	"github.com/govengers/postgrestest"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 	"golang.org/x/sync/errgroup"
-
-	"github.com/govengers/auth/internal/postgrestest"
 )
 
-func TestMain(m *testing.M) { postgrestest.Main(m) }
+// empty gives a test an empty database, for the tests of migrate; migrated one with the example's migrations.
+var (
+	empty    = postgrestest.New(nil)
+	migrated = empty.WithTemplate(&postgrestest.Options{
+		Migrate:     postgrestest.Statements(migrations...),
+		Fingerprint: strings.Join(migrations, "\n"),
+	})
+)
+
+func TestMain(m *testing.M) { goleak.VerifyTestMain(empty.Main(m)) }
 
 var encryptionKey = []byte("0123456789abcdef0123456789abcdef")
 
 // TestServer registers and logs in a user, issues a read-only key, uses it, and checks that a second replica
 // on the same database knows the session and the key, and that a revoked key is refused at once.
 func TestServer(t *testing.T) {
-	pool := postgrestest.New(t, migrations...)
+	pool := migrated.Pool(t)
 	first, err := newServer(&serverOptions{EncryptionKey: encryptionKey, Pool: pool})
 	require.NoError(t, err)
 	second, err := newServer(&serverOptions{EncryptionKey: encryptionKey, Pool: pool})
@@ -61,14 +70,14 @@ func TestServer(t *testing.T) {
 }
 
 func TestMigrateIsIdempotent(t *testing.T) {
-	pool := postgrestest.New(t)
+	pool := empty.Pool(t)
 	require.NoError(t, migrate(t.Context(), pool, migrations))
 	require.NoError(t, migrate(t.Context(), pool, migrations))
 }
 
 // A start that fails halfway through the migrations leaves none applied, so the next start applies all.
 func TestMigrateAppliesAllOrNone(t *testing.T) {
-	pool := postgrestest.New(t)
+	pool := empty.Pool(t)
 	require.ErrorContains(t, migrate(t.Context(), pool, []string{migrations[0], "SELECT broken"}), "migrate")
 	var applied bool
 	require.NoError(t, pool.QueryRow(t.Context(), `SELECT to_regclass('govengers_auth_sessions') IS NOT NULL`).Scan(&applied))
@@ -82,7 +91,7 @@ func TestMigrateAppliesAllOrNone(t *testing.T) {
 // The key issuing route accepts JSON only: a cross-origin form or text/plain fetch carrying the session
 // cookie needs no CORS preflight and must not issue a key.
 func TestIssueRefusesARequestThatIsNotJSON(t *testing.T) {
-	pool := postgrestest.New(t, migrations...)
+	pool := migrated.Pool(t)
 	server, err := newServer(&serverOptions{EncryptionKey: encryptionKey, Pool: pool})
 	require.NoError(t, err)
 	replica := httptest.NewTLSServer(server.handler)
@@ -131,7 +140,9 @@ func TestServeCancelsTheRequestsThatOutliveTheGrace(t *testing.T) {
 	}
 	for name, handle := range handlers {
 		t.Run(name, func(t *testing.T) {
-			pool := postgrestest.New(t, `CREATE TABLE locked (id int)`)
+			pool := empty.Pool(t)
+			_, err := pool.Exec(t.Context(), `CREATE TABLE locked (id int)`)
+			require.NoError(t, err)
 			holder, err := pool.Begin(t.Context())
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = holder.Rollback(context.WithoutCancel(t.Context())) })

@@ -2,8 +2,9 @@ profile: library
 exceptions:
   - rule: DES-003
     reason: >-
-      Only internal/postgrestest, test code: it keeps the one embedded PostgreSQL of a test binary in a package
-      variable. TestMain has no other channel to the tests, and a server per test is the slow path TST-002 steers
+      Only the test files of the PostgreSQL packages (session/postgresbackend, password/postgresstorage,
+      apikey/postgresstore, examples/postgres): each keeps its govengers/postgrestest Server, the one PostgreSQL of
+      the test binary, in a package variable. TestMain has no other channel to the tests, and a server per test is the slow path TST-002 steers
       away from. The library has no mutable package state.
   - rule: DES-008
     reason: >-

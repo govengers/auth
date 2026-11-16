@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
-	"github.com/govengers/auth/internal/postgrestest"
 	"github.com/govengers/auth/password"
 	"github.com/govengers/auth/password/passwordtest"
 	"github.com/govengers/auth/password/postgresstorage"
@@ -63,13 +62,13 @@ func requireSecret(t *testing.T, storage *postgresstorage.Storage, id uuid.UUID)
 func TestSealedStorageConformance(t *testing.T) {
 	sealer := newSealer(t, newKey)
 	passwordtest.Run(t, func(t *testing.T) password.Storage {
-		return storageOn(t, postgrestest.New(t, postgresstorage.MigrationV1), sealer)
+		return storageOn(t, postgres.Pool(t), sealer)
 	})
 }
 
 // CreateUser and SetTOTP store the secret sealed only; reads answer the plaintext.
 func TestSealerSealsTheSecretAtRest(t *testing.T) {
-	pool := postgrestest.New(t, postgresstorage.MigrationV1)
+	pool := postgres.Pool(t)
 	storage := storageOn(t, pool, newSealer(t, newKey))
 	created := createTOTPUser(t, storage, "ada")
 	username := "grace"
@@ -90,7 +89,7 @@ func TestSealerSealsTheSecretAtRest(t *testing.T) {
 // Rows written before the Sealer was set keep working, and ResealTOTPSecrets seals them; after a key
 // rotation it moves every secret to the new primary key, so the old key can leave the ring.
 func TestResealTOTPSecrets(t *testing.T) {
-	pool := postgrestest.New(t, postgresstorage.MigrationV1)
+	pool := postgres.Pool(t)
 	plain := storageOn(t, pool, nil)
 	legacy := createTOTPUser(t, plain, "legacy")
 	nilUser := "nil-id"
@@ -130,7 +129,7 @@ SELECT gen_random_uuid(), 'user-' || n, 'hash', true, $1 FROM generate_series(1,
 
 // A sealed secret copied into another user's row does not open there, and the reseal stops at it.
 func TestSealedSecretIsBoundToItsRow(t *testing.T) {
-	pool := postgrestest.New(t, postgresstorage.MigrationV1)
+	pool := postgres.Pool(t)
 	storage := storageOn(t, pool, newSealer(t, newKey))
 	victim := createTOTPUser(t, storage, "victim")
 	attacker := createTOTPUser(t, storage, "attacker")
@@ -146,7 +145,7 @@ func TestSealedSecretIsBoundToItsRow(t *testing.T) {
 }
 
 func TestSealedSecretWithoutASealer(t *testing.T) {
-	pool := postgrestest.New(t, postgresstorage.MigrationV1)
+	pool := postgres.Pool(t)
 	id := createTOTPUser(t, storageOn(t, pool, newSealer(t, newKey)), "ada")
 	plain := storageOn(t, pool, nil)
 

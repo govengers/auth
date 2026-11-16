@@ -7,16 +7,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/govengers/postgrestest"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
 	"github.com/govengers/auth/internal/backendtest"
-	"github.com/govengers/auth/internal/postgrestest"
 	"github.com/govengers/auth/session"
 	"github.com/govengers/auth/session/postgresbackend"
 )
 
-func TestMain(m *testing.M) { postgrestest.Main(m) }
+// postgres gives every test a database of its own with MigrationV1 applied.
+var postgres = postgrestest.New(&postgrestest.Options{
+	Migrate:     postgrestest.Statements(postgresbackend.MigrationV1),
+	Fingerprint: postgresbackend.MigrationV1,
+})
+
+func TestMain(m *testing.M) { goleak.VerifyTestMain(postgres.Main(m)) }
 
 // testClock is a clock the test moves forward; the backend reads it from several goroutines.
 type testClock struct {
@@ -38,7 +45,7 @@ func (c *testClock) advance(duration time.Duration) {
 
 func newBackend(t *testing.T) (*postgresbackend.Backend, *testClock, *pgxpool.Pool) {
 	t.Helper()
-	pool := postgrestest.New(t, postgresbackend.MigrationV1)
+	pool := postgres.Pool(t)
 	backend, err := postgresbackend.New(&postgresbackend.Options{Pool: pool})
 	require.NoError(t, err)
 	clock := &testClock{now: time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)}
