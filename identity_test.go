@@ -2,6 +2,7 @@ package auth
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -36,6 +37,12 @@ func TestIdentityContextRoundTrip(t *testing.T) {
 	ctx := WithIdentity(t.Context(), identity)
 
 	require.Same(t, identity, IdentityFrom(ctx))
+}
+
+func TestImpersonationEndsAtContextRoundTrip(t *testing.T) {
+	endsAt := time.Date(2026, 11, 16, 12, 30, 0, 0, time.UTC)
+	require.Equal(t, endsAt, ImpersonationEndsAtFrom(WithImpersonationEndsAt(t.Context(), endsAt)))
+	require.True(t, ImpersonationEndsAtFrom(t.Context()).IsZero())
 }
 
 func TestIdentityFromWithoutIdentity(t *testing.T) {

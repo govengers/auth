@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -121,13 +122,28 @@ func TestNewIdentityResponseJSON(t *testing.T) {
 }
 
 func TestIdentityHandler(t *testing.T) {
+	impersonating := &Identity{Provider: "password", Subject: "user-2", Active: true, Impersonator: &Identity{Provider: "password", Subject: "admin-1", Active: true}}
+	endsAt := time.Date(2026, 11, 16, 13, 30, 0, 0, time.FixedZone("CET", 3600))
 	testCases := []struct {
 		name       string
 		identity   *Identity
+		endsAt     time.Time
 		wantStatus int
 		wantBody   string
 	}{
 		{name: "identity", identity: &Identity{Provider: "apikey", Subject: "ci", Active: true}, wantStatus: http.StatusOK, wantBody: `{"provider":"apikey","subject":"ci","active":true,"roles":[]}`},
+		{
+			name: "impersonating identity with its end in UTC", identity: impersonating, endsAt: endsAt, wantStatus: http.StatusOK,
+			wantBody: `{"provider":"password","subject":"user-2","active":true,"roles":[],"impersonator":{"provider":"password","subject":"admin-1","active":true,"roles":[]},"impersonationEndsAt":"2026-11-16T12:30:00Z"}`,
+		},
+		{
+			name: "impersonating identity without a known end", identity: impersonating, wantStatus: http.StatusOK,
+			wantBody: `{"provider":"password","subject":"user-2","active":true,"roles":[],"impersonator":{"provider":"password","subject":"admin-1","active":true,"roles":[]}}`,
+		},
+		{
+			name: "an end without an impersonation is not answered", identity: &Identity{Provider: "apikey", Subject: "ci", Active: true}, endsAt: endsAt,
+			wantStatus: http.StatusOK, wantBody: `{"provider":"apikey","subject":"ci","active":true,"roles":[]}`,
+		},
 		{name: "no identity", wantStatus: http.StatusUnauthorized, wantBody: `{"code":"unauthenticated","message":"authentication required"}`},
 		{
 			name:       "identity that does not encode",
@@ -140,6 +156,9 @@ func TestIdentityHandler(t *testing.T) {
 			request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/auth/me", nil)
 			if testCase.identity != nil {
 				request = request.WithContext(WithIdentity(request.Context(), testCase.identity))
+			}
+			if !testCase.endsAt.IsZero() {
+				request = request.WithContext(WithImpersonationEndsAt(request.Context(), testCase.endsAt))
 			}
 			recorder := httptest.NewRecorder()
 

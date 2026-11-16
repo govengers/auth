@@ -138,14 +138,18 @@ func (g *Guard) require(refuse refusalWriter) func(http.Handler) http.Handler {
 				next.ServeHTTP(writer, request)
 				return
 			}
-			identity, err := g.authenticate(request.Context(), request, func(ctx context.Context) error {
+			stored, err := g.authenticate(request.Context(), request, func(ctx context.Context) error {
 				return g.options.Store.End(ctx, writer, request)
 			})
 			if err != nil {
 				refuse(writer, request, err)
 				return
 			}
-			next.ServeHTTP(writer, request.WithContext(auth.WithIdentity(request.Context(), identity)))
+			ctx := auth.WithIdentity(request.Context(), stored.Identity)
+			if stored.Identity.Impersonator != nil {
+				ctx = auth.WithImpersonationEndsAt(ctx, stored.ImpersonationEndsAt)
+			}
+			next.ServeHTTP(writer, request.WithContext(ctx))
 		})
 	}
 }
@@ -164,9 +168,10 @@ func (g *Guard) require(refuse refusalWriter) func(http.Handler) http.Handler {
 // An identity already in ctx is not consulted: Identify is a lookup, not middleware. The lookup runs on
 // ctx, not on the request's context, which an upgrade request no longer has once its handler returned.
 func (g *Guard) Identify(ctx context.Context, request *http.Request) (*auth.Identity, error) {
-	return g.authenticate(ctx, request, func(ctx context.Context) error {
+	stored, err := g.authenticate(ctx, request, func(ctx context.Context) error {
 		return g.options.Store.revokeRequestSession(ctx, request)
 	})
+	return stored.Identity, err
 }
 
 func (g *Guard) redirectToLogin(writer http.ResponseWriter, request *http.Request, err error) {
@@ -192,31 +197,31 @@ func (g *Guard) returnPath(request *http.Request) string {
 type sessionEnder func(ctx context.Context) error
 
 // authenticate is the lookup behind the middleware and Identify, on ctx (the middleware's request context,
-// Identify's own) with end for a refused refresh.
-func (g *Guard) authenticate(ctx context.Context, request *http.Request, end sessionEnder) (*auth.Identity, error) {
+// Identify's own) with end for a refused refresh. It returns the envelope the request continues with: its
+// identity, and the end of the impersonation that identity holds.
+func (g *Guard) authenticate(ctx context.Context, request *http.Request, end sessionEnder) (identityEnvelope, error) {
 	current, err := g.options.Store.Open(request)
 	if err != nil {
-		return nil, g.reportFailure(ctx, auth.Outcome{Provider: auth.ProviderSession, Action: auth.ActionAuthenticate, Err: err})
+		return identityEnvelope{}, g.reportFailure(ctx, auth.Outcome{Provider: auth.ProviderSession, Action: auth.ActionAuthenticate, Err: err})
 	}
 	stored, err := current.envelope(ctx)
 	if err != nil {
-		return nil, g.reportFailure(ctx, auth.Outcome{Provider: auth.ProviderSession, Action: auth.ActionAuthenticate, Err: err})
+		return identityEnvelope{}, g.reportFailure(ctx, auth.Outcome{Provider: auth.ProviderSession, Action: auth.ActionAuthenticate, Err: err})
 	}
 	if stored.impersonationOver(g.now()) {
 		ended, err := current.endImpersonation(ctx, stored)
 		if err != nil {
-			return nil, g.reportFailure(ctx, auth.Outcome{Provider: stored.Identity.Real().Provider, Action: auth.ActionAuthenticate, Err: err, Identity: stored.Identity})
+			return identityEnvelope{}, g.reportFailure(ctx, auth.Outcome{Provider: stored.Identity.Real().Provider, Action: auth.ActionAuthenticate, Err: err, Identity: stored.Identity})
 		}
 		stored = ended
 	}
-	identity := stored.Identity
 	if g.refreshDue(stored) {
-		if identity, err = g.refresh(ctx, current, stored, end); err != nil {
-			return nil, err
+		if stored, err = g.refresh(ctx, current, stored, end); err != nil {
+			return identityEnvelope{}, err
 		}
 	}
-	g.report(ctx, auth.Outcome{Provider: identity.Real().Provider, Action: auth.ActionAuthenticate, Result: auth.ResultSuccess, Identity: identity})
-	return identity, nil
+	g.report(ctx, auth.Outcome{Provider: stored.Identity.Real().Provider, Action: auth.ActionAuthenticate, Result: auth.ResultSuccess, Identity: stored.Identity})
+	return stored, nil
 }
 
 func (g *Guard) refreshDue(stored identityEnvelope) bool {
@@ -238,7 +243,7 @@ func (g *Guard) refreshDue(stored identityEnvelope) bool {
 // keep a refused identity alive with the claim taken. A claim the backend failed is read back: when the
 // stored value is the claim, it committed with its reply lost and the refresh runs (degraded); otherwise
 // the request fails without calling the provider, so a backend failing writes costs no provider call.
-func (g *Guard) refresh(ctx context.Context, current Session, stored identityEnvelope, end sessionEnder) (*auth.Identity, error) {
+func (g *Guard) refresh(ctx context.Context, current Session, stored identityEnvelope, end sessionEnder) (identityEnvelope, error) {
 	refreshContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
 	defer cancel()
 	realIdentity := stored.Identity.Real()
@@ -247,9 +252,9 @@ func (g *Guard) refresh(ctx context.Context, current Session, stored identityEnv
 	switch {
 	case !owned && err != nil:
 		outcome.Err = err
-		return nil, g.reportFailure(ctx, outcome)
+		return identityEnvelope{}, g.reportFailure(ctx, outcome)
 	case !owned:
-		return stored.Identity, nil
+		return stored, nil
 	}
 	outcome.Err = err // a claim that committed although the backend failed it: refreshed, degraded
 	refreshed, err := g.refreshers[realIdentity.Provider].Refresh(refreshContext, current, realIdentity.Clone())
@@ -262,7 +267,7 @@ func (g *Guard) refresh(ctx context.Context, current Session, stored identityEnv
 			// The session stays usable: a 500, not the refusal (kept as text only, so it cannot decide the answer).
 			outcome.Err = errors.Join(fmt.Errorf("end session refused by its refresh (%s): %w", err.Error(), endError), revokeError)
 		}
-		return nil, g.reportFailure(ctx, outcome)
+		return identityEnvelope{}, g.reportFailure(ctx, outcome)
 	case err != nil:
 		outcome.Err = err
 	default:
@@ -276,11 +281,11 @@ func (g *Guard) refresh(ctx context.Context, current Session, stored identityEnv
 	}
 	if err != nil {
 		outcome.Err = errors.Join(outcome.Err, err)
-		return nil, g.reportFailure(ctx, outcome)
+		return identityEnvelope{}, g.reportFailure(ctx, outcome)
 	}
 	outcome.Identity, outcome.Result = saved.Identity, auth.ResultSuccess
 	g.report(ctx, outcome)
-	return saved.Identity, nil
+	return saved, nil
 }
 
 // claim takes the due refresh by swapping in stored with refreshedAt moved to now and returns the claimed
