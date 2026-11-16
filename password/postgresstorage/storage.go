@@ -112,7 +112,8 @@ type Options struct {
 }
 
 // Storage implements password.Storage on PostgreSQL. Its statements run on Options.Pool, or on the caller's
-// transaction through WithExecutor. It is safe for concurrent use.
+// transaction through WithExecutor. It is safe for concurrent use; a WithExecutor view is only as safe as its
+// executor.
 type Storage struct {
 	pool     *pgxpool.Pool
 	database Executor // the pool, or the executor of a WithExecutor view
@@ -133,7 +134,8 @@ func New(options *Options) (*Storage, error) {
 // the caller's transaction: an application creates a user's credentials in the same commit as its profile
 // row and audit entry, and a call inside a transaction never waits for a second connection of the pool. A
 // nil executor is the pool. The view shares the storage's options (the Sealer); the storage itself keeps
-// using the pool.
+// using the pool. A view is only as safe for concurrent use as its executor: one on a pool is, one on a
+// pgx.Tx or a *pgx.Conn is not (pgx allows one statement at a time on a connection).
 //
 // On a transaction the compare-and-swap methods see its isolation (READ COMMITTED needed, see the package
 // documentation), and what the transaction does is undone by its rollback: keep the provider on the storage

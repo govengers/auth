@@ -25,5 +25,7 @@
 // The package never logs and never starts goroutines. Callers match on the password package's sentinels; a
 // database error keeps pgx's error in its chain, so a caller maps it (errors.As with *pgconn.PgError: a
 // serialization failure to retry, or the foreign key of the application's profile table); that chain is part
-// of the API. The Storage is safe for concurrent use.
+// of the API. Map on its Code and ConstraintName and never log or report its Detail: for a NOT NULL or CHECK
+// violation PostgreSQL puts the whole failing row there, password hash and TOTP secret included. The Storage
+// is safe for concurrent use; a WithExecutor view on a transaction or a connection is not.
 package postgresstorage

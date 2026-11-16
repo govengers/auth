@@ -9,10 +9,13 @@
 // names as actor still leads to its owner (Get), until Purge deletes it after the application's retention.
 //
 // Every statement runs on Options.Pool, or on the caller's transaction through Store.WithExecutor: a key is
-// issued or revoked in the same commit as the application's own rows and audit entry.
+// issued or revoked in the same commit as the application's own rows and audit entry. Revoke reports whether
+// the call revoked the key, so a retried or concurrent revocation writes no second audit entry.
 //
 // Nothing runs DDL at startup: MigrationV1 and MigrationV2 hold the table for the application's own goose
 // migrations. The package never logs and never starts goroutines. A database error keeps pgx's error in its
 // chain, so a caller maps it (errors.As with *pgconn.PgError: a serialization failure to retry, for example);
-// that chain is part of the API. The Store is safe for concurrent use.
+// that chain is part of the API. Map on its Code and ConstraintName and never log or report its Detail: for a
+// NOT NULL or CHECK violation PostgreSQL puts the whole failing row there, the key's secret hash included. The
+// Store is safe for concurrent use; a WithExecutor view on a transaction or a connection is not.
 package postgresstore
