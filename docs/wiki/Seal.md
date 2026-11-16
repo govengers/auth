@@ -33,7 +33,7 @@ plaintext, err := sealer.Open(data, sealed)      // read it back
 
 Pick values that never change for the row: its primary key, not a name or an email address. Use one `Purpose` per column. All three fields are required.
 
-With the password provider, seal inside your `password.Storage`: `SetTOTP` seals the secret before the `UPDATE`, the `GetUserBy*` methods open it after the `SELECT`. The provider never sees the sealed form.
+With the password provider, seal inside your `password.Storage`: `SetTOTP` seals the secret before the `UPDATE`, the `GetUserBy*` methods open it after the `SELECT`. The provider never sees the sealed form. `password/postgresstorage` does exactly that with `Options.Sealer` and brings old rows along with `ResealTOTPSecrets` ([Password](Password.md#storage-on-postgresql)). A column holding sealed and legacy plaintext values tells them apart with `seal.IsSealed(value)` (the `v1.` prefix; base32 and hex never contain a dot).
 
 ## Rotation
 

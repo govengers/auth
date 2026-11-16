@@ -15,7 +15,7 @@ One Go library for login and access control: password, OIDC (incl. Keycloak) and
 
 ## Features
 
-- Password login with Argon2id, TOTP with backup codes, optional registration, bcrypt upgrade; users stay in your database (a PostgreSQL `Storage` ships).
+- Password login with Argon2id, TOTP with backup codes, optional registration, bcrypt upgrade; users stay in your database (a PostgreSQL `Storage` ships, optionally sealing TOTP secrets).
 - OIDC code flow with PKCE and nonce, RP-initiated and front-channel logout, Keycloak Admin API enrichment, Google.
 - GitHub OAuth with allowed, admin and relevant teams, re-checked every minute.
 - Server-side sessions (memory, Redis or PostgreSQL), the cookie holds a random ID only.
@@ -74,7 +74,7 @@ Complete, tested servers: [password](examples/password/main.go), [password, sess
 | [`session/redisbackend`](docs/wiki/Sessions.md#backends) | session backend on Redis, shared by replicas |
 | [`session/postgresbackend`](docs/wiki/Sessions.md#backends) | session backend on PostgreSQL, shared by replicas, with `Sweep` |
 | [`password`](docs/wiki/Password.md) | password login, TOTP, registration; you implement `Storage` |
-| [`password/postgresstorage`](docs/wiki/Password.md#storage-on-postgresql) | `Storage` on PostgreSQL |
+| [`password/postgresstorage`](docs/wiki/Password.md#storage-on-postgresql) | `Storage` on PostgreSQL, optional sealing of TOTP secrets |
 | [`password/passwordtest`](docs/wiki/Password.md#storage) | conformance suite for your own `Storage` |
 | [`oidc`](docs/wiki/OIDC.md) | OIDC login and logout |
 | [`oidc/keycloak`](docs/wiki/OIDC.md#keycloak-enrichment) | Keycloak Admin API enrichment as an `OnLogin` hook |

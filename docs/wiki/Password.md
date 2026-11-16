@@ -52,7 +52,14 @@ You implement [`password.Storage`](../../password/storage.go) (11 methods) on yo
 - The storage names every column it reads and writes, so columns your migrations add (nullable or with a default) do not break it; your own table is still the better home.
 - The library never deletes users: delete the credentials row in your own statement.
 - Relies on READ COMMITTED, PostgreSQL's default: the compare-and-swap statements re-check their condition on the row a concurrent call left. Under a REPEATABLE READ server or role default a race fails with an error instead (never a wrong result).
-- The TOTP secret is stored as the provider hands it over (plaintext base32), like every `Storage`.
+- The TOTP secret is stored as the provider hands it over (plaintext base32), unless you set `Options.Sealer`: then `CreateUser` and `SetTOTP` seal it with [`seal`](Seal.md) (purpose `totp_secret`, table `govengers_auth_password_credentials`, row the user ID) and reads open it. Plaintext rows written before keep working; `storage.ResealTOTPSecrets(ctx)` seals them, and after a key rotation moves every secret to the new primary key (it returns how many rows it changed; rerun it until it answers 0 before you remove the old key). Without a Sealer a sealed value fails to read, so never remove the option once rows are sealed. Sessions survive sealing and rotation: the credential stamp is computed over the plaintext.
+
+```go
+keys, err := seal.ParseKeys(os.Getenv("SEAL_KEYS")) // "2026-11:<base64>", primary first
+sealer, err := seal.New(&seal.Options{Keys: keys})
+storage, err := postgresstorage.New(&postgresstorage.Options{Pool: pool, Sealer: sealer})
+changed, err := storage.ResealTOTPSecrets(ctx) // once after switching on, and after each rotation
+```
 
 ## Routes
 

@@ -17,7 +17,7 @@ Core packages never log and never start goroutines; they report outcomes to an o
 | `session/redisbackend` | session backend shared by replicas | [Sessions](Sessions.md) |
 | `session/postgresbackend` | session backend on PostgreSQL shared by replicas, `Sweep` for expired rows | [Sessions](Sessions.md#backends) |
 | `password` | username/email + password login, TOTP, registration; you implement `Storage` | [Password](Password.md) |
-| `password/postgresstorage` | `password.Storage` on PostgreSQL | [Password](Password.md#storage-on-postgresql) |
+| `password/postgresstorage` | `password.Storage` on PostgreSQL, optional sealing of TOTP secrets | [Password](Password.md#storage-on-postgresql) |
 | `password/passwordtest` | conformance suite for your own `Storage` | [Password](Password.md#storage) |
 | `oidc` | OIDC code flow login (Keycloak, Google, any IdP) and logout | [OIDC](OIDC.md) |
 | `oidc/keycloak` | roles, groups and attributes from the Keycloak Admin API as an `OnLogin` hook | [OIDC](OIDC.md#keycloak-enrichment) |

@@ -11,10 +11,10 @@
 ## Docs
 
 - [Home](docs/wiki/Home.md): model, package map, which package for which need, wiring order.
-- [Password](docs/wiki/Password.md): password login, `password.Storage` (PostgreSQL in `postgresstorage`, conformance suite `passwordtest`), TOTP, registration, routes, codes.
+- [Password](docs/wiki/Password.md): password login, `password.Storage` (PostgreSQL in `postgresstorage`, optionally sealing TOTP secrets, conformance suite `passwordtest`), TOTP, registration, routes, codes.
 - [OIDC](docs/wiki/OIDC.md): OIDC login and logout, options, Keycloak enrichment, Google.
 - [GitHub](docs/wiki/GitHub.md): GitHub OAuth, teams, admin role, refresh, API client.
-- [Sessions](docs/wiki/Sessions.md): `Store`, `Guard` (`RequireAPI`, `RequireUI`, `Identify` for sockets), cookie naming, refresh, impersonation (`Impersonator`), memory, Redis and PostgreSQL backends.
+- [Sessions](docs/wiki/Sessions.md): `Store`, `Guard` (`RequireAPI`, `RequireUI`, `Identify` for sockets), cookie naming, refresh, impersonation (`Impersonator`, `impersonationEndsAt` on `/auth/me`), memory, Redis and PostgreSQL backends.
 - [Authorization](docs/wiki/Authorization.md): identity fields, roles, permissions, checks, net/http check middleware, own checks.
 - [JWT](docs/wiki/JWT.md): `jwt.Verifier` in backends, `jwt.Signer`.
 - [API-Keys](docs/wiki/API-Keys.md): static keys, `Resolver`, ordering with the Guard, per-owner keys on PostgreSQL (`postgresstore`: issue, list, revoke, scopes cap the owner's permissions only, not ownership checks).
@@ -39,7 +39,7 @@
 
 - [README.md](README.md): overview, features, quick start, package table.
 - [GitHub Releases](https://github.com/govengers/auth/releases): changelog and release notes.
-- [docs/design.md](docs/design.md): binding design, package APIs, flows F1-F15, error taxonomy (section 5), decisions D1-D69.
+- [docs/design.md](docs/design.md): binding design, package APIs, flows F1-F15, error taxonomy (section 5), decisions D1-D71.
 - [docs/migration.md](docs/migration.md): migration from go-basicauth, oidc-fwd-auth and github-fwd-auth, Storage SQL.
 - [pkg.go.dev](https://pkg.go.dev/github.com/govengers/auth): API reference.
 
