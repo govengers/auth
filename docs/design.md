@@ -1734,24 +1734,27 @@ Coverage is measured without `cmd/`, `examples/`, `internal/fakeprovider/` and `
 | Recipe | What it does |
 |---|---|
 | `lint` | fails when git tracks an executable (Mach-O, ELF, PE by `file --mime-type`), then `go vet ./...`, `go vet -tags e2e ./test/e2e/...`, `golangci-lint run ./...` |
-| `test` | gotestsum `-race -count=1` with a coverage profile; drops `/cmd/`, `/internal/fakeprovider/`, `/test/` from it (`sandbox/unit.cover`); fails below 80 % total or 80 % in any package |
+| `test` | gotestsum `-race` with a coverage profile under the postgrestest launcher (one PostgreSQL for the run, D72; no `-count=1`, the Go test cache stays effective); drops `/cmd/`, `/examples/`, `/internal/fakeprovider/`, `/test/` from it (`sandbox/unit.cover`); fails below 80 % total or 80 % in any package |
 | `build` | `go build -trimpath -ldflags "-s -w -X main.version=<git describe>" -o sandbox/forwardauth ./cmd/forwardauth` |
 | `docker-build` | `docker build -f docker/forwardauth.Dockerfile --build-arg VERSION=<git describe> -t ghcr.io/govengers/forwardauth:<git describe> .` |
 | `test-e2e` | picks two free ports (20000..32767, below the common ephemeral ranges), generates a JWT key, builds the binary with `-cover`, starts the compose stack (`up --detach --build --wait`), runs both suites in one gotestsum run (`-tags e2e ./test/e2e/...`, `sandbox/e2e.json`), prints the binary coverage; the stack is always stopped (logs printed on failure) |
 | `vulncheck` | `govulncheck ./...` |
 | `check` | `lint test test-e2e vulncheck` (everything CI runs) |
 
-`sandbox/unit.cover` is the filtered profile, so the CI coverage badge matches the gate. Tools run through `go run module@version` (gotestsum v1.13.0, govulncheck v1.9.0), never `tool` directives [TCH-002].
+`sandbox/unit.cover` is the filtered profile, so the CI coverage badge matches the gate. Tools run through `go run module@version` (gotestsum v1.13.0, govulncheck v1.9.0), never `tool` directives [TCH-002]. The postgrestest launcher runs as `go run github.com/govengers/postgrestest/cmd/postgrestest` without a version: it resolves to the version go.mod requires, so the launcher and the library the tests import cannot drift.
 
 `.govengers.yml`:
 ```yaml
 profile: library
 exceptions:
+  - rule: DES-003
+    reason: >-
+      Only the test files of the PostgreSQL packages (session/postgresbackend, password/postgresstorage, ...
   - rule: DES-008
     reason: >-
       Only password kindOf (password/validation.go). The login request has one "identifier" field, ...
 ```
-One rule is waived, DES-008, for one site: password's `kindOf` tells an email from a username by "@" (F1 step 2), because the login body has one `identifier` field (the go-basicauth wire format) and usernames cannot contain "@"; the reason in the file says why separate fields or looking up both kinds are worse. Any other string dispatch is outside the exception. The repo also contains a service (`cmd/forwardauth`, `internal/forwardauth`); reviewers apply the service rules CFG, LAY, LOG, MET, DEP, API-001/002 to those two directories in addition to the library profile (stated in README "Contributing").
+Two rules are waived. DES-003 only in the test files of the four PostgreSQL packages: each keeps its postgrestest Server, the one PostgreSQL of the test binary, in a package variable, because `TestMain` has no other channel to the tests (D72); the library itself has no mutable package state. DES-008 for one site: password's `kindOf` tells an email from a username by "@" (F1 step 2), because the login body has one `identifier` field (the go-basicauth wire format) and usernames cannot contain "@"; the reason in the file says why separate fields or looking up both kinds are worse. Any other string dispatch is outside the exception. The repo also contains a service (`cmd/forwardauth`, `internal/forwardauth`); reviewers apply the service rules CFG, LAY, LOG, MET, DEP, API-001/002 to those two directories in addition to the library profile (stated in README "Contributing").
 
 `.golangci.yml`: copied verbatim from `govengers/standards/.golangci.yml` (already sets `run.build-tags: [e2e]`). No local relaxations.
 
