@@ -474,11 +474,11 @@ func TestImpersonationEndIsAnswered(t *testing.T) {
 	refresher := &fakeRefresher{name: "password", refresh: func(identity *auth.Identity) (*auth.Identity, error) { return identity.Clone(), nil }}
 	fixture := newImpersonationFixture(t, GuardOptions{Refreshers: []Refresher{refresher}}, ImpersonatorOptions{MaximumDuration: 10 * time.Minute})
 	request := login(t, fixture.store, testAdmin())
-	me := fixture.guard.RequireAPI()(auth.IdentityHandler())
+	identityRoute := fixture.guard.RequireAPI()(auth.IdentityHandler())
 	serveMe := func() string {
 		t.Helper()
 		recorder := httptest.NewRecorder()
-		me.ServeHTTP(recorder, request)
+		identityRoute.ServeHTTP(recorder, request)
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		return recorder.Body.String()
 	}
