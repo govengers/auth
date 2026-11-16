@@ -15,7 +15,7 @@ Status: 29.10.2026. Groundwork for the implementation agents; `docs/design.md` f
 
 ## 1. Org CI: `govengers/.github` `go-library.yml@v1`
 
-Source: `/Users/mapa/github.com/govengers/.github/.github/workflows/go-library.yml` (repo `govengers/.github`, tag `v1` = `9a44392`, which is also `main`). Starter template: `workflow-templates/go-library.yml` + `.properties.json` (filePattern `go.mod$`). The template and the caller file in govengers/config are byte-identical to what is below (`$default-branch` replaced by `main`).
+Source: `.github/workflows/go-library.yml` in the repo `govengers/.github` (tag `v1` = `9a44392`, which is also `main`). Starter template: `workflow-templates/go-library.yml` + `.properties.json` (filePattern `go.mod$`). The template and the caller file in govengers/config are byte-identical to what is below (`$default-branch` replaced by `main`).
 
 **Contract (what the repo must provide)**
 
@@ -63,14 +63,14 @@ After the first push to `main` set the badges in the README (section 2.7) and, i
 
 ## 2. How govengers/config v2 implements the contract (what to copy into auth)
 
-State: the worktree `config-v2-fixes` (branch `fix/v2-review`) no longer exists, it was merged. Current source of truth: `/Users/mapa/github.com/govengers/config` on `main` = `cb3019e` (merge of PR #2), tag `v2.0.0` pushed. `justfile`, `.golangci.yml` and the e2e harness are unchanged from `fd60aff`. Its CI on main and on the tag is green (e2e badge "10 passed", coverage 96.8%).
+State: the worktree `config-v2-fixes` (branch `fix/v2-review`) no longer exists, it was merged. Current source of truth: `govengers/config` on `main` = `cb3019e` (merge of PR #2), tag `v2.0.0` pushed. `justfile`, `.golangci.yml` and the e2e harness are unchanged from `fd60aff`. Its CI on main and on the tag is green (e2e badge "10 passed", coverage 96.8%).
 
 | File | In auth |
 |---|---|
 | `.github/workflows/ci.yml` | copy as is (section 1) |
-| `.golangci.yml` | copy verbatim from `/Users/mapa/github.com/govengers/standards/.golangci.yml` (identical to config's, `diff` clean); no local relaxations (design 8.3). It sets `run.build-tags: [e2e]` |
+| `.golangci.yml` | copy verbatim from `.golangci.yml` of `govengers/standards` (identical to config's, `diff` clean); no local relaxations (design 8.3). It sets `run.build-tags: [e2e]` |
 | `.govengers.yml` | `profile: library`, `exceptions: []` (design 8.3). Without the file the profile is inferred as `service` because `cmd/forwardauth` serves traffic (REVIEW.md step 2) |
-| `.gitignore` | copy `/Users/mapa/github.com/govengers/config/.gitignore` (toptal go + JetBrains + VS Code); the project part is the tail below |
+| `.gitignore` | copy `.gitignore` of `govengers/config` (toptal go + JetBrains + VS Code); the project part is the tail below |
 | `justfile` | pattern below; the auth version is design 8.3 plus the recipes of section 5.5 |
 | `LICENSE` | already in the repo (Apache 2.0) |
 

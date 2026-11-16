@@ -18,7 +18,7 @@ func startExampleKeycloak() (*httptest.Server, error) {
 	handler, err := fakeprovider.NewOIDCHandler(&fakeprovider.OIDCOptions{
 		IssuerURL: base + "/realms/staff", ClientID: "app", ClientSecret: "app-secret",
 		KeycloakRealm: "staff", KeycloakClientID: "app-admin", KeycloakClientSecret: "service-secret",
-		User: fakeprovider.OIDCUser{Subject: "user-1", RealmRoles: []string{"admin"}, Groups: []string{"/staff/scoring"}},
+		User: fakeprovider.OIDCUser{Subject: "user-1", RealmRoles: []string{"admin"}, Groups: []string{"/staff/billing"}},
 	})
 	if err != nil {
 		server.Close()
@@ -54,5 +54,5 @@ func ExampleClient_Enrich() {
 		return
 	}
 	fmt.Println(enriched.OIDCRoles, enriched.Groups)
-	// Output: [admin] [/staff/scoring]
+	// Output: [admin] [/staff/billing]
 }

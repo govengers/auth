@@ -43,7 +43,7 @@ func startKeycloak(t *testing.T, configure func(options *fakeprovider.OIDCOption
 		User: fakeprovider.OIDCUser{
 			Subject: userID, PreferredUsername: "ada",
 			RealmRoles: []string{"default-roles-staff", "admin"}, ClientRoles: []string{"editor"},
-			Groups: []string{"/staff", "/staff/scoring"}, Attributes: map[string][]string{"team": {"chassis"}},
+			Groups: []string{"/staff", "/staff/billing"}, Attributes: map[string][]string{"team": {"support"}},
 		},
 	}
 	if configure != nil {
@@ -147,8 +147,8 @@ func TestEnrichReplacesRolesGroupsAndAttributes(t *testing.T) {
 			want := loginIdentity()
 			want.OIDCRoles = []string{"default-roles-staff", "admin"}
 			want.OIDCClientRoles = testCase.wantClientRoles
-			want.Groups = []string{"/staff", "/staff/scoring"}
-			want.Attributes = map[string][]string{"team": {"chassis"}}
+			want.Groups = []string{"/staff", "/staff/billing"}
+			want.Attributes = map[string][]string{"team": {"support"}}
 			require.Equal(t, want, enriched)
 			require.Equal(t, loginIdentity(), identity, "the argument is not changed")
 			require.Equal(t, testCase.wantLookups, keycloak.KeycloakClientLookups())
@@ -246,12 +246,12 @@ func TestEnrichRefusesMissingRequirements(t *testing.T) {
 		wantReason string
 	}{
 		{name: "all present", configure: func(options *Options) {
-			options.RequiredRealmRoles, options.RequiredClientRoles, options.RequiredGroups = []string{"admin"}, []string{"editor"}, []string{"/staff/scoring"}
+			options.RequiredRealmRoles, options.RequiredClientRoles, options.RequiredGroups = []string{"admin"}, []string{"editor"}, []string{"/staff/billing"}
 		}},
 		{name: "realm role", configure: func(options *Options) { options.RequiredRealmRoles = []string{"admin", "auditor"} }, wantReason: "missing realm role auditor"},
 		{name: "client role", configure: func(options *Options) { options.RequiredClientRoles = []string{"publisher"} }, wantReason: "missing client role publisher"},
 		{name: "group", configure: func(options *Options) { options.RequiredGroups = []string{"/staff/board"} }, wantReason: "missing group /staff/board"},
-		{name: "group by name instead of path", configure: func(options *Options) { options.RequiredGroups = []string{"scoring"} }, wantReason: "missing group scoring"},
+		{name: "group by name instead of path", configure: func(options *Options) { options.RequiredGroups = []string{"billing"} }, wantReason: "missing group billing"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

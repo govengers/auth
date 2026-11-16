@@ -44,7 +44,7 @@ func TestClaimMappers(t *testing.T) {
 
 // Claims arrive from encoding/json, so every array is []any whatever the element type.
 func TestTokenAuthorizationClaims(t *testing.T) {
-	const client = "statics-scoring"
+	const client = "orders-console"
 	testCases := []struct {
 		name        string
 		claims      map[string]any
@@ -56,10 +56,10 @@ func TestTokenAuthorizationClaims(t *testing.T) {
 			name: "keycloak's usual shape",
 			claims: map[string]any{
 				"realm_access":    map[string]any{"roles": []any{"admin", "offline_access"}},
-				"resource_access": map[string]any{client: map[string]any{"roles": []any{"scoring-admin"}}},
-				"groups":          []any{"/statics-scoring/admins"},
+				"resource_access": map[string]any{client: map[string]any{"roles": []any{"orders-admin"}}},
+				"groups":          []any{"/orders-console/admins"},
 			},
-			realmRoles: []string{"admin", "offline_access"}, clientRoles: []string{"scoring-admin"}, groups: []string{"/statics-scoring/admins"},
+			realmRoles: []string{"admin", "offline_access"}, clientRoles: []string{"orders-admin"}, groups: []string{"/orders-console/admins"},
 		},
 		{name: "roles of another client are not ours", claims: map[string]any{"resource_access": map[string]any{"other-app": map[string]any{"roles": []any{"admin"}}}}},
 		{name: "non-string entries are skipped", claims: map[string]any{"realm_access": map[string]any{"roles": []any{42, "admin", nil}}}, realmRoles: []string{"admin"}},
