@@ -52,8 +52,8 @@ With `ErrorURL` set, OIDC and GitHub callbacks send the same codes as `?code=<co
 
 `Outcome{Provider, Action, Result, Err, Identity}`:
 
-- `Provider`: the provider's name (`password`, an OIDC `Name`, `github`, `apikey`, `jwt`, or `session` when the Guard found no identity).
-- `Action`: `login`, `callback`, `logout`, `frontchannel_logout`, `register`, `totp_*`, `refresh_teams`, `authenticate` (per request: Guard, `apikey`, `jwt`), `refresh` (Guard calling a Refresher), `impersonation_start`, `impersonation_stop` (`session.Impersonator`).
+- `Provider`: the provider's name (`password`, an OIDC `Name`, `github`, `apikey`, `jwt`, `dev_login`, or `session` when the Guard found no identity).
+- `Action`: `login`, `callback`, `logout`, `frontchannel_logout`, `register`, `totp_*`, `refresh_teams`, `authenticate` (per request: Guard, `apikey`, `jwt`), `refresh` (Guard calling a Refresher), `impersonation_start`, `impersonation_stop` (`session.Impersonator`), `list_users` (`devlogin`).
 - `Result`: `success`, `challenge` (TOTP pending), `denied` (an `*auth.Error` was answered), `error` (500).
 - `Err` with `Result` `success`: a degraded success (e.g. GitHub token revocation failed, a refresh failed but the identity was kept).
 

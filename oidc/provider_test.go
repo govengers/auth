@@ -37,6 +37,7 @@ func TestNewValidatesOptions(t *testing.T) {
 		{name: "reserved apikey", change: func(options *oidc.Options) { options.Name = "apikey" }},
 		{name: "reserved session", change: func(options *oidc.Options) { options.Name = "session" }},
 		{name: "reserved jwt", change: func(options *oidc.Options) { options.Name = "jwt" }},
+		{name: "dev login provider name", change: func(options *oidc.Options) { options.Name = auth.ProviderDev }},
 		{name: "no client ID", change: func(options *oidc.Options) { options.ClientID = "" }},
 		{name: "no client secret", change: func(options *oidc.Options) { options.ClientSecret = "" }},
 		{name: "no sessions", change: func(options *oidc.Options) { options.Sessions = nil }},
@@ -74,6 +75,11 @@ func TestNewValidatesOptions(t *testing.T) {
 	_, err := oidc.New(t.Context(), nil)
 	require.Error(t, err)
 	_, err = oidc.New(t.Context(), valid())
+	require.NoError(t, err)
+	// "dev" was a valid Name before devlogin existed; devlogin's provider name must not take it away
+	devName := valid()
+	devName.Name = "dev"
+	_, err = oidc.New(t.Context(), devName)
 	require.NoError(t, err)
 }
 

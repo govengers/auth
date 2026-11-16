@@ -11,6 +11,9 @@ The rules agents and humans get wrong most often, one line each with the page th
 - `internal/fakeprovider` and `internal/backendtest` are not importable outside this module; write your own fakes for consumer tests.
 - Use the wide-event-logger v1 middleware (`ginadapter.NewMiddleware` of `github.com/govengers/wide-event-logger`): it redacts every `request.query` value, OAuth `code` and `state` included, unless you list the parameter in `QueryAllowlist`; never allowlist `code` or `state`. `Observe` and `Require` find no event of the deprecated `mxcd/go-wide-event-logger` and record nothing. [Gin](Gin.md#wide-events)
 
+- `devlogin.New` fails without `Enabled: true`; call it only behind a development flag, and pair that flag with `InsecureCookie` in `main`. Docker port publishing needs `AllowRemote` (the Host check stays; a named local proxy goes into `AllowedHosts`). [Dev-Login](Dev-Login.md)
+- `seal.AssociatedData` must use values that never change for the row (its primary key); a value sealed for one row never opens for another. [Seal](Seal.md)
+
 ## Identity and hooks
 
 - `OnLogin` must not mutate its argument: return `identity.Clone()` with changes. [Authorization](Authorization.md#roles-from-your-application)

@@ -68,8 +68,11 @@ github.com/govengers/auth
 ├── authorization              Check combinators and primitives over auth.Identity
 ├── ginadapter                 gin: net/http middleware and routes on gin, authorization gate, wide-event observer
 ├── prometheusadapter          auth.Observer that counts outcomes on a caller-supplied prometheus.Registerer
+├── devlogin                   one-click login as any application user, local development only (D68)
+├── seal                       AES-256-GCM sealing of small secrets at rest under a rotating key ring (D69)
 ├── internal
 │   ├── random                 random tokens
+│   ├── encryption             key parsing and checks, AES-256-GCM under a key derived per context (session and seal)
 │   ├── redirect               return paths, login locations, external URLs, redirect targets, provider endpoint URLs, path prefixes, 302 answers
 │   ├── httpjson               strict JSON request decoding, JSON response writing
 │   ├── oauthlogin             state + nonce + PKCE login state bound to the session (shared by oidc and github)
@@ -94,7 +97,7 @@ github.com/govengers/auth
 | Package | Own module imports | Third-party | Heavy deps it pulls |
 |---|---|---|---|
 | `auth` | `internal/httpjson` | `google/uuid` | none |
-| `session` | `auth`, `authorization`, `internal/random`, `internal/redirect`, `internal/httpjson`, `internal/failure`, `internal/impersonation` | none | none |
+| `session` | `auth`, `authorization`, `internal/random`, `internal/redirect`, `internal/httpjson`, `internal/failure`, `internal/impersonation`, `internal/encryption` | none | none |
 | `session/redisbackend` | `session`, `internal/dependency` | `redis/go-redis/v9` | go-redis |
 | `session/postgresbackend` | `session`, `internal/dependency` | `jackc/pgx/v5` | pgx |
 | `jwt` | `auth`, `internal/dependency`, `internal/failure` | `lestrrat-go/jwx/v3`, `google/uuid` | jwx |
@@ -109,6 +112,9 @@ github.com/govengers/auth
 | `authorization` | `auth` | `google/uuid` | none |
 | `ginadapter` | `auth`, `authorization` | `gin-gonic/gin`, `govengers/wide-event-logger`, `google/uuid` | gin |
 | `prometheusadapter` | `auth`, `internal/dependency` | `prometheus/client_golang` | client_golang |
+| `devlogin` | `auth`, `session`, `internal/{failure, fetchmetadata, httpjson, redirect}` | none | none |
+| `seal` | `internal/encryption` | none | none |
+| `internal/encryption` | none | none | none |
 | `internal/random`, `internal/redirect`, `internal/httpjson`, `internal/dependency` | none | none | none |
 | `internal/hook`, `internal/impersonation`, `internal/fetchmetadata` | `auth` | none | none |
 | `internal/failure` | `auth`, `internal/redirect` | none | none |
@@ -303,6 +309,7 @@ const (
 	ActionRefresh            Action = "refresh"             // Guard calling a Refresher
 	ActionImpersonationStart Action = "impersonation_start" // session.Impersonator (D60)
 	ActionImpersonationStop  Action = "impersonation_stop"
+	ActionListUsers          Action = "list_users" // devlogin GET {prefix}/users
 )
 
 // The fixed provider names (Identity.Provider, Outcome.Provider); an OIDC provider uses its own Name, which must
@@ -313,6 +320,7 @@ const (
 	ProviderAPIKey   = "apikey"
 	ProviderJWT      = "jwt"     // a JWT verifier's outcomes; its identities keep the provider they were signed for
 	ProviderSession  = "session" // the Guard's outcomes when it finds no identity
+	ProviderDev      = "dev_login" // devlogin; the "_" keeps it outside the OIDC Name pattern
 )
 
 type Result string
@@ -1145,6 +1153,60 @@ func WithReal(identity, refreshed *auth.Identity) *auth.Identity
 - `keycloak.go` (same handler when `OIDCOptions.KeycloakRealm` is set): token endpoint for both grants and the five admin GETs with configurable roles, groups, attributes; counters for token requests and client lookups.
 - `github.go`: `StartGitHub(tb testing.TB, options GitHubOptions) *GitHubServer`: `/login/oauth/authorize` (auto-approve), `/login/oauth/access_token` (client credentials, single-use code bound to its `redirect_uri`, PKCE check; a mismatch answers GitHub-style 200 `{"error":"redirect_uri_mismatch"}`), `/user`, `/user/teams` (paginated, `Link`-free: page size semantics like GitHub), `DELETE /applications/{client_id}/token` (records revoked tokens), `FailWith(endpoint, status)`, `SetTeams`, `Calls`. Plain HTTP on 127.0.0.1 (loopback exception).
 
+### 3.14 `devlogin` (D68)
+
+```go
+type User struct {
+	ID          string `json:"id"`                    // sent back by POST {prefix}/login, passed to Load
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+type UserLister func(ctx context.Context) ([]User, error)
+// Loader returns the identity a login of id gets (UserID, roles, Active), nil without error when unknown.
+// Provider and Subject are replaced by "dev_login" and id. An *auth.Error refuses with its status.
+type Loader func(ctx context.Context, id string) (*auth.Identity, error)
+
+type Options struct {
+	Enabled      bool           // must be true; New fails otherwise
+	Sessions     *session.Store // required
+	Users        UserLister     // required
+	Load         Loader         // required
+	PathPrefix   string         // default "/auth/dev"
+	AllowRemote  bool           // drops the peer and forwarding-header checks; the Host check stays
+	AllowedHosts []string       // further exact Host names or IP addresses (no port, no wildcard, case-insensitive) the Host check accepts
+	Observer     auth.Observer
+}
+func New(options *Options) (*Provider, error)
+func (p *Provider) Name() string // "dev_login" (auth.ProviderDev)
+// Routes: GET {prefix}/users, POST {prefix}/login {"id"}, POST {prefix}/logout.
+func (p *Provider) Routes() []auth.Route
+```
+
+Every route first runs the local-only check: the Host header is `localhost`, `*.localhost`, a loopback address or one of `AllowedHosts`; unless `AllowRemote`, also the peer (`RemoteAddr`) is a loopback address and none of `Forwarded`, `Via`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Port`, `X-Forwarded-Proto`, `X-Forwarded-Server`, `X-Real-IP` is present; otherwise 403 `dev_login_not_local`. `GET {prefix}/users` answers `{"users":[...]}` (never null), outcome `list_users`. `POST {prefix}/login` refuses `Sec-Fetch-Site: cross-site` (403), a body other than strict JSON `{"id"}` or an empty ID (400 `invalid_request`), an unknown ID (400 `unknown_dev_user`), an inactive identity (403 `forbidden`, Reason `inactive`); a `Load` error passes with `%w` (an `*auth.Error` keeps its status, anything else 500). Success starts a fresh session (`Store.Start`, revoking the request's one), saves the identity and answers `auth.NewIdentityResponse` 200, outcome `login`. `POST {prefix}/logout` is the password provider's logout without `OnLogout`: cross-site refused, the session ended within 10 s without the request's cancellation, 204, outcome `logout` with the identity it held. Every outcome carries Provider `dev_login`. There is no `Refresher`: a dev session keeps what `Load` returned until `MaximumAge` or logout.
+
+### 3.15 `seal` (D69)
+
+```go
+var ErrInvalid    error // malformed, tampered, other AssociatedData, or another secret under the same key ID
+var ErrUnknownKey error // the value names a key ID the ring lacks
+type Key struct {
+	ID     string // ^[A-Za-z0-9_-]{1,32}$
+	Secret []byte // 32 bytes, not one byte repeated
+}
+type Options struct {
+	Keys []Key // at least one; Keys[0] is the primary; IDs and secrets distinct
+}
+type AssociatedData struct{ Purpose, Table, Row string } // all required
+func New(options *Options) (*Sealer, error)
+func (s *Sealer) Seal(data AssociatedData, plaintext []byte) (string, error)
+func (s *Sealer) Open(data AssociatedData, sealed string) ([]byte, error)
+func (s *Sealer) Reseal(data AssociatedData, sealed string) (value string, resealed bool, err error)
+// ParseKeys parses "<ID>:<base64 secret>[,<ID>:<base64 secret>...]", primary first.
+func ParseKeys(encoded string) ([]Key, error)
+```
+
+Format: `v1.<key ID>.<base64url without padding of nonce || ciphertext || tag>`. Encoding E = uvarint-length-prefixed `"v1"`, key ID, Purpose, Table, Row. Cipher: `internal/encryption.DerivedCipher(secret, "govengers/auth seal v1 " + E)` (HKDF-SHA256 to a 32-byte key, AES-256-GCM with a random 12-byte nonce), additional data E. `Reseal` returns the value unchanged and `false` when the primary key sealed it, after opening it. Errors never contain a plaintext or a secret; they name a key by its ID.
+
 ---
 
 ## 4. Flows
@@ -1300,6 +1362,8 @@ Callers branch with `errors.Is(err, auth.ErrUnauthenticated | ErrForbidden | Err
 | `invalid_token` | Unauthenticated | jwt verifier |
 | `already_impersonating`, `not_impersonating` | Conflict | session.Impersonator start, stop |
 | `unknown_impersonation_target`, `self_impersonation` | InvalidRequest | session.Impersonator start |
+| `dev_login_not_local` | Forbidden | devlogin, every route: Host not local or allowed; without `AllowRemote` also a non-loopback peer or a forwarding header |
+| `unknown_dev_user` | InvalidRequest | devlogin login |
 | `internal` | (500) | every unhandled failure; also the `code` of an ErrorURL redirect for a 500 |
 | `not_found`, `unavailable` | (404, 503) | forward-auth binary only: unknown route, readiness while shutting down or Redis down |
 | (defaults) | all | everything else |
@@ -1602,6 +1666,8 @@ Decisions taken during implementation (29.10.2026, settled by the lead):
 | D65 | `session/postgresbackend`: a row per session (`govengers_auth_sessions`: expiry of its latest value, revocation marker) and a row per value. Put is one statement whose upsert of the session row takes its lock and refuses a live marker in the upsert's `WHERE`; Revoke runs `SELECT ... FOR UPDATE` on the session row and then deletes the values and writes the marker, in a transaction pinned to READ COMMITTED. Get, Pop and CompareAndSwap are single statements on the value row. Expiry uses the application's clock (`now` field, tests through `export_test.go`). `Sweep(ctx) (int64, error)` deletes expired values (`FOR UPDATE SKIP LOCKED`: a locked one waits for the next sweep) and sessions whose row expiry passed; the session row's expiry only grows, so a Put racing a Sweep raises it before the delete re-checks the row. | The lock on the session row is what serializes Put against Revoke (the conformance race test fails without it): a Revoke that deletes values without it misses a Put committing between its snapshot and its marker write. The values are read in a second statement because a single statement keeps the snapshot from before the lock wait. A sweep keyed on "no values left" would re-check only the session row after a lock wait, not the values subquery, and delete a value a Put had just committed; keying it on the row's own expiry closes that. Single statements are not wrapped in transactions to pin isolation (one round trip per Get and Put); under a REPEATABLE READ default a race fails with an error, never a wrong answer, as in govengers/jobs. Application clock rather than `now()`: the conformance suite drives the clock, and TTLs come from the application anyway. The value sweep skips locked rows because a Revoke holds the session row and deletes its values in key order while a waiting sweep locks them in scan order: two expired values of a revoked session deadlocked them (review round 1, logout 500 after the 1 s deadlock timeout). |
 | D66 | `password/postgresstorage` keeps credentials in `govengers_auth_password_credentials` keyed by `user_id` (= `password.User.ID` = `auth.Identity.UserID`), nothing of the profile. The application's profile table shares the ID and joins on it; it may reference the credentials (password-only apps, profile row from `OnLogin`) or be referenced by them, or neither (several providers). The storage names every column, so added columns break nothing. Every method is one statement; a compare-and-swap that changed no row looks the user up once to tell `ErrUserNotFound` from a failed condition. The behavioural tests of `MemoryStorage` became the exported suite `password/passwordtest` (`Run(t, newStorage)`), run by `password`, `passwordtest` itself and `postgresstorage`, plus a new concurrent `ConsumeTOTPAttempt` race. | A separate credentials table lets the application change its profile freely without forking the library's DDL and serves apps whose users come from OIDC as well. The suite is exported, unlike `internal/backendtest`, because `password.Storage` is documented as the application's to implement: the CAS contracts are easiest to get wrong and the suite is their executable form. The suite's "same ID" case now carries a username, since a user without username and email is refused by the table's CHECK (the `User` contract requires one). Indexes and lookups fold case as `lower(x COLLATE "C")`: ASCII only, the charset registration allows, on every database (under a Turkish or Azeri default `lower('I')` is a dotless i, which split `ADMIN` from `admin`). A login identifier with a NUL byte (PostgreSQL refuses it as text; invalid UTF-8 cannot arrive, JSON decoding replaces it) is an unknown user in `Provider.lookup`, before any `Storage`, so an application's own storage needs no guard; `postgresstorage` refuses both without a query for direct callers; registration caps emails at 254 bytes (RFC 5321, below the btree row limit), so neither reaches the public routes as a 500. |
 | D67 | `apikey/postgresstore`: key text `<Prefix>_<32 hex of a UUIDv7>.<43 base64url of 32 random bytes>`; `Prefix` required (`[a-z][a-z0-9]{1,15}`); the table stores the SHA-256 of the secret text; `Resolve` (the `apikey.Resolver`) checks the shape before any query, reads by primary key, compares in constant time, refuses expired keys, calls `Load(ctx, ownerID)` on every request, writes `last_used_at` at most once per `LastUsedInterval` (default 1 min; conditional UPDATE so concurrent uses write once). The resolved identity is Load's, with `Provider` `apikey`, `Subject` the key ID, `UserID` Load's or the owner ID, no `Impersonator`, `Permissions` the exact intersection of the owner's permissions and the key's scopes, and `Roles`, `OIDCRoles`, `OIDCClientRoles`, `Groups`, `Teams` dropped unless the scopes contain `*:write`; `UserID`, `Active`, `Attributes`, `Claims` and `Data` stay, so scopes bind `HasPermission` only (documented contract: routes a key reaches combine ownership checks with `HasPermission`). A due last-use write that fails refuses the request (`Resolve` returns the error). `Revoke(ctx, ownerID, id)` deletes the row (`ErrKeyNotFound`); `Issue` refusals are `auth.ErrInvalidRequest`, a name PostgreSQL cannot hold (NUL byte, invalid UTF-8) included; `CreatedAt` and `ExpiresAt` are truncated to microseconds so `Issue` and `List` return the same times. | A 256-bit random secret needs no slow hash: SHA-256 makes a request cost one indexed read, and a leaked table still yields no usable key. Loading the owner per request and caching nothing lets revocation and deactivation act on the next request on every replica. Roles cannot be narrowed by a resource scope, so a narrowed key keeping `admin` would let a read-only key pass `IsAdmin`; only an unrestricted key keeps them. `Subject` = key ID makes the audit trail name the key while `UserID` names the user it acts for. A marker the ownership checks could see (a key identity failing `HasUserID`) would break every route that legitimately serves a key its owner's data; documenting the narrower meaning is enough for v1. The store has no Observer to report a failed last-use write without refusing, and a database that cannot take a one-row UPDATE cannot serve the application's own writes either. |
+| D68 | `devlogin` is its own provider (`auth.ProviderDev = "dev_login"`, outside the OIDC `Name` pattern `[a-z0-9-]`, so no OIDC name is reserved for it) with routes `GET {prefix}/users`, `POST {prefix}/login`, `POST {prefix}/logout`. `New` fails unless `Options.Enabled`, so an application builds it only behind its own development flag and no route exists otherwise. The local-only check is **on by default**: a localhost, loopback or `AllowedHosts` Host header, and (unless `AllowRemote`) a loopback peer and no forwarding header. `AllowRemote` never drops the Host check. The identity's Provider and Subject are overwritten (`dev_login`, the requested ID), so the password `Refresher` never claims a dev session and every audit trail shows the dev login. A logout route is included although the spec named two routes: an application with only OIDC and dev login would otherwise have no logout that ends a dev session without a redirect to the IdP. No `Refresher`. | A default-on check costs nothing on a developer machine and turns the worst mistake (the flag left on in a deployed build) into 403s for every remote client. Host is checked because a DNS-rebinding page reaches a local server under the attacker's name and could read the user list and log in. Forwarding headers catch a reverse proxy on the same host that announces itself; one that rewrites Host to its loopback upstream and sends no forwarding header (httputil `Rewrite`, nginx `proxy_pass` without `proxy_set_header`, a LAN-listening dev server proxy with `changeOrigin`) passes, so the check is a seat belt and `Enabled` the guard. Docker port publishing and container networks show a non-loopback peer but still Host localhost: `AllowRemote` drops only the peer and header checks, so DNS rebinding stays refused there; a named local proxy goes into `AllowedHosts`. The docs pair both with an insecure-cookie guard in `main`. `"dev"` stays a valid OIDC name: it was one through v1.4.0, and renaming an OIDC provider changes `Identity.Provider` in sessions and audit trails and the registered redirect URI. |
+| D69 | `seal` encrypts small secrets at rest: AES-256-GCM, a text envelope `v1.<key ID>.<base64url>` naming its key, a ring whose first key seals and whose every key opens, mandatory `AssociatedData{Purpose, Table, Row}`, `Reseal` for rotation and `ParseKeys` for a configuration value. The key per value is HKDF-SHA256 of the ring key with the encoded associated data as info, the same construction as session values (`internal/encryption`, shared with `session` instead of duplicated). No Observer, no prometheusadapter: the package does no I/O and has no outcomes worth counting beyond the errors it returns. | A text envelope fits text columns, JSON and env values; the key ID makes rotation a background job (`Reseal` until no value names the old key, then drop it) instead of a flag day. Deriving per row keeps the 2^32 random-nonce bound of GCM to one row's history. Binding to purpose, table and row stops a database writer from moving one user's sealed TOTP secret to another row or column. The length-prefixed encoding makes ("a","bc") and ("ab","c") different. Distinct secrets per ID are enforced because two IDs sharing a secret would defeat removing one. |
 
 ---
 

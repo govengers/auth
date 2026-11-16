@@ -21,6 +21,8 @@ One Go library for login and access control: password, OIDC (incl. Keycloak) and
 - Server-side sessions (memory, Redis or PostgreSQL), the cookie holds a random ID only.
 - Authorization checks over roles, groups, teams and resource permissions (`builds:write`), composable with `All`, `Any`, `Not`.
 - API keys: static, or per-user keys issued into PostgreSQL and capped by their scopes; RS512 JWT signing and verification.
+- A one-click dev login for local development, local-only by default.
+- Sealing of small secrets at rest (TOTP secrets, webhook secrets) with a rotating key ring.
 - `net/http` core; gin, wide events and Prometheus in adapter packages. No logging, no goroutines.
 
 ## Install
@@ -83,6 +85,8 @@ Complete, tested servers: [password](examples/password/main.go), [password, sess
 | [`authorization`](docs/wiki/Authorization.md) | `Check` primitives and combinators |
 | [`ginadapter`](docs/wiki/Gin.md) | net/http middleware and routes on gin, `Require`, wide-event `Observe` |
 | [`prometheusadapter`](docs/wiki/Gin.md#prometheus) | outcome counter on your Prometheus registry |
+| [`devlogin`](docs/wiki/Dev-Login.md) | one-click login as any user, local development only |
+| [`seal`](docs/wiki/Seal.md) | AES-256-GCM sealing of small secrets at rest with key rotation |
 | [`cmd/forwardauth`](docs/wiki/Forward-Auth.md) | the forward-auth binary |
 
 ## Forward-auth image

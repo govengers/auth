@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/govengers/auth"
+	"github.com/govengers/auth/internal/encryption"
 	"github.com/govengers/auth/internal/random"
 )
 
@@ -55,11 +56,8 @@ func NewStore(options *StoreOptions) (*Store, error) {
 	if options == nil || options.Backend == nil {
 		return nil, errors.New("session store: Backend is required")
 	}
-	if len(options.EncryptionKey) != encryptionKeyLength {
-		return nil, fmt.Errorf("session store: EncryptionKey has %d bytes, want %d", len(options.EncryptionKey), encryptionKeyLength)
-	}
-	if repeatsOneByte(options.EncryptionKey) {
-		return nil, errors.New("session store: EncryptionKey " + repeatedKeyProblem)
+	if err := encryption.CheckKey(options.EncryptionKey, "session store: EncryptionKey"); err != nil {
+		return nil, err
 	}
 	resolved := withStoreDefaults(*options)
 	if err := validateStoreOptions(resolved); err != nil {

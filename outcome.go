@@ -22,6 +22,7 @@ const (
 	ActionRefresh            Action = "refresh"             // Guard calling a Refresher
 	ActionImpersonationStart Action = "impersonation_start" // session.Impersonator; Identity is the impersonating one on success
 	ActionImpersonationStop  Action = "impersonation_stop"
+	ActionListUsers          Action = "list_users" // devlogin GET {prefix}/users
 )
 
 // Result is how an action ended.
@@ -41,8 +42,9 @@ const (
 	ProviderPassword = "password"
 	ProviderGitHub   = "github"
 	ProviderAPIKey   = "apikey"
-	ProviderJWT      = "jwt"     // a JWT verifier's outcomes; its identities keep the provider they were signed for
-	ProviderSession  = "session" // the Guard's outcomes when it finds no identity
+	ProviderJWT      = "jwt"       // a JWT verifier's outcomes; its identities keep the provider they were signed for
+	ProviderSession  = "session"   // the Guard's outcomes when it finds no identity
+	ProviderDev      = "dev_login" // devlogin, the one-click login for local development; the "_" keeps it outside the OIDC Name pattern
 )
 
 // Outcome is one authentication decision. Err is the refusal for denied, the failure for error,
