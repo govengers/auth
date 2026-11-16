@@ -87,6 +87,8 @@ type IdentityResponse struct {
 	Permissions     []Permission      `json:"permissions,omitempty"` // text form: ["builds:write"]
 	Impersonator    *IdentityResponse `json:"impersonator,omitempty"`
 	// ImpersonationEndsAt is when the impersonation ends (RFC 3339, UTC); omitted when not impersonating or unknown.
+	// Only auth.IdentityHandler behind the Guard and the Impersonator's start route set it; other answers
+	// (e.g. GitHub's refresh-teams) leave it out, so a client keeps the end it got from those two.
 	ImpersonationEndsAt time.Time `json:"impersonationEndsAt,omitzero"`
 }
 

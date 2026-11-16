@@ -271,7 +271,8 @@ func (s *Storage) queryUser(ctx context.Context, statement string, argument any)
 // remove the old key. It pages through the table in user ID order, one statement per changed row, each
 // swapping only while the row still holds the value read, so concurrent TOTP changes win. It stops at the
 // first secret that does not open (bound to another row, or of a key the ring lacks), naming the user;
-// running it again continues where the rows still need it. Without a Sealer it is an error.
+// no row after it is processed until that row is repaired (ClearTOTP for the named user, or its value
+// restored), and a rerun then continues. Without a Sealer it is an error.
 func (s *Storage) ResealTOTPSecrets(ctx context.Context) (int, error) {
 	if s.sealer == nil {
 		return 0, errors.New("postgres password storage: reseal TOTP secrets: Options.Sealer is not set")
