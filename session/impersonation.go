@@ -95,52 +95,59 @@ func NewImpersonator(options *ImpersonatorOptions) (*Impersonator, error) {
 // an inactive target 403; Target's refusal; a session that no longer holds the request's identity 409.
 // It reports the outcome (Action impersonation_start) under the impersonator's provider.
 func (i *Impersonator) Start(request *http.Request, subject string) (*auth.Identity, error) {
+	impersonated, _, err := i.startUntil(request, subject)
+	return impersonated, err
+}
+
+// startUntil is Start, also returning when the impersonation ends.
+func (i *Impersonator) startUntil(request *http.Request, subject string) (*auth.Identity, time.Time, error) {
 	ctx := request.Context()
 	actor := auth.IdentityFrom(ctx)
-	impersonated, err := i.start(request, actor, subject)
+	impersonated, endsAt, err := i.start(request, actor, subject)
 	outcome := auth.Outcome{Provider: providerOf(actor), Action: auth.ActionImpersonationStart, Identity: impersonated, Err: err}
 	if err != nil {
 		outcome.Identity = actor
 		i.reportFailure(ctx, outcome)
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	outcome.Result = auth.ResultSuccess
 	i.report(ctx, outcome)
-	return impersonated, nil
+	return impersonated, endsAt, nil
 }
 
-func (i *Impersonator) start(request *http.Request, actor *auth.Identity, subject string) (*auth.Identity, error) {
+func (i *Impersonator) start(request *http.Request, actor *auth.Identity, subject string) (*auth.Identity, time.Time, error) {
 	ctx := request.Context()
 	switch {
 	case actor == nil:
-		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "no identity"}
+		return nil, time.Time{}, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "no identity"}
 	case actor.Impersonator != nil:
-		return nil, &auth.Error{Kind: auth.ErrConflict, Code: codeAlreadyImpersonating, Reason: "impersonating already"}
+		return nil, time.Time{}, &auth.Error{Kind: auth.ErrConflict, Code: codeAlreadyImpersonating, Reason: "impersonating already"}
 	case !actor.Active:
-		return nil, &auth.Error{Kind: auth.ErrForbidden, Reason: auth.ReasonInactive}
+		return nil, time.Time{}, &auth.Error{Kind: auth.ErrForbidden, Reason: auth.ReasonInactive}
 	case subject == "":
-		return nil, &auth.Error{Kind: auth.ErrInvalidRequest, Reason: "empty impersonation subject"}
+		return nil, time.Time{}, &auth.Error{Kind: auth.ErrInvalidRequest, Reason: "empty impersonation subject"}
 	}
 	if err := i.options.Actor(ctx); err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	target, err := i.options.Load(ctx, subject)
 	if err != nil {
-		return nil, fmt.Errorf("load impersonation target: %w", err)
+		return nil, time.Time{}, fmt.Errorf("load impersonation target: %w", err)
 	}
 	if err := i.admitTarget(ctx, actor, target); err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	impersonated := target.Clone()
 	impersonated.Impersonator = actor.Clone()
 	current, err := i.store.Open(request)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
-	if err := current.replaceIdentity(ctx, actor, impersonated, i.store.now().Add(i.options.MaximumDuration)); err != nil {
-		return nil, err
+	endsAt := i.store.now().Add(i.options.MaximumDuration)
+	if err := current.replaceIdentity(ctx, actor, impersonated, endsAt); err != nil {
+		return nil, time.Time{}, err
 	}
-	return impersonated, nil
+	return impersonated, endsAt, nil
 }
 
 // admitTarget refuses a target the actor must not impersonate.
@@ -205,7 +212,7 @@ type impersonationRequest struct {
 }
 
 // Routes returns POST {PathPrefix} (JSON body {"subject": "..."}: Start, answers 200 with the impersonating
-// identity's auth.IdentityResponse) and DELETE {PathPrefix} (Stop, answers 200 with the impersonator's),
+// identity's auth.IdentityResponse, impersonationEndsAt included) and DELETE {PathPrefix} (Stop, answers 200 with the impersonator's),
 // both behind the Guard's RequireAPI. Register them with auth.RegisterRoutes or ginadapter.RegisterRoutes.
 // The POST requires Content-Type application/json and DELETE is no simple request, so a cross-site page
 // cannot send either without a CORS preflight.
@@ -226,22 +233,25 @@ func (i *Impersonator) handleStart(writer http.ResponseWriter, request *http.Req
 		auth.WriteError(writer, err)
 		return
 	}
-	identity, err := i.Start(request, body.Subject)
-	writeIdentity(writer, identity, err)
+	identity, endsAt, err := i.startUntil(request, body.Subject)
+	writeIdentity(writer, identity, endsAt, err)
 }
 
 func (i *Impersonator) handleStop(writer http.ResponseWriter, request *http.Request) {
 	identity, err := i.Stop(request)
-	writeIdentity(writer, identity, err)
+	writeIdentity(writer, identity, time.Time{}, err)
 }
 
-// writeIdentity answers identity as auth.IdentityResponse, or err.
-func writeIdentity(writer http.ResponseWriter, identity *auth.Identity, err error) {
+// writeIdentity answers identity as auth.IdentityResponse with the end of its impersonation (zero for
+// none), or err.
+func writeIdentity(writer http.ResponseWriter, identity *auth.Identity, impersonationEndsAt time.Time, err error) {
 	if err != nil {
 		auth.WriteError(writer, err)
 		return
 	}
-	httpjson.Write(writer, http.StatusOK, auth.NewIdentityResponse(identity))
+	response := auth.NewIdentityResponse(identity)
+	response.ImpersonationEndsAt = impersonationEndsAt.UTC()
+	httpjson.Write(writer, http.StatusOK, response)
 }
 
 // providerOf is the Outcome.Provider of an impersonation outcome: the impersonator's provider, "session"

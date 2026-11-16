@@ -467,3 +467,33 @@ func TestImpersonatorWithoutAUsableSession(t *testing.T) {
 func withSessionIdentityOf(request *http.Request, identity *auth.Identity) *http.Request {
 	return request.WithContext(auth.WithIdentity(request.Context(), identity))
 }
+
+// The start route and the Guard's /auth/me answer when the impersonation ends, a refresh in between included;
+// neither answers an end without an impersonation.
+func TestImpersonationEndIsAnswered(t *testing.T) {
+	refresher := &fakeRefresher{name: "password", refresh: func(identity *auth.Identity) (*auth.Identity, error) { return identity.Clone(), nil }}
+	fixture := newImpersonationFixture(t, GuardOptions{Refreshers: []Refresher{refresher}}, ImpersonatorOptions{MaximumDuration: 10 * time.Minute})
+	request := login(t, fixture.store, testAdmin())
+	identityRoute := fixture.guard.RequireAPI()(auth.IdentityHandler())
+	serveMe := func() string {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		identityRoute.ServeHTTP(recorder, request)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		return recorder.Body.String()
+	}
+	wantEnd := `"impersonationEndsAt":"2026-10-29T12:10:00Z"`
+
+	require.NotContains(t, serveMe(), "impersonationEndsAt")
+	started := fixture.serve(t, http.MethodPost, request, `{"subject":"user-2"}`)
+	require.Contains(t, started.Body.String(), wantEnd)
+	require.Contains(t, serveMe(), wantEnd)
+	fixture.clock.advance(2 * time.Minute) // past RefreshInterval: the Guard refreshes and keeps the end
+	require.Contains(t, serveMe(), wantEnd)
+	require.Equal(t, 1, refresher.callCount())
+
+	stopped := fixture.serve(t, http.MethodDelete, request, "")
+	require.Equal(t, http.StatusOK, stopped.Code, stopped.Body.String())
+	require.NotContains(t, stopped.Body.String(), "impersonationEndsAt")
+	require.NotContains(t, serveMe(), "impersonationEndsAt")
+}

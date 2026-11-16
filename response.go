@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -85,6 +86,10 @@ type IdentityResponse struct {
 	Teams           []string          `json:"teams,omitempty"`
 	Permissions     []Permission      `json:"permissions,omitempty"` // text form: ["builds:write"]
 	Impersonator    *IdentityResponse `json:"impersonator,omitempty"`
+	// ImpersonationEndsAt is when the impersonation ends (RFC 3339, UTC); omitted when not impersonating or unknown.
+	// Only auth.IdentityHandler behind the Guard and the Impersonator's start route set it; other answers
+	// (e.g. GitHub's refresh-teams) leave it out, so a client keeps the end it got from those two.
+	ImpersonationEndsAt time.Time `json:"impersonationEndsAt,omitzero"`
 }
 
 // NewIdentityResponse returns the public view of identity, sharing no slice with it. A nil identity
@@ -123,7 +128,8 @@ func userIDText(userID uuid.UUID) string {
 }
 
 // IdentityHandler answers 200 with the IdentityResponse of the identity in the request context and
-// 401 without one. Mount it behind a Guard (recommended path "/auth/me"). It is safe for concurrent use.
+// 401 without one, with ImpersonationEndsAt from the context while the identity impersonates. Mount it
+// behind a Guard (recommended path "/auth/me"). It is safe for concurrent use.
 func IdentityHandler() http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		identity := IdentityFrom(request.Context())
@@ -131,6 +137,10 @@ func IdentityHandler() http.Handler {
 			WriteError(writer, ErrUnauthenticated)
 			return
 		}
-		httpjson.Write(writer, http.StatusOK, NewIdentityResponse(identity))
+		response := NewIdentityResponse(identity)
+		if identity.Impersonator != nil {
+			response.ImpersonationEndsAt = ImpersonationEndsAtFrom(request.Context()).UTC()
+		}
+		httpjson.Write(writer, http.StatusOK, response)
 	})
 }

@@ -3,6 +3,7 @@ package postgresstorage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/govengers/auth/internal/dependency"
 	"github.com/govengers/auth/password"
+	"github.com/govengers/auth/seal"
 )
 
 // uniqueViolation is the SQLSTATE of a duplicate user ID, username or email.
@@ -63,19 +65,49 @@ UPDATE govengers_auth_password_credentials
 SET totp_enabled = true, totp_secret = $2, backup_code_hashes = $3, totp_attempts = 0
 WHERE user_id = $1 AND NOT totp_enabled`
 
+// selectTOTPSecrets pages through the stored TOTP secrets in user ID order, after $1 (NULL: from the start,
+// so a user with the nil UUID is not skipped).
+//
+//nolint:gosec // G101: SQL naming the totp_secret column, no credential
+const selectTOTPSecrets = `
+SELECT user_id, totp_secret FROM govengers_auth_password_credentials
+WHERE totp_secret IS NOT NULL AND ($1::uuid IS NULL OR user_id > $1)
+ORDER BY user_id
+LIMIT $2`
+
+// replaceTOTPSecret swaps a TOTP secret while it is still the one read, so a concurrent change of TOTP wins.
+//
+//nolint:gosec // G101: SQL naming the totp_secret column, no credential
+const replaceTOTPSecret = `
+UPDATE govengers_auth_password_credentials SET totp_secret = $3 WHERE user_id = $1 AND totp_secret = $2`
+
 const clearTOTP = `
 UPDATE govengers_auth_password_credentials
 SET totp_enabled = false, totp_secret = NULL, backup_code_hashes = '{}', totp_attempts = 0
 WHERE user_id = $1`
 
+// Sealing of TOTP secrets: the seal.AssociatedData of a user's secret is (sealPurpose, table, user ID).
+const (
+	sealPurpose = "totp_secret"
+	sealTable   = "govengers_auth_password_credentials"
+	// resealBatchSize is the page size of ResealTOTPSecrets.
+	resealBatchSize = 100
+)
+
 // Options configures New.
 type Options struct {
 	Pool *pgxpool.Pool // required; its search_path must reach the table of MigrationV1; the caller owns and closes it
+	// Sealer, when set, seals TOTP secrets at rest (seal.AssociatedData purpose "totp_secret", table
+	// "govengers_auth_password_credentials", row the user ID). Reads accept sealed and plaintext secrets, so
+	// rows written before the Sealer was set keep working; ResealTOTPSecrets seals them. Without a Sealer
+	// secrets are stored as given and a sealed one fails to read.
+	Sealer *seal.Sealer
 }
 
 // Storage implements password.Storage on PostgreSQL. It is safe for concurrent use.
 type Storage struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	sealer *seal.Sealer
 }
 
 var _ password.Storage = (*Storage)(nil)
@@ -85,7 +117,7 @@ func New(options *Options) (*Storage, error) {
 	if options == nil || options.Pool == nil {
 		return nil, errors.New("postgres password storage: Options.Pool is required")
 	}
-	return &Storage{pool: options.Pool}, nil
+	return &Storage{pool: options.Pool, sealer: options.Sealer}, nil
 }
 
 // CreateUser inserts user; a used ID, username or email (ignoring ASCII case) is password.ErrUserExists, decided by
@@ -94,8 +126,12 @@ func (s *Storage) CreateUser(ctx context.Context, user *password.User) error {
 	if user == nil {
 		return errors.New("postgres password storage: create user: user is nil")
 	}
-	_, err := s.pool.Exec(ctx, insertUser, user.ID, user.Username, user.Email, user.PasswordHash,
-		user.TOTPEnabled, user.TOTPSecret, orEmpty(user.BackupCodeHashes))
+	secret, err := s.sealSecret(user.ID, user.TOTPSecret)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, insertUser, user.ID, user.Username, user.Email, user.PasswordHash,
+		user.TOTPEnabled, secret, orEmpty(user.BackupCodeHashes))
 	var postgresError *pgconn.PgError
 	if errors.As(err, &postgresError) && postgresError.Code == uniqueViolation {
 		return password.ErrUserExists
@@ -162,7 +198,11 @@ func (s *Storage) ConsumeBackupCode(ctx context.Context, id uuid.UUID, hash stri
 
 // SetTOTP enables TOTP and resets the attempt counter while TOTP is disabled and reports whether it did.
 func (s *Storage) SetTOTP(ctx context.Context, id uuid.UUID, secret string, backupCodeHashes []string) (bool, error) {
-	return s.update(ctx, "set TOTP", setTOTP, id, secret, orEmpty(backupCodeHashes))
+	stored, err := s.sealSecret(id, &secret)
+	if err != nil {
+		return false, err
+	}
+	return s.update(ctx, "set TOTP", setTOTP, id, stored, orEmpty(backupCodeHashes))
 }
 
 // ClearTOTP disables TOTP, clears the secret and the backup codes and resets the attempt counter.
@@ -219,7 +259,115 @@ func (s *Storage) queryUser(ctx context.Context, statement string, argument any)
 	if len(user.BackupCodeHashes) == 0 {
 		user.BackupCodeHashes = nil // the empty array of a user without codes, as password.User has it
 	}
+	if user.TOTPSecret, err = s.openSecret(user.ID, user.TOTPSecret); err != nil {
+		return nil, err
+	}
 	return &user, nil
+}
+
+// ResealTOTPSecrets brings every stored TOTP secret under the Sealer's primary key: it seals plaintext
+// secrets (rows written before Options.Sealer was set) and reseals the ones of an older key, and returns how
+// many rows it changed. Run it after setting the Sealer and after putting a new key first in the ring, then
+// remove the old key. It pages through the table in user ID order, one statement per changed row, each
+// swapping only while the row still holds the value read, so concurrent TOTP changes win. It stops at the
+// first secret that does not open (bound to another row, or of a key the ring lacks), naming the user;
+// no row after it is processed until that row is repaired (ClearTOTP for the named user, or its value
+// restored), and a rerun then continues. Without a Sealer it is an error.
+func (s *Storage) ResealTOTPSecrets(ctx context.Context) (int, error) {
+	if s.sealer == nil {
+		return 0, errors.New("postgres password storage: reseal TOTP secrets: Options.Sealer is not set")
+	}
+	changed := 0
+	var after *uuid.UUID
+	for {
+		rows, err := s.pool.Query(ctx, selectTOTPSecrets, after, resealBatchSize)
+		if err != nil {
+			return changed, dependency.Error("postgres password storage: reseal TOTP secrets: read", err)
+		}
+		page, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (storedSecret, error) {
+			var stored storedSecret
+			return stored, row.Scan(&stored.id, &stored.secret)
+		})
+		if err != nil {
+			return changed, dependency.Error("postgres password storage: reseal TOTP secrets: read", err)
+		}
+		for _, stored := range page {
+			replaced, err := s.resealSecret(ctx, stored.id, stored.secret)
+			if err != nil {
+				return changed, err
+			}
+			if replaced {
+				changed++
+			}
+		}
+		if len(page) < resealBatchSize {
+			return changed, nil
+		}
+		after = &page[len(page)-1].id
+	}
+}
+
+// storedSecret is one row of selectTOTPSecrets.
+type storedSecret struct {
+	id     uuid.UUID
+	secret string
+}
+
+// resealSecret writes the sealed form of one stored secret under the primary key and reports whether the
+// row changed.
+func (s *Storage) resealSecret(ctx context.Context, id uuid.UUID, stored string) (bool, error) {
+	data := sealData(id)
+	var next string
+	var err error
+	if seal.IsSealed(stored) {
+		var resealed bool
+		next, resealed, err = s.sealer.Reseal(data, stored)
+		if err == nil && !resealed {
+			return false, nil
+		}
+	} else {
+		next, err = s.sealer.Seal(data, []byte(stored))
+	}
+	if err != nil {
+		return false, fmt.Errorf("postgres password storage: reseal TOTP secret of user %s: %w", id, err)
+	}
+	tag, err := s.pool.Exec(ctx, replaceTOTPSecret, id, stored, next)
+	if err != nil {
+		return false, dependency.Error("postgres password storage: reseal TOTP secret", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// sealSecret returns the stored form of a user's secret: sealed with a Sealer, as given without one.
+func (s *Storage) sealSecret(id uuid.UUID, secret *string) (*string, error) {
+	if s.sealer == nil || secret == nil {
+		return secret, nil
+	}
+	sealed, err := s.sealer.Seal(sealData(id), []byte(*secret))
+	if err != nil {
+		return nil, fmt.Errorf("postgres password storage: seal TOTP secret of user %s: %w", id, err)
+	}
+	return &sealed, nil
+}
+
+// openSecret returns the plaintext of a stored secret: a sealed one opened, a plaintext one (a row written
+// before the Sealer was set) as it is.
+func (s *Storage) openSecret(id uuid.UUID, stored *string) (*string, error) {
+	if stored == nil || !seal.IsSealed(*stored) {
+		return stored, nil
+	}
+	if s.sealer == nil {
+		return nil, fmt.Errorf("postgres password storage: TOTP secret of user %s is sealed but Options.Sealer is not set", id)
+	}
+	plaintext, err := s.sealer.Open(sealData(id), *stored)
+	if err != nil {
+		return nil, fmt.Errorf("postgres password storage: open TOTP secret of user %s: %w", id, err)
+	}
+	return new(string(plaintext)), nil
+}
+
+func sealData(id uuid.UUID) seal.AssociatedData {
+	return seal.AssociatedData{Purpose: sealPurpose, Table: sealTable, Row: id.String()}
 }
 
 // orEmpty keeps a nil slice from becoming NULL in the NOT NULL array column.

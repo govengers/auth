@@ -223,3 +223,13 @@ func TestParseKeys(t *testing.T) {
 		})
 	}
 }
+
+func TestIsSealed(t *testing.T) {
+	sealed, err := newSealer(t, Key{ID: "k1", Secret: firstSecret}).Seal(totpOfAlice, []byte("JBSWY3DPEHPK3PXP"))
+	require.NoError(t, err)
+	require.True(t, IsSealed(sealed))
+	require.True(t, IsSealed("v1.tampered"), "Open decides validity")
+	for _, plaintext := range []string{"JBSWY3DPEHPK3PXP", "", "v1", "v2.k1.abc", "V1.k1.abc"} {
+		require.False(t, IsSealed(plaintext), plaintext)
+	}
+}

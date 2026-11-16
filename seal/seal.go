@@ -180,6 +180,13 @@ func (s *Sealer) open(data AssociatedData, sealed string) ([]byte, string, error
 	return plaintext, keyID, nil
 }
 
+// IsSealed reports whether value has the prefix of a sealed value ("v1."), so a store holding sealed and
+// legacy plaintext values tells them apart. Only Open tells whether it is a valid one. Pick plaintexts that
+// cannot start with "v1.", such as base32 or hex text.
+func IsSealed(value string) bool {
+	return strings.HasPrefix(value, version+".")
+}
+
 // parse splits "v1.<key ID>.<ciphertext>" into the key ID and the decoded ciphertext.
 func parse(sealed string) (string, []byte, error) {
 	parts := strings.Split(sealed, ".")

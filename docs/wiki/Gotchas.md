@@ -13,6 +13,7 @@ The rules agents and humans get wrong most often, one line each with the page th
 
 - `devlogin.New` fails without `Enabled: true`; call it only behind a development flag, and pair that flag with `InsecureCookie` in `main`. Docker port publishing needs `AllowRemote` (the Host check stays; a named local proxy goes into `AllowedHosts`). [Dev-Login](Dev-Login.md)
 - `seal.AssociatedData` must use values that never change for the row (its primary key); a value sealed for one row never opens for another. [Seal](Seal.md)
+- `postgresstorage.Options.Sealer` is one-way: once a row is sealed, a storage without the Sealer fails to read it. Deploy the Sealer (or a new key) to every replica before `ResealTOTPSecrets` runs, as a one-off job, not in `main`; run it until it returns 0 before removing an old key. It stops at an unopenable row until you repair it (`ClearTOTP` for the named user). [Password](Password.md#storage-on-postgresql)
 
 ## Identity and hooks
 
