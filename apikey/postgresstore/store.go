@@ -62,12 +62,15 @@ const selectKey = `SELECT ` + keyColumns + ` FROM govengers_auth_api_keys WHERE 
 // selectKeyPage pages through every owner's keys in ID order (UUIDv7, so about issue order), after $1.
 const selectKeyPage = `SELECT ` + keyColumns + ` FROM govengers_auth_api_keys WHERE id > $1 ORDER BY id LIMIT $2`
 
-// revokeKey marks a key revoked, of the owner $2 or (NULL) of any owner. A key revoked before keeps its
-// first revocation time.
+// revokeKey marks a key revoked, of the owner $2 or (NULL) of any owner, unless it is revoked already.
 const revokeKey = `
-UPDATE govengers_auth_api_keys SET revoked_at = COALESCE(revoked_at, $3)
-WHERE id = $1 AND ($2::uuid IS NULL OR owner_id = $2)
+UPDATE govengers_auth_api_keys SET revoked_at = $3
+WHERE id = $1 AND ($2::uuid IS NULL OR owner_id = $2) AND revoked_at IS NULL
 RETURNING ` + keyColumns
+
+// selectOwnedKey reads a key of the owner $2 or (NULL) of any owner: the answer to a revocation that found
+// the key revoked already.
+const selectOwnedKey = `SELECT ` + keyColumns + ` FROM govengers_auth_api_keys WHERE id = $1 AND ($2::uuid IS NULL OR owner_id = $2)`
 
 // purgeKeys deletes the keys that ended (revoked, or expired) before $1; LEAST ignores a NULL.
 const purgeKeys = `DELETE FROM govengers_auth_api_keys WHERE LEAST(revoked_at, expires_at) < $1`
@@ -91,8 +94,10 @@ type Executor interface {
 // Loader returns the identity of a key's owner, called for every request a key authenticates. Return an
 // error matching auth.ErrUnauthenticated for an owner that no longer exists; set Active as for a session
 // login (an inactive identity is refused by every check but IsAuthenticated). It must be safe for
-// concurrent use.
-type Loader func(ctx context.Context, ownerID uuid.UUID) (*auth.Identity, error)
+// concurrent use. executor is the one Resolve's own statements run on (the pool, or a WithExecutor view's):
+// read the owner on it, so a Resolve inside a transaction sees the transaction's rows and never waits for a
+// second connection of the pool.
+type Loader func(ctx context.Context, executor Executor, ownerID uuid.UUID) (*auth.Identity, error)
 
 // Options configures New.
 type Options struct {
@@ -128,7 +133,8 @@ type IssueRequest struct {
 // Store issues, lists and revokes per-owner API keys in PostgreSQL and resolves presented keys for an
 // apikey.Authenticator. Its statements run on Options.Pool, or on the caller's transaction through
 // WithExecutor. A key is "<Prefix>_<id>.<secret>": id is the key's UUID in hex, secret 32 random
-// bytes in base64url; the table holds the SHA-256 of the secret only. It is safe for concurrent use.
+// bytes in base64url; the table holds the SHA-256 of the secret only. It is safe for concurrent use; a
+// WithExecutor view is only as safe as its executor.
 //
 // A resolved key acts as its owner (Load) narrowed to its scopes: the identity's Permissions become those
 // both the owner's permissions and the key's scopes grant, and a key without the scope "*:write" also drops
@@ -177,7 +183,9 @@ func New(options *Options) (*Store, error) {
 // the caller's transaction: a key is issued or revoked in the same commit as the application's own rows and
 // audit entry, and a call inside a transaction never waits for a second connection of the pool. A nil
 // executor is the pool (so `store.WithExecutor(postgresadapter.TransactionFrom(ctx))` works outside a unit
-// of work too). The view shares the store's options; the store itself keeps using the pool.
+// of work too). The view shares the store's options and passes executor to Options.Load; the store itself
+// keeps using the pool. A view is only as safe for concurrent use as its executor: one on a pool is, one on
+// a pgx.Tx or a *pgx.Conn is not (pgx allows one statement at a time on a connection).
 //
 // On a transaction the statements see its uncommitted rows (an owner inserted before Issue) and its
 // isolation: Revoke and the last-use write of Resolve need a read-write transaction, and under REPEATABLE
@@ -249,14 +257,27 @@ func (s *Store) Get(ctx context.Context, id uuid.UUID) (*Key, error) {
 
 // Revoke marks the key id of ownerID revoked and returns it; ErrKeyNotFound when ownerID has no such key.
 // The next request presenting it is refused on every replica. The row stays (see Purge); revoking a revoked
-// key keeps its first revocation time.
-func (s *Store) Revoke(ctx context.Context, ownerID, id uuid.UUID) (*Key, error) {
-	return s.queryOne(ctx, "revoke key", revokeKey, id, ownerID, s.now().Truncate(time.Microsecond))
+// key keeps its first revocation time. revoked reports whether this call revoked the key, false when it was
+// revoked before (a retried DELETE, a concurrent revocation that committed first): write the audit entry of a
+// revocation only when it is true.
+func (s *Store) Revoke(ctx context.Context, ownerID, id uuid.UUID) (key *Key, revoked bool, err error) {
+	return s.revoke(ctx, ownerID, id)
 }
 
 // RevokeAny is Revoke for the key id of any owner, for an administrator; ErrKeyNotFound when no key has id.
-func (s *Store) RevokeAny(ctx context.Context, id uuid.UUID) (*Key, error) {
-	return s.queryOne(ctx, "revoke key", revokeKey, id, nil, s.now().Truncate(time.Microsecond))
+func (s *Store) RevokeAny(ctx context.Context, id uuid.UUID) (key *Key, revoked bool, err error) {
+	return s.revoke(ctx, nil, id)
+}
+
+// revoke revokes the key id of owner (a uuid.UUID, or nil for any owner). A key revoked already is read in a
+// second statement, which under READ COMMITTED also sees a revocation that committed while the first waited.
+func (s *Store) revoke(ctx context.Context, owner any, id uuid.UUID) (*Key, bool, error) {
+	key, err := s.queryOne(ctx, "revoke key", revokeKey, id, owner, s.now().Truncate(time.Microsecond))
+	if !errors.Is(err, ErrKeyNotFound) {
+		return key, err == nil, err
+	}
+	key, err = s.queryOne(ctx, "revoke key", selectOwnedKey, id, owner)
+	return key, false, err
 }
 
 // Purge deletes the keys that were revoked, or expired, longer than retention ago and returns how many. Audit
@@ -363,7 +384,7 @@ func (s *Store) Resolve(ctx context.Context, key string) (*auth.Identity, error)
 var _ apikey.Resolver = (*Store)(nil).Resolve
 
 func (s *Store) loadOwner(ctx context.Context, ownerID uuid.UUID) (*auth.Identity, error) {
-	owner, err := s.load(ctx, ownerID)
+	owner, err := s.load(ctx, s.database, ownerID)
 	if errors.Is(err, auth.ErrUnauthenticated) {
 		return nil, err
 	}

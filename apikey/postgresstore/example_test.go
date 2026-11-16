@@ -28,8 +28,8 @@ func ExampleNew() {
 	store, err := postgresstore.New(&postgresstore.Options{
 		Pool:   pool,
 		Prefix: "todo",
-		Load: func(_ context.Context, ownerID uuid.UUID) (*auth.Identity, error) {
-			// look the user up in your own table; a deleted one is &auth.Error{Kind: auth.ErrUnauthenticated}
+		Load: func(_ context.Context, _ postgresstore.Executor, ownerID uuid.UUID) (*auth.Identity, error) {
+			// look the user up in your own table on the executor; a deleted one is &auth.Error{Kind: auth.ErrUnauthenticated}
 			return &auth.Identity{UserID: ownerID, Active: true, Permissions: []auth.Permission{{Resource: auth.AllResources, Access: auth.AccessWrite}}}, nil
 		},
 	})
@@ -62,7 +62,7 @@ func ExampleStore_WithExecutor() {
 		return
 	}
 	defer pool.Close()
-	store, err := postgresstore.New(&postgresstore.Options{Pool: pool, Prefix: "todo", Load: func(_ context.Context, ownerID uuid.UUID) (*auth.Identity, error) {
+	store, err := postgresstore.New(&postgresstore.Options{Pool: pool, Prefix: "todo", Load: func(_ context.Context, _ postgresstore.Executor, ownerID uuid.UUID) (*auth.Identity, error) {
 		return &auth.Identity{UserID: ownerID, Active: true}, nil
 	}})
 	if err != nil {

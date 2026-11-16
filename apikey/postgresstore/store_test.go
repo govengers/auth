@@ -68,7 +68,7 @@ func newFixture(t *testing.T) *fixture {
 	return fixture
 }
 
-func (f *fixture) load(_ context.Context, ownerID uuid.UUID) (*auth.Identity, error) {
+func (f *fixture) load(_ context.Context, _ postgresstore.Executor, ownerID uuid.UUID) (*auth.Identity, error) {
 	identity, found := f.owners[ownerID]
 	if !found {
 		return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "owner deleted"}
@@ -85,7 +85,7 @@ func (f *fixture) issue(t *testing.T, scopes ...auth.Permission) (string, *postg
 
 func TestNew(t *testing.T) {
 	pool := postgres.Pool(t)
-	load := func(context.Context, uuid.UUID) (*auth.Identity, error) { return nil, nil }
+	load := func(context.Context, postgresstore.Executor, uuid.UUID) (*auth.Identity, error) { return nil, nil }
 	testCases := []struct {
 		name      string
 		options   *postgresstore.Options
@@ -218,7 +218,7 @@ func TestResolveRefusals(t *testing.T) {
 	expiring, _, err := fixture.store.Issue(t.Context(), fixture.owner, postgresstore.IssueRequest{Name: "short", Scopes: []auth.Permission{tasksRead}, ExpiresAt: start.Add(time.Minute)})
 	require.NoError(t, err)
 	revoked, revokedKey := fixture.issue(t, tasksRead)
-	_, err = fixture.store.Revoke(t.Context(), fixture.owner, revokedKey.ID)
+	_, _, err = fixture.store.Revoke(t.Context(), fixture.owner, revokedKey.ID)
 	require.NoError(t, err)
 	fixture.now = start.Add(time.Minute)
 	other := uuid.New()
@@ -260,7 +260,7 @@ func TestResolveReportsLoadFailures(t *testing.T) {
 	owner := uuid.New()
 	var loadError error
 	var loaded *auth.Identity
-	store, err := postgresstore.New(&postgresstore.Options{Pool: pool, Prefix: "todo", Load: func(context.Context, uuid.UUID) (*auth.Identity, error) {
+	store, err := postgresstore.New(&postgresstore.Options{Pool: pool, Prefix: "todo", Load: func(context.Context, postgresstore.Executor, uuid.UUID) (*auth.Identity, error) {
 		return loaded, loadError
 	}})
 	require.NoError(t, err)
@@ -314,20 +314,25 @@ func TestListAndRevokeArePerOwner(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, otherKeys)
 
-	_, err = fixture.store.Revoke(t.Context(), other, first.ID)
+	_, _, err = fixture.store.Revoke(t.Context(), other, first.ID)
 	require.ErrorIs(t, err, postgresstore.ErrKeyNotFound, "another owner's key")
-	_, err = fixture.store.Revoke(t.Context(), fixture.owner, uuid.New())
+	_, _, err = fixture.store.Revoke(t.Context(), fixture.owner, uuid.New())
 	require.ErrorIs(t, err, postgresstore.ErrKeyNotFound)
 	fixture.now = start.Add(time.Minute + time.Nanosecond)
-	revoked, err := fixture.store.Revoke(t.Context(), fixture.owner, first.ID)
+	revoked, revokedNow, err := fixture.store.Revoke(t.Context(), fixture.owner, first.ID)
 	require.NoError(t, err)
+	require.True(t, revokedNow, "this call revoked it")
 	require.Equal(t, first.ID, revoked.ID)
 	require.Equal(t, fixture.owner, revoked.OwnerID)
 	require.True(t, start.Add(time.Minute).Equal(revoked.RevokedAt), "truncated to PostgreSQL's precision")
 	fixture.now = start.Add(time.Hour)
-	again, err := fixture.store.Revoke(t.Context(), fixture.owner, first.ID)
+	again, revokedAgain, err := fixture.store.Revoke(t.Context(), fixture.owner, first.ID)
 	require.NoError(t, err, "revoking a revoked key changes nothing")
+	require.False(t, revokedAgain, "revoked before, so no second audit entry")
+	require.Equal(t, first.ID, again.ID)
 	require.True(t, revoked.RevokedAt.Equal(again.RevokedAt), "the first revocation time stays")
+	_, _, err = fixture.store.Revoke(t.Context(), other, first.ID)
+	require.ErrorIs(t, err, postgresstore.ErrKeyNotFound, "another owner's revoked key")
 
 	keys, err = fixture.store.List(t.Context(), fixture.owner)
 	require.NoError(t, err)
@@ -343,13 +348,24 @@ func TestRevokedAndExpiredKeysStayUntilPurged(t *testing.T) {
 	_, active := fixture.issue(t, tasksRead)
 	_, revokedEarly := fixture.issue(t, tasksRead)
 	_, revokedLate := fixture.issue(t, tasksRead)
-	_, expiring, err := fixture.store.Issue(t.Context(), fixture.owner, postgresstore.IssueRequest{Name: "short", Scopes: []auth.Permission{tasksRead}, ExpiresAt: start.Add(time.Hour)})
-	require.NoError(t, err)
-	_, err = fixture.store.Revoke(t.Context(), fixture.owner, revokedEarly.ID)
-	require.NoError(t, err)
+	issueExpiring := func(expiresAt time.Time) *postgresstore.Key {
+		t.Helper()
+		_, key, err := fixture.store.Issue(t.Context(), fixture.owner, postgresstore.IssueRequest{Name: "expiring", Scopes: []auth.Permission{tasksRead}, ExpiresAt: expiresAt})
+		require.NoError(t, err)
+		return key
+	}
+	expiring := issueExpiring(start.Add(time.Hour))
+	revokedBeforeExpiry := issueExpiring(start.Add(365 * 24 * time.Hour))
+	expiredBeforeRevoked := issueExpiring(start.Add(time.Hour))
+	for _, key := range []*postgresstore.Key{revokedEarly, revokedBeforeExpiry} {
+		_, _, err := fixture.store.Revoke(t.Context(), fixture.owner, key.ID)
+		require.NoError(t, err)
+	}
 	fixture.now = start.Add(48 * time.Hour)
-	_, err = fixture.store.Revoke(t.Context(), fixture.owner, revokedLate.ID)
-	require.NoError(t, err)
+	for _, key := range []*postgresstore.Key{revokedLate, expiredBeforeRevoked} {
+		_, _, err := fixture.store.Revoke(t.Context(), fixture.owner, key.ID)
+		require.NoError(t, err)
+	}
 
 	got, err := fixture.store.Get(t.Context(), revokedEarly.ID)
 	require.NoError(t, err)
@@ -360,7 +376,11 @@ func TestRevokedAndExpiredKeysStayUntilPurged(t *testing.T) {
 	require.ErrorIs(t, err, auth.ErrInvalidRequest)
 	purged, err := fixture.store.Purge(t.Context(), 24*time.Hour)
 	require.NoError(t, err)
-	require.Equal(t, int64(2), purged, "revoked and expired more than a day ago")
+	require.Equal(t, int64(4), purged, "ended (the earlier of revoked and expired) more than a day ago")
+	for _, key := range []*postgresstore.Key{revokedBeforeExpiry, expiredBeforeRevoked} {
+		_, err = fixture.store.Get(t.Context(), key.ID)
+		require.ErrorIs(t, err, postgresstore.ErrKeyNotFound, "a key ends at the earlier of its revocation and its expiry")
+	}
 
 	_, err = fixture.store.Get(t.Context(), revokedEarly.ID)
 	require.ErrorIs(t, err, postgresstore.ErrKeyNotFound)
@@ -405,11 +425,16 @@ func TestAdministratorView(t *testing.T) {
 	_, err = fixture.store.Get(t.Context(), uuid.New())
 	require.ErrorIs(t, err, postgresstore.ErrKeyNotFound)
 
-	revoked, err := fixture.store.RevokeAny(t.Context(), second.ID)
+	revoked, revokedNow, err := fixture.store.RevokeAny(t.Context(), second.ID)
 	require.NoError(t, err)
+	require.True(t, revokedNow)
 	require.Equal(t, other, revoked.OwnerID)
 	require.False(t, revoked.RevokedAt.IsZero())
-	_, err = fixture.store.RevokeAny(t.Context(), uuid.New())
+	again, revokedAgain, err := fixture.store.RevokeAny(t.Context(), second.ID)
+	require.NoError(t, err)
+	require.False(t, revokedAgain, "revoked before")
+	require.True(t, revoked.RevokedAt.Equal(again.RevokedAt))
+	_, _, err = fixture.store.RevokeAny(t.Context(), uuid.New())
 	require.ErrorIs(t, err, postgresstore.ErrKeyNotFound)
 }
 
@@ -427,11 +452,19 @@ func singleConnectionPool(t *testing.T) *pgxpool.Pool {
 }
 
 // Every call of a WithExecutor view runs on the caller's transaction: on a pool of one connection, which the
-// transaction holds, none waits for a second, and a rollback takes the key with it.
+// transaction holds, none waits for a second, and a rollback takes the key with it. Load gets the same
+// executor, so Resolve reads an owner the transaction inserted.
 func TestWithExecutorRunsEveryCallOnTheTransaction(t *testing.T) {
 	fixture := newFixture(t)
 	pool := singleConnectionPool(t)
-	store, err := postgresstore.New(&postgresstore.Options{Pool: pool, Prefix: "todo", Load: fixture.load})
+	loadFromUsers := func(ctx context.Context, executor postgresstore.Executor, ownerID uuid.UUID) (*auth.Identity, error) {
+		var username string
+		if err := executor.QueryRow(ctx, `SELECT username FROM users WHERE id = $1`, ownerID).Scan(&username); err != nil {
+			return nil, err
+		}
+		return &auth.Identity{Username: username, Active: true, Permissions: []auth.Permission{allWrite}}, nil
+	}
+	store, err := postgresstore.New(&postgresstore.Options{Pool: pool, Prefix: "todo", Load: loadFromUsers})
 	require.NoError(t, err)
 	postgresstore.SetClock(store, func() time.Time { return fixture.now })
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -439,12 +472,17 @@ func TestWithExecutorRunsEveryCallOnTheTransaction(t *testing.T) {
 	transaction, err := pool.Begin(ctx)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = transaction.Rollback(context.Background()) }) // a no-op after the explicit rollback
+	_, err = transaction.Exec(ctx, `CREATE TABLE users (id uuid PRIMARY KEY, username text NOT NULL)`)
+	require.NoError(t, err)
+	_, err = transaction.Exec(ctx, `INSERT INTO users VALUES ($1, 'ada')`, fixture.owner)
+	require.NoError(t, err)
 	view := store.WithExecutor(transaction)
 
 	text, key, err := view.Issue(ctx, fixture.owner, postgresstore.IssueRequest{Name: "ci", Scopes: []auth.Permission{tasksRead}})
 	require.NoError(t, err)
-	_, err = view.Resolve(ctx, text)
-	require.NoError(t, err, "Resolve and its last-use write")
+	identity, err := view.Resolve(ctx, text)
+	require.NoError(t, err, "Resolve, its Load and its last-use write")
+	require.Equal(t, "ada", identity.Username, "the owner the transaction inserted")
 	keys, err := view.List(ctx, fixture.owner)
 	require.NoError(t, err)
 	require.Len(t, keys, 1)
@@ -454,10 +492,12 @@ func TestWithExecutorRunsEveryCallOnTheTransaction(t *testing.T) {
 	page, err := view.ListAll(ctx, uuid.Nil, 10)
 	require.NoError(t, err)
 	require.Len(t, page, 1)
-	_, err = view.Revoke(ctx, fixture.owner, key.ID)
+	_, revoked, err := view.Revoke(ctx, fixture.owner, key.ID)
 	require.NoError(t, err)
-	_, err = view.RevokeAny(ctx, key.ID)
+	require.True(t, revoked)
+	_, revoked, err = view.RevokeAny(ctx, key.ID)
 	require.NoError(t, err)
+	require.False(t, revoked, "the same transaction revoked it")
 	purged, err := view.Purge(ctx, 0)
 	require.NoError(t, err)
 	require.Equal(t, int64(0), purged, "revoked at start, purged only before it")
@@ -527,7 +567,7 @@ func TestStoreBehindTheAuthenticator(t *testing.T) {
 	}
 
 	require.Equal(t, http.StatusNoContent, send().Code)
-	_, err = fixture.store.Revoke(t.Context(), fixture.owner, key.ID)
+	_, _, err = fixture.store.Revoke(t.Context(), fixture.owner, key.ID)
 	require.NoError(t, err)
 	refused := send()
 	require.Equal(t, http.StatusUnauthorized, refused.Code)
@@ -589,7 +629,7 @@ func TestErrorsKeepThePostgreSQLError(t *testing.T) {
 	requireUndefinedTable(err, "list all keys")
 	_, err = fixture.store.Get(ctx, key.ID)
 	requireUndefinedTable(err, "get key")
-	_, err = fixture.store.Revoke(ctx, fixture.owner, key.ID)
+	_, _, err = fixture.store.Revoke(ctx, fixture.owner, key.ID)
 	requireUndefinedTable(err, "revoke key")
 	_, err = fixture.store.Purge(ctx, time.Hour)
 	requireUndefinedTable(err, "purge keys")

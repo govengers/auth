@@ -278,11 +278,11 @@ func grantPermissions(_ context.Context, identity *auth.Identity) (*auth.Identit
 	return granted, nil
 }
 
-// loadOwner is the key store's Load: the owner's identity as a login would build it. A deleted user's keys stop
-// working at once.
+// loadOwner is the key store's Load: the owner's identity as a login would build it, read on the executor the
+// store runs on (the caller's transaction for a WithExecutor view). A deleted user's keys stop working at once.
 func loadOwner(users *postgresstorage.Storage) postgresstore.Loader {
-	return func(ctx context.Context, ownerID uuid.UUID) (*auth.Identity, error) {
-		user, err := users.GetUserByID(ctx, ownerID)
+	return func(ctx context.Context, executor postgresstore.Executor, ownerID uuid.UUID) (*auth.Identity, error) {
+		user, err := users.WithExecutor(executor).GetUserByID(ctx, ownerID)
 		if errors.Is(err, password.ErrUserNotFound) {
 			return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "key owner deleted"}
 		}
@@ -381,7 +381,7 @@ func (k *keyRoutes) revoke(writer http.ResponseWriter, request *http.Request) {
 		auth.WriteError(writer, &auth.Error{Kind: auth.ErrInvalidRequest, Err: err})
 		return
 	}
-	_, err = k.keys.Revoke(request.Context(), auth.IdentityFrom(request.Context()).UserID, id)
+	_, _, err = k.keys.Revoke(request.Context(), auth.IdentityFrom(request.Context()).UserID, id)
 	switch {
 	case errors.Is(err, postgresstore.ErrKeyNotFound):
 		writer.WriteHeader(http.StatusNotFound)
