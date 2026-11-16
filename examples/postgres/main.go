@@ -50,7 +50,7 @@ const (
 )
 
 // migrations stand in for the application's goose migrations: each library constant is one migration.
-var migrations = []string{postgresbackend.MigrationV1, postgresstorage.MigrationV1, postgresstore.MigrationV1}
+var migrations = []string{postgresbackend.MigrationV1, postgresstorage.MigrationV1, postgresstore.MigrationV1, postgresstore.MigrationV2}
 
 // fullAccess is what every user may do in this demo; a key's scopes narrow it.
 var fullAccess = []auth.Permission{{Resource: auth.AllResources, Access: auth.AccessWrite}}
@@ -278,11 +278,11 @@ func grantPermissions(_ context.Context, identity *auth.Identity) (*auth.Identit
 	return granted, nil
 }
 
-// loadOwner is the key store's Load: the owner's identity as a login would build it. A deleted user's keys stop
-// working at once.
+// loadOwner is the key store's Load: the owner's identity as a login would build it, read on the executor the
+// store runs on (the caller's transaction for a WithExecutor view). A deleted user's keys stop working at once.
 func loadOwner(users *postgresstorage.Storage) postgresstore.Loader {
-	return func(ctx context.Context, ownerID uuid.UUID) (*auth.Identity, error) {
-		user, err := users.GetUserByID(ctx, ownerID)
+	return func(ctx context.Context, executor postgresstore.Executor, ownerID uuid.UUID) (*auth.Identity, error) {
+		user, err := users.WithExecutor(executor).GetUserByID(ctx, ownerID)
 		if errors.Is(err, password.ErrUserNotFound) {
 			return nil, &auth.Error{Kind: auth.ErrUnauthenticated, Reason: "key owner deleted"}
 		}
@@ -333,6 +333,8 @@ type keyBody struct {
 	Name   string            `json:"name"`
 	Scopes []auth.Permission `json:"scopes"`
 	Key    string            `json:"key,omitempty"` // only in the answer to POST
+	// RevokedAt is set once the key is revoked; the list keeps revoked keys (see postgresstore.Store.Purge).
+	RevokedAt *time.Time `json:"revokedAt,omitempty"`
 }
 
 // issue requires Content-Type application/json: a page on another origin cannot send it without a CORS
@@ -366,6 +368,9 @@ func (k *keyRoutes) list(writer http.ResponseWriter, request *http.Request) {
 	listed := make([]keyBody, len(keys))
 	for index, key := range keys {
 		listed[index] = keyBody{ID: key.ID, Name: key.Name, Scopes: key.Scopes}
+		if !key.RevokedAt.IsZero() {
+			listed[index].RevokedAt = &key.RevokedAt
+		}
 	}
 	writeJSON(writer, http.StatusOK, listed)
 }
@@ -376,7 +381,7 @@ func (k *keyRoutes) revoke(writer http.ResponseWriter, request *http.Request) {
 		auth.WriteError(writer, &auth.Error{Kind: auth.ErrInvalidRequest, Err: err})
 		return
 	}
-	err = k.keys.Revoke(request.Context(), auth.IdentityFrom(request.Context()).UserID, id)
+	_, _, err = k.keys.Revoke(request.Context(), auth.IdentityFrom(request.Context()).UserID, id)
 	switch {
 	case errors.Is(err, postgresstore.ErrKeyNotFound):
 		writer.WriteHeader(http.StatusNotFound)

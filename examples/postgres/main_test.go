@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/govengers/postgrestest"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
@@ -61,7 +62,9 @@ func TestServer(t *testing.T) {
 
 	require.Equal(t, http.StatusNoContent, send(t, browser, http.MethodDelete, replicaOne.URL+"/api/keys/"+key.ID.String(), "").status)
 	require.Equal(t, http.StatusUnauthorized, send(t, script, http.MethodGet, replicaTwo.URL+"/api/tasks", "").status)
-	require.Equal(t, http.StatusNotFound, send(t, browser, http.MethodDelete, replicaOne.URL+"/api/keys/"+key.ID.String(), "").status)
+	require.Equal(t, http.StatusNoContent, send(t, browser, http.MethodDelete, replicaOne.URL+"/api/keys/"+key.ID.String(), "").status, "revoking again changes nothing")
+	require.Equal(t, http.StatusNotFound, send(t, browser, http.MethodDelete, replicaOne.URL+"/api/keys/"+uuid.NewString(), "").status)
+	require.Contains(t, send(t, browser, http.MethodGet, replicaOne.URL+"/api/keys", "").body, `"revokedAt":`, "a revoked key stays listed")
 
 	require.Equal(t, http.StatusNoContent, send(t, browser, http.MethodPost, replicaTwo.URL+"/auth/password/logout", "").status)
 	require.Equal(t, http.StatusUnauthorized, send(t, browser, http.MethodGet, replicaOne.URL+"/api/tasks", "").status, "logged out on every replica")

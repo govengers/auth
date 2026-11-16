@@ -40,6 +40,8 @@ The rules agents and humans get wrong most often, one line each with the page th
 - The `MigrationV1` constants of the `postgres*` packages run in your goose migrations; nothing creates the tables at startup. [Sessions](Sessions.md#backends)
 - Mount a key issuing route behind the session Guard only: behind `apikey` too, a key could mint a key with wider scopes than its own. [API-Keys](API-Keys.md#per-user-keys-on-postgresql)
 - A `postgresstore` key without the scope `*:write` drops the owner's roles: a read-only key of an admin is not an admin. [API-Keys](API-Keys.md#per-user-keys-on-postgresql)
+- `postgresstore.Revoke` keeps the row (`RevokedAt`) so audit entries naming the key ID still find the owner; call `Purge(ctx, retention)` from a job to delete ended keys. Run `MigrationV2` after `MigrationV1`. [API-Keys](API-Keys.md#per-user-keys-on-postgresql)
+- `WithExecutor(tx)` of `postgresstore` and `postgresstorage` joins your transaction: a database error inside it aborts the transaction, and its rollback undoes the store's writes too. Keep the password provider on the storage itself. [Password](Password.md#storage-on-postgresql)
 - `postgresstore` scopes bind `HasPermission` only: a `tasks:read` key still passes `IsUser` and `HasUserID(owner)`. Combine ownership checks with `HasPermission` on every route a key may reach. [API-Keys](API-Keys.md#per-user-keys-on-postgresql)
 
 ## Known limits

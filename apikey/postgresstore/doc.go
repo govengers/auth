@@ -4,10 +4,18 @@
 //
 // A key is "<prefix>_<id>.<secret>", shown once at Issue. The table holds the SHA-256 of the 32 random
 // secret bytes, never the secret: a key of that entropy needs no slow hash, and one indexed lookup by id
-// plus a constant-time comparison is all a request costs. Revoke deletes the row, so the next request with
-// the key is refused on every replica; nothing is cached.
+// plus a constant-time comparison is all a request costs. Revoke marks the row revoked, so the next request
+// with the key is refused on every replica; nothing is cached. The row stays, so the key ID an audit entry
+// names as actor still leads to its owner (Get), until Purge deletes it after the application's retention.
 //
-// Nothing runs DDL at startup: MigrationV1 holds the table for the application's own goose migrations.
-// The package never logs and never starts goroutines. Errors of pgx are reported by message only. The Store
-// is safe for concurrent use.
+// Every statement runs on Options.Pool, or on the caller's transaction through Store.WithExecutor: a key is
+// issued or revoked in the same commit as the application's own rows and audit entry. Revoke reports whether
+// the call revoked the key, so a retried or concurrent revocation writes no second audit entry.
+//
+// Nothing runs DDL at startup: MigrationV1 and MigrationV2 hold the table for the application's own goose
+// migrations. The package never logs and never starts goroutines. A database error keeps pgx's error in its
+// chain, so a caller maps it (errors.As with *pgconn.PgError: a serialization failure to retry, for example);
+// that chain is part of the API. Map on its Code and ConstraintName and never log or report its Detail: for a
+// NOT NULL or CHECK violation PostgreSQL puts the whole failing row there, the key's secret hash included. The
+// Store is safe for concurrent use; a WithExecutor view on a transaction or a connection is not.
 package postgresstore

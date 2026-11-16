@@ -74,13 +74,13 @@ Complete, tested servers: [password](examples/password/main.go), [password, sess
 | [`session/redisbackend`](docs/wiki/Sessions.md#backends) | session backend on Redis, shared by replicas |
 | [`session/postgresbackend`](docs/wiki/Sessions.md#backends) | session backend on PostgreSQL, shared by replicas, with `Sweep` |
 | [`password`](docs/wiki/Password.md) | password login, TOTP, registration; you implement `Storage` |
-| [`password/postgresstorage`](docs/wiki/Password.md#storage-on-postgresql) | `Storage` on PostgreSQL, optional sealing of TOTP secrets |
+| [`password/postgresstorage`](docs/wiki/Password.md#storage-on-postgresql) | `Storage` on PostgreSQL, optional sealing of TOTP secrets, in your transaction with `WithExecutor` |
 | [`password/passwordtest`](docs/wiki/Password.md#storage) | conformance suite for your own `Storage` |
 | [`oidc`](docs/wiki/OIDC.md) | OIDC login and logout |
 | [`oidc/keycloak`](docs/wiki/OIDC.md#keycloak-enrichment) | Keycloak Admin API enrichment as an `OnLogin` hook |
 | [`github`](docs/wiki/GitHub.md) | GitHub OAuth with teams and an API client for the user |
 | [`apikey`](docs/wiki/API-Keys.md) | static and application-issued API keys |
-| [`apikey/postgresstore`](docs/wiki/API-Keys.md#per-user-keys-on-postgresql) | per-owner keys on PostgreSQL: issue, list, revoke, `Resolve` |
+| [`apikey/postgresstore`](docs/wiki/API-Keys.md#per-user-keys-on-postgresql) | per-owner keys on PostgreSQL: issue, list, revoke (kept for the audit until `Purge`), admin view, `Resolve`, in your transaction with `WithExecutor` |
 | [`jwt`](docs/wiki/JWT.md) | RS512 `Signer` with JWKS, `Verifier` with middleware |
 | [`authorization`](docs/wiki/Authorization.md) | `Check` primitives and combinators |
 | [`ginadapter`](docs/wiki/Gin.md) | net/http middleware and routes on gin, `Require`, wide-event `Observe` |

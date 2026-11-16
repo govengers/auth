@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/govengers/postgrestest"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
@@ -96,21 +98,142 @@ func TestCreateUserRefusesAUserWithoutUsernameAndEmail(t *testing.T) {
 
 	require.ErrorContains(t, err, "postgres password storage: create user")
 	require.NotErrorIs(t, err, password.ErrUserExists)
+	var postgresError *pgconn.PgError
+	require.ErrorAs(t, err, &postgresError)
+	require.Equal(t, "23514", postgresError.Code, "the table's CHECK")
 }
 
-func TestErrorsAreReportedWithoutTheirChain(t *testing.T) {
+// requirePostgresError asserts that err names operation and keeps PostgreSQL's error with code.
+func requirePostgresError(t *testing.T, err error, operation, code string) {
+	t.Helper()
+	require.ErrorContains(t, err, "postgres password storage: "+operation)
+	var postgresError *pgconn.PgError
+	require.ErrorAs(t, err, &postgresError)
+	require.Equal(t, code, postgresError.Code)
+}
+
+// A database error keeps pgx's error in its chain (part of the API), so the application maps it.
+func TestErrorsKeepThePostgreSQLError(t *testing.T) {
 	pool := postgres.Pool(t)
-	storage, err := postgresstorage.New(&postgresstorage.Options{Pool: pool})
+	storage := storageOn(t, pool, newSealer(t, newKey))
+	_, err := pool.Exec(t.Context(), `DROP TABLE govengers_auth_password_credentials`)
 	require.NoError(t, err)
-	pool.Close()
-	ctx := context.Background()
+	ctx := t.Context()
+	id := uuid.New()
+	username := "ada"
+
+	requirePostgresError(t, storage.CreateUser(ctx, &password.User{ID: id, Username: &username, PasswordHash: "hash"}), "create user", "42P01")
+	_, err = storage.GetUserByID(ctx, id)
+	requirePostgresError(t, err, "read user", "42P01")
+	_, err = storage.ConsumeTOTPAttempt(ctx, id, 5)
+	requirePostgresError(t, err, "consume TOTP attempt", "42P01")
+	_, err = storage.ConsumeTOTPStep(ctx, id, time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC))
+	requirePostgresError(t, err, "consume TOTP step", "42P01")
+	requirePostgresError(t, storage.ClearTOTP(ctx, id), "clear TOTP", "42P01")
+	_, err = storage.ResealTOTPSecrets(ctx)
+	requirePostgresError(t, err, "reseal TOTP secrets: read", "42P01")
+}
+
+// The application's profile table referenced by the credentials: a missing profile is the foreign key's
+// error, kept in the chain.
+func TestCreateUserKeepsTheForeignKeyError(t *testing.T) {
+	pool := postgres.Pool(t)
+	for _, statement := range []string{
+		`CREATE TABLE users (id uuid PRIMARY KEY)`,
+		`ALTER TABLE govengers_auth_password_credentials ADD FOREIGN KEY (user_id) REFERENCES users (id)`,
+	} {
+		_, err := pool.Exec(t.Context(), statement)
+		require.NoError(t, err)
+	}
+	username := "ada"
+
+	err := storageOn(t, pool, nil).CreateUser(t.Context(), &password.User{ID: uuid.New(), Username: &username, PasswordHash: "hash"})
+
+	requirePostgresError(t, err, "create user", "23503")
+}
+
+// singleConnectionPool is a pool that holds at most one connection: a statement that does not run on the
+// transaction holding it waits for the context's deadline.
+func singleConnectionPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	configuration, err := pgxpool.ParseConfig(postgres.Database(t))
+	require.NoError(t, err)
+	configuration.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(t.Context(), configuration)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// Every method of a WithExecutor view runs on the caller's transaction: on a pool of one connection, which the
+// transaction holds, none waits for a second, and a rollback takes the user with it.
+func TestWithExecutorRunsEveryCallOnTheTransaction(t *testing.T) {
+	pool := singleConnectionPool(t)
+	storage := storageOn(t, pool, newSealer(t, newKey))
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	transaction, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = transaction.Rollback(context.Background()) }) // a no-op after the explicit rollback
+	view := storage.WithExecutor(transaction)
+	username, email := "ada", "ada@example.com"
 	id := uuid.New()
 
+	require.NoError(t, view.CreateUser(ctx, &password.User{ID: id, Username: &username, Email: &email, PasswordHash: "old"}))
+	require.ErrorIs(t, view.CreateUser(ctx, &password.User{ID: uuid.New(), Username: &username, PasswordHash: "hash"}), password.ErrUserExists)
+	_, err = view.GetUserByUsername(ctx, username)
+	require.NoError(t, err, "the transaction is still usable after ErrUserExists")
+	_, err = view.GetUserByEmail(ctx, email)
+	require.NoError(t, err)
+	require.NoError(t, view.UpdatePasswordHash(ctx, id, "old", "new"))
+	remaining, err := view.ConsumeTOTPAttempt(ctx, id, 5)
+	require.NoError(t, err)
+	require.Equal(t, 4, remaining)
+	require.NoError(t, view.ResetTOTPAttempts(ctx, id))
+	set, err := view.SetTOTP(ctx, id, totpSecret, []string{"code"})
+	require.NoError(t, err)
+	require.True(t, set)
+	consumed, err := view.ConsumeTOTPStep(ctx, id, time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.True(t, consumed)
+	consumed, err = view.ConsumeBackupCode(ctx, id, "code")
+	require.NoError(t, err)
+	require.True(t, consumed)
+	changed, err := view.ResealTOTPSecrets(ctx)
+	require.NoError(t, err)
+	require.Zero(t, changed, "sealed with the primary key already")
+	require.NoError(t, view.ClearTOTP(ctx, id))
+	require.ErrorIs(t, view.ResetTOTPAttempts(ctx, uuid.New()), password.ErrUserNotFound, "the user lookup runs on the transaction too")
+	user, err := view.GetUserByID(ctx, id)
+	require.NoError(t, err)
+	require.Equal(t, "new", user.PasswordHash)
+	require.NoError(t, transaction.Rollback(ctx))
+
 	_, err = storage.GetUserByID(ctx, id)
-	require.ErrorContains(t, err, "postgres password storage: read user")
-	_, err = storage.ConsumeTOTPAttempt(ctx, id, 5)
-	require.ErrorContains(t, err, "postgres password storage: consume TOTP attempt")
-	_, err = storage.ConsumeTOTPStep(ctx, id, time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC))
-	require.ErrorContains(t, err, "postgres password storage: consume TOTP step")
-	require.ErrorContains(t, storage.ClearTOTP(ctx, id), "postgres password storage: clear TOTP")
+	require.ErrorIs(t, err, password.ErrUserNotFound, "the user rolled back with the transaction")
+	_, err = storage.WithExecutor(nil).GetUserByID(ctx, id)
+	require.ErrorIs(t, err, password.ErrUserNotFound, "a nil executor is the pool")
+}
+
+// Credentials and the application's profile row commit together.
+func TestCreateUserCommitsWithTheApplicationsRows(t *testing.T) {
+	pool := postgres.Pool(t)
+	_, err := pool.Exec(t.Context(), `CREATE TABLE users (id uuid PRIMARY KEY REFERENCES govengers_auth_password_credentials (user_id))`)
+	require.NoError(t, err)
+	storage := storageOn(t, pool, nil)
+	username := "ada"
+	id := uuid.New()
+	transaction, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = transaction.Rollback(context.Background()) }) // a no-op after the commit
+
+	require.NoError(t, storage.WithExecutor(transaction).CreateUser(t.Context(), &password.User{ID: id, Username: &username, PasswordHash: "hash"}))
+	_, err = transaction.Exec(t.Context(), `INSERT INTO users (id) VALUES ($1)`, id)
+	require.NoError(t, err, "the profile's foreign key sees the uncommitted credentials")
+	_, err = storage.GetUserByID(t.Context(), id)
+	require.ErrorIs(t, err, password.ErrUserNotFound, "not visible before the commit")
+	require.NoError(t, transaction.Commit(t.Context()))
+
+	_, err = storage.GetUserByID(t.Context(), id)
+	require.NoError(t, err)
 }
