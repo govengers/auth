@@ -2,11 +2,13 @@ package session_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"time"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/session"
@@ -196,7 +198,14 @@ func ExampleImpersonator() {
 	impersonating := httptest.NewRecorder()
 	serveMux.ServeHTTP(impersonating, withCookies("/api/me", login))
 
-	fmt.Print(impersonating.Body.String())
+	var response auth.IdentityResponse
+	if err := json.Unmarshal(impersonating.Body.Bytes(), &response); err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Println(response.Subject, "impersonated by", response.Impersonator.Subject)
+	fmt.Println("ends in", time.Until(response.ImpersonationEndsAt).Round(time.Hour)) // MaximumDuration, default 1 h
 	// Output:
-	// {"provider":"password","subject":"user-2","username":"ada","active":true,"roles":[],"impersonator":{"provider":"password","subject":"admin-1","username":"grace","active":true,"roles":["admin"]}}
+	// user-2 impersonated by admin-1
+	// ends in 1h0m0s
 }
