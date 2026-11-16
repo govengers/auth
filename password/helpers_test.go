@@ -368,6 +368,13 @@ func (s *failingStorage) GetUserByUsername(ctx context.Context, username string)
 	return s.MemoryStorage.GetUserByUsername(ctx, username)
 }
 
+func (s *failingStorage) GetUserByEmail(ctx context.Context, email string) (*User, error) {
+	if err := s.fail("GetUserByEmail"); err != nil {
+		return nil, err
+	}
+	return s.MemoryStorage.GetUserByEmail(ctx, email)
+}
+
 func (s *failingStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*User, error) {
 	if err := s.fail("GetUserByID"); err != nil {
 		return nil, err

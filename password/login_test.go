@@ -138,6 +138,26 @@ func TestLoginStorageFailure(t *testing.T) {
 	require.ErrorIs(t, outcome.Err, errStorageDown)
 }
 
+// TestLoginWithAnIdentifierNoUserCanHave uses a storage whose lookup fails: the provider must answer an identifier
+// with a NUL byte itself, as an unknown user, whatever Storage the application wrote.
+func TestLoginWithAnIdentifierNoUserCanHave(t *testing.T) {
+	testCases := []struct{ identifier, lookup string }{
+		{identifier: "ad\x00a", lookup: "GetUserByUsername"},
+		{identifier: "ad\x00a@example.com", lookup: "GetUserByEmail"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.identifier, func(t *testing.T) {
+			fixture := newFixture(t, Options{})
+			fixture.failStorage(testCase.lookup)
+
+			recorder := fixture.newClient(t).login(testCase.identifier)
+
+			requireRefusal(t, recorder, http.StatusUnauthorized, codeInvalidCredentials)
+			require.ErrorIs(t, fixture.outcomes.last(t).Err, ErrUserNotFound)
+		})
+	}
+}
+
 func TestOnLogin(t *testing.T) {
 	testCases := []struct {
 		name       string

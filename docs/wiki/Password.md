@@ -37,7 +37,7 @@ From [examples/password/main.go](../../examples/password/main.go) (tested by its
 You implement [`password.Storage`](../../password/storage.go) (11 methods) on your users table, or use the PostgreSQL one below; `password.NewMemoryStorage()` is for tests and examples only. Contracts that matter:
 
 - Usernames and emails are unique and matched ignoring case (unique indexes on `lower(...)`); a duplicate is `password.ErrUserExists` from the unique constraint, not from a lookup before the insert.
-- The provider passes login identifiers as typed. One no user can have (a NUL byte, invalid UTF-8; PostgreSQL refuses both as `text`) is `password.ErrUserNotFound`, not an error, or every scanner probing the login form shows up as a 500. Registration caps emails at 254 bytes (RFC 5321), which also keeps them below the btree row limit.
+- The provider passes login identifiers as typed, always valid UTF-8 (JSON decoding replaces invalid bytes). One with a NUL byte, which PostgreSQL refuses as `text`, never reaches your storage: the provider answers it as an unknown user, so a scanner probing the login form gets a 401, not a 500. Registration caps emails at 254 bytes (RFC 5321), which also keeps them below the btree row limit.
 - `UpdatePasswordHash`, `ConsumeTOTPAttempt`, `ConsumeTOTPStep`, `ConsumeBackupCode` and `SetTOTP` are each one atomic statement (compare-and-swap); `SetTOTP` returns `(bool, error)` and enables only while TOTP is off.
 - Not found is `password.ErrUserNotFound`.
 - SQL for every method: [docs/migration.md](../migration.md#recipe). Create users with `password.Hash(plain, password.DefaultParameters())`; keep roles and flags in your own columns.

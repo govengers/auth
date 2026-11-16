@@ -198,6 +198,7 @@ func (s *Storage) requireUser(ctx context.Context, id uuid.UUID) error {
 
 // queryIdentifier looks up a login identifier as typed: one PostgreSQL text cannot hold (a NUL byte, invalid
 // UTF-8) names no stored user, so it is password.ErrUserNotFound without a query instead of an encoding error.
+// The provider filters NUL bytes already; this covers application code calling the lookups directly.
 func (s *Storage) queryIdentifier(ctx context.Context, statement, identifier string) (*password.User, error) {
 	if !utf8.ValidString(identifier) || strings.ContainsRune(identifier, 0) {
 		return nil, password.ErrUserNotFound

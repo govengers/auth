@@ -68,6 +68,17 @@ ALTER TABLE govengers_auth_password_credentials
 	require.ErrorIs(t, storage.CreateUser(t.Context(), &password.User{ID: uuid.New(), Username: &lower, PasswordHash: "hash"}), password.ErrUserExists)
 }
 
+// The provider filters NUL bytes itself; application code calling the lookups directly gets the same answer.
+func TestLookupOfAnIdentifierTextCannotHoldFindsNobody(t *testing.T) {
+	storage := newStorage(t)
+	for _, identifier := range []string{"ad\x00a", "ad\x00a@example.com", "caf\xff", "caf\xff@example.com"} {
+		_, err := storage.GetUserByUsername(t.Context(), identifier)
+		require.ErrorIs(t, err, password.ErrUserNotFound, "username %q", identifier)
+		_, err = storage.GetUserByEmail(t.Context(), identifier)
+		require.ErrorIs(t, err, password.ErrUserNotFound, "email %q", identifier)
+	}
+}
+
 func TestCreateUserRefusesAUserWithoutUsernameAndEmail(t *testing.T) {
 	storage := newStorage(t)
 

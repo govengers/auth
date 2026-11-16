@@ -96,14 +96,6 @@ func testLookups(t *testing.T, storage password.Storage) {
 	require.ErrorIs(t, err, password.ErrUserNotFound)
 	_, err = storage.GetUserByID(t.Context(), uuid.New())
 	require.ErrorIs(t, err, password.ErrUserNotFound)
-
-	// The provider passes identifiers as typed: one no user can have is not found, never an error.
-	for _, identifier := range []string{"ad\x00a", "ad\x00a@example.com", "caf\xff", "caf\xff@example.com"} {
-		_, err = storage.GetUserByUsername(t.Context(), identifier)
-		require.ErrorIs(t, err, password.ErrUserNotFound, "username %q", identifier)
-		_, err = storage.GetUserByEmail(t.Context(), identifier)
-		require.ErrorIs(t, err, password.ErrUserNotFound, "email %q", identifier)
-	}
 }
 
 func testSharesNothingWithCallers(t *testing.T, storage password.Storage) {
