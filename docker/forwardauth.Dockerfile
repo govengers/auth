@@ -1,6 +1,6 @@
 # Build context is the repository root: docker build -f docker/forwardauth.Dockerfile .
 # Base images are pinned by digest (the tag stays readable); Dependabot proposes the bumps.
-FROM --platform=$BUILDPLATFORM golang:1.26@sha256:670bb5aa5349ae03b8516764718486f4f16399134bdc9acd0c46a23f043ab05c AS build
+FROM --platform=$BUILDPLATFORM golang:1.27@sha256:205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
