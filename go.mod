@@ -12,7 +12,7 @@ require (
 	github.com/govengers/postgrestest v0.1.0
 	github.com/govengers/telemetry v0.1.1
 	github.com/govengers/wide-event-logger v1.0.0
-	github.com/jackc/pgx/v5 v5.12.0
+	github.com/jackc/pgx/v5 v5.13.0
 	github.com/lestrrat-go/jwx/v3 v3.4.0
 	github.com/pquerna/otp v1.5.0
 	github.com/prometheus/client_golang v1.25.0
